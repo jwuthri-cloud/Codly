@@ -1507,6 +1507,23 @@ pub enum EventKind {
         description: String,
         status: String,
     },
+    /// What a subagent does while it works. `call_id` is the tool call that started it, as in
+    /// `SubAgent`. Each other field is set when the CLI just said it; one left out keeps what
+    /// an earlier event said.
+    SubAgentProgress {
+        call_id: String,
+        /// Its kind ("general-purpose", "Explore").
+        name: Option<String>,
+        /// What it does now, in the CLI's words ("Running the tests").
+        step: Option<String>,
+        /// A tool call of its own: the `ToolStarted` with this id came just before.
+        tool_call_id: Option<String>,
+        /// The tool calls it made and the tokens it used so far.
+        tool_uses: Option<i64>,
+        tokens: Option<i64>,
+        /// What it reported when it was done.
+        report: Option<String>,
+    },
     Compacting {
         pre_tokens: Option<i64>,
         post_tokens: Option<i64>,
@@ -1633,6 +1650,7 @@ impl EventKind {
             EventKind::RateLimit { .. } => "rate_limit",
             EventKind::Retrying { .. } => "retrying",
             EventKind::SubAgent { .. } => "sub_agent",
+            EventKind::SubAgentProgress { .. } => "sub_agent_progress",
             EventKind::Compacting { .. } => "compacting",
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::Error { .. } => "error",

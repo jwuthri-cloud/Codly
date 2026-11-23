@@ -398,7 +398,7 @@ impl Actor {
     }
 
     async fn on_json(&mut self, v: Value, init_id: &str, ready: &mut Option<oneshot::Sender<anyhow::Result<()>>>) {
-        if v["type"] == "control_response" {
+        if v["type"] == "control_response" && !self.norm.asked(&v["response"]) {
             let resp = &v["response"];
             if resp["request_id"].as_str() == Some(init_id) {
                 let Some(r) = ready.take() else { return };
@@ -567,7 +567,24 @@ struct ToolInfo {
     input: Value,
     activity: ActivityKind,
     started: Instant,
+    /// The subagent that made this call (the id of the `Agent` call that started it).
+    helper: Option<String>,
 }
+
+/// A subagent: a helper the agent started with one `Agent` tool call. Its own lines carry
+/// that call's id as `parent_tool_use_id`, and `system/task_*` lines tell how it goes
+/// (cli-claude-stream-json-2.1.311 §4).
+struct Helper {
+    description: String,
+    /// Its kind ("general-purpose"), once a `SubAgentProgress` said it.
+    name: Option<String>,
+    /// It works on after its `Agent` call returned, also past the end of the turn.
+    background: bool,
+    done: bool,
+}
+
+/// The id of the one `mcp_status` request a run sends (the actor's own ids are `codly-<n>`).
+const MCP_STATUS_REQUEST: &str = "codly-mcp-status";
 
 struct PendingApproval {
     request_id: String,
@@ -698,11 +715,18 @@ pub struct ClaudeNormalizer {
     pending_text: Vec<(String, String)>,
     tools: HashMap<String, ToolInfo>,
     tools_seen: HashSet<String>,
+    /// The subagents of this run, by the id of the tool call that started each.
+    helpers: HashMap<String, Helper>,
+    /// The user's MCP servers that `system/init` gave as failed, until `mcp_status` says why.
+    mcp_failed: Vec<String>,
     plan: Vec<PlanItem>,
     pending_creates: HashMap<String, String>,
     approvals: HashMap<Id, PendingApproval>,
     /// Tool calls denied in Codly: Claude's `permission_denied` line for them says nothing new.
     user_denied: HashSet<String>,
+    /// Tool calls of this turn that Codly was asked about (a card), or whose denial a
+    /// `permission_denied` line named: the result's `permission_denials` adds nothing on them.
+    denials_known: HashSet<String>,
     /// The API failure Claude last retried, until an API call answers.
     api_failure: Option<ApiFailure>,
     /// The last error and the last message of this turn: a failed turn says its reason once.
@@ -716,7 +740,8 @@ pub struct ClaudeNormalizer {
     last_context: Option<i64>,
     /// Set by the actor when Codly interrupted the turn (maps the next result to Interrupted).
     pub interrupt_requested: bool,
-    /// Control responses the actor must write (e.g. errors for unsupported requests).
+    /// Lines the actor must write: answers to the CLI's requests (e.g. errors for unsupported
+    /// ones) and the normalizer's own `mcp_status` request.
     pub outbox: Vec<Value>,
 }
 
@@ -738,10 +763,13 @@ impl ClaudeNormalizer {
             pending_text: Vec::new(),
             tools: HashMap::new(),
             tools_seen: HashSet::new(),
+            helpers: HashMap::new(),
+            mcp_failed: Vec::new(),
             plan: Vec::new(),
             pending_creates: HashMap::new(),
             approvals: HashMap::new(),
             user_denied: HashSet::new(),
+            denials_known: HashSet::new(),
             api_failure: None,
             turn_error: None,
             turn_text: None,
@@ -790,6 +818,13 @@ impl ClaudeNormalizer {
     /// was retrying, else the result's HTTP status, else the CLI's own words (`result`, or
     /// `errors` without its diagnostic lines).
     fn failure_reason(&self, v: &Value, retried: Option<ApiFailure>) -> Option<String> {
+        // The spending limit of the process (`--max-budget-usd`, 2.1.311 §6): every later
+        // turn of this run ends the same way, at once.
+        if v["subtype"] == "error_max_budget_usd" {
+            let said = cli_errors(v);
+            let detail = if said.is_empty() { String::new() } else { format!(": {said}") };
+            return Some(format!("Claude Code reached its spending limit, so it does no more work in this run{detail}"));
+        }
         let raw = v["result"].as_str().map(str::trim).filter(|r| !r.is_empty());
         let failure = retried
             .or_else(|| ApiFailure::of("", v["api_error_status"].as_i64()))
@@ -800,9 +835,7 @@ impl ClaudeNormalizer {
         if let Some(r) = raw {
             return Some(r.to_string());
         }
-        let errors: Vec<&str> =
-            v["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|e| !e.starts_with("[ede_diagnostic]")).collect();
-        (!errors.is_empty()).then(|| errors.join("; "))
+        Some(cli_errors(v)).filter(|e| !e.is_empty())
     }
 
     /// The run's totals with this turn's API calls so far, as the stream reported them.
@@ -873,7 +906,7 @@ impl ClaudeNormalizer {
             "control_cancel_request" => self.on_cancel(v, &mut out),
             // elapsed-time heartbeat only; Claude has no live command output (CRITIQUE G7)
             "tool_progress" => {}
-            "control_response" => {}
+            "control_response" => self.on_control_response(&v["response"], &mut out),
             other => out.push(EventKind::Unknown { raw_type: if other.is_empty() { "untyped".into() } else { other.into() } }),
         }
         out
@@ -914,7 +947,8 @@ impl ClaudeNormalizer {
                 // The denied call still ends as a failed tool result: this line says that
                 // Claude Code refused it by itself (a rule, a hook, its permission mode). A
                 // call denied in Codly needs no second line.
-                if !v["tool_use_id"].as_str().is_some_and(|id| self.user_denied.contains(id)) {
+                let call = v["tool_use_id"].as_str();
+                if !call.is_some_and(|id| self.user_denied.contains(id)) {
                     let tool = v["tool_name"].as_str().filter(|t| !t.is_empty()).unwrap_or("a tool");
                     let message = match v["message"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
                         Some(m) => format!("Claude Code denied {tool} without asking: {m}"),
@@ -922,25 +956,22 @@ impl ClaudeNormalizer {
                     };
                     self.problem(message, false, out);
                 }
+                self.denials_known.extend(call.map(str::to_owned));
             }
             "model_refusal_fallback" => self.problem("The model refused this request: Claude Code goes on with its fallback model".into(), false, out),
             "model_refusal_no_fallback" => {
                 self.problem("The model refused this request, and Claude Code has no fallback model to go on with".into(), false, out)
             }
             // Bookkeeping the timeline has no use for (the user's hooks, command lists, the
-            // session title, the CLI's own summaries): known lines, kept in the raw log only.
+            // session title, the CLI's own summaries, a task's change of state that its
+            // `task_notification` says again): known lines, kept in the raw log only.
             "hook_started" | "hook_progress" | "hook_response" | "commands_changed" | "session_title_changed" | "background_tasks_changed"
-            | "files_persisted" | "post_turn_summary" => {}
+            | "files_persisted" | "post_turn_summary" | "task_updated" => {}
             "compact_boundary" => {
                 let m = &v["compact_metadata"];
                 out.push(EventKind::Compacting { pre_tokens: m["pre_tokens"].as_i64(), post_tokens: m["post_tokens"].as_i64() });
             }
-            "task_started" | "task_progress" | "task_updated" | "task_notification" => {
-                let call_id = v["tool_use_id"].as_str().or(v["task_id"].as_str()).unwrap_or_default().to_string();
-                let status = v["status"].as_str().unwrap_or(subtype.trim_start_matches("task_")).to_string();
-                let description = v["description"].as_str().or(v["summary"].as_str()).unwrap_or_default().to_string();
-                out.push(EventKind::SubAgent { call_id, description, status });
-            }
+            "task_started" | "task_progress" | "task_notification" => self.on_task(subtype, v, out),
             "thinking_tokens" => self.set_status(AgentStatus::Thinking, out),
             "session_state_changed" => match v["state"].as_str() {
                 Some("requires_action") => self.set_status(AgentStatus::WaitingApproval, out),
@@ -980,8 +1011,9 @@ impl ClaudeNormalizer {
             self.problem(message, false, out);
         }
         // The user's own servers (Connections, their Claude setup) that did not start: one
-        // line for all of them. A server that still connects, or that waits for a sign-in the
-        // user never made, is no failure of this run.
+        // line for all of them, once `mcp_status` has said why (the init line gives no
+        // reason). A server that still connects, or that waits for a sign-in the user never
+        // made, is no failure of this run.
         let mut failed = Vec::new();
         for s in v["mcp_servers"].as_array().into_iter().flatten() {
             let status = s["status"].as_str().unwrap_or("unavailable");
@@ -990,11 +1022,90 @@ impl ClaudeNormalizer {
                     self.problem(format!("codly MCP server is {status}"), false, out);
                 }
             } else if status == "failed" {
-                failed.push(s["name"].as_str().unwrap_or("unnamed"));
+                failed.push(s["name"].as_str().unwrap_or("unnamed").to_string());
             }
         }
         if !failed.is_empty() {
-            self.problem(format!("These MCP servers did not start, so the agent works without their tools in this run: {}", failed.join(", ")), false, out);
+            self.mcp_failed = failed;
+            self.outbox.push(json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } }));
+        }
+    }
+
+    /// Is `resp` (the `response` of a `control_response`) the answer to a request of the
+    /// normalizer's own? Every other control response is the actor's.
+    pub fn asked(&self, resp: &Value) -> bool {
+        resp["request_id"] == MCP_STATUS_REQUEST
+    }
+
+    /// The answer to `mcp_status`: one line for the user's servers that did not start, each
+    /// with the CLI's reason ("Connection closed"). When the CLI cannot answer, the names are
+    /// still said; a server that started since is left out.
+    fn on_control_response(&mut self, resp: &Value, out: &mut Vec<EventKind>) {
+        if !self.asked(resp) {
+            return;
+        }
+        let failed = std::mem::take(&mut self.mcp_failed);
+        let now = if resp["subtype"] == "success" { resp["response"]["mcpServers"].as_array() } else { None };
+        let lines: Vec<String> = failed
+            .into_iter()
+            .filter_map(|name| {
+                let Some(server) = now.and_then(|servers| servers.iter().find(|s| s["name"] == name.as_str())) else { return Some(name) };
+                if server["status"] != "failed" {
+                    return None;
+                }
+                Some(match server["error"].as_str().map(str::trim).filter(|e| !e.is_empty()) {
+                    Some(error) => format!("{name} ({error})"),
+                    None => name,
+                })
+            })
+            .collect();
+        if !lines.is_empty() {
+            self.problem(format!("These MCP servers did not start, so the agent works without their tools in this run: {}", lines.join(", ")), false, out);
+        }
+    }
+
+    /// `system/task_started`, `task_progress` and `task_notification`: the life of something
+    /// that runs beside the agent's own calls. A subagent (`task_type: "local_agent"`) gets
+    /// its events; a long or background command (`local_bash`) already is a tool call.
+    fn on_task(&mut self, subtype: &str, v: &Value, out: &mut Vec<EventKind>) {
+        let Some(call_id) = v["tool_use_id"].as_str() else { return };
+        if subtype == "task_started" && v["task_type"] == "local_agent" && !self.helpers.contains_key(call_id) {
+            // (its `Agent` call was in no line Codly saw: the subagent starts here)
+            self.helper_started(call_id, v["description"].as_str().unwrap_or(""), out);
+        }
+        self.helper_named(call_id, v["subagent_type"].as_str(), out);
+        let Some(helper) = self.helpers.get_mut(call_id) else { return };
+        let (tool_uses, tokens) = (v["usage"]["tool_uses"].as_i64(), v["usage"]["total_tokens"].as_i64());
+        let text = |key: &str| v[key].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
+        match subtype {
+            "task_started" => helper.background = v["is_backgrounded"] == true,
+            "task_progress" => {
+                let step = text("description");
+                out.push(EventKind::SubAgentProgress { call_id: call_id.into(), name: None, step, tool_call_id: None, tool_uses, tokens, report: None });
+            }
+            // task_notification: it ended, and `summary` is what it reported
+            _ => {
+                helper.done = true;
+                let report = text("summary");
+                out.push(EventKind::SubAgentProgress { call_id: call_id.into(), name: None, step: None, tool_call_id: None, tool_uses, tokens, report });
+                let status = v["status"].as_str().unwrap_or("completed").to_string();
+                out.push(EventKind::SubAgent { call_id: call_id.into(), description: helper.description.clone(), status });
+            }
+        }
+    }
+
+    fn helper_started(&mut self, call_id: &str, description: &str, out: &mut Vec<EventKind>) {
+        self.helpers.insert(call_id.to_string(), Helper { description: description.to_string(), name: None, background: false, done: false });
+        out.push(EventKind::SubAgent { call_id: call_id.to_string(), description: description.to_string(), status: "running".into() });
+    }
+
+    /// The subagent's kind, said once.
+    fn helper_named(&mut self, call_id: &str, name: Option<&str>, out: &mut Vec<EventKind>) {
+        let (Some(helper), Some(name)) = (self.helpers.get_mut(call_id), name.filter(|n| !n.is_empty())) else { return };
+        if helper.name.as_deref() != Some(name) {
+            helper.name = Some(name.to_string());
+            let name = helper.name.clone();
+            out.push(EventKind::SubAgentProgress { call_id: call_id.into(), name, step: None, tool_call_id: None, tool_uses: None, tokens: None, report: None });
         }
     }
 
@@ -1079,7 +1190,10 @@ impl ClaudeNormalizer {
     fn on_assistant(&mut self, v: &Value, out: &mut Vec<EventKind>) {
         let msg = &v["message"];
         let msg_id = msg["id"].as_str().unwrap_or("").to_string();
+        // A subagent's line: its tool calls are shown under it; its text reaches the agent as
+        // the result of the `Agent` call (and the user as the report of `task_notification`).
         let subagent = !v["parent_tool_use_id"].is_null();
+        let helper = v["parent_tool_use_id"].as_str().filter(|id| self.helpers.contains_key(*id)).map(str::to_owned);
         for (pos, block) in msg["content"].as_array().into_iter().flatten().enumerate() {
             match block["type"].as_str().unwrap_or("") {
                 "text" if !subagent => {
@@ -1095,9 +1209,12 @@ impl ClaudeNormalizer {
                 }
                 "tool_use" | "server_tool_use" => {
                     let _ = self.block_index(&msg_id, block["type"].as_str().unwrap_or(""), block["id"].as_str(), pos);
-                    // text before a tool call in the same message is progress narration
-                    self.flush_text(MessagePhase::Commentary, out);
-                    self.tool_started(block, out);
+                    // text before a tool call in the same message is progress narration (a
+                    // subagent's call says nothing about the agent's own text)
+                    if !subagent {
+                        self.flush_text(MessagePhase::Commentary, out);
+                    }
+                    self.tool_started(block, helper.as_deref(), out);
                 }
                 "text" | "thinking" | "redacted_thinking" => {}
                 other => out.push(EventKind::Unknown { raw_type: format!("assistant/{other}") }),
@@ -1105,7 +1222,8 @@ impl ClaudeNormalizer {
         }
     }
 
-    fn tool_started(&mut self, block: &Value, out: &mut Vec<EventKind>) {
+    /// `helper`: the subagent that makes this call (the id of its `Agent` call).
+    fn tool_started(&mut self, block: &Value, helper: Option<&str>, out: &mut Vec<EventKind>) {
         let Some(id) = block["id"].as_str() else { return };
         if !self.tools_seen.insert(id.to_string()) {
             return; // the same tool_use repeated in a later assistant line
@@ -1118,8 +1236,11 @@ impl ClaudeNormalizer {
             self.pending_creates.insert(id.to_string(), subject);
         }
         if matches!(name.as_str(), "Agent" | "Task") {
-            let description = input["description"].as_str().unwrap_or("").to_string();
-            out.push(EventKind::SubAgent { call_id: id.to_string(), description, status: "started".into() });
+            // (not a second time when its `task_started` line came first)
+            if !self.helpers.contains_key(id) {
+                self.helper_started(id, input["description"].as_str().unwrap_or(""), out);
+            }
+            self.helper_named(id, input["subagent_type"].as_str(), out);
         }
         out.push(EventKind::ToolStarted {
             call_id: id.to_string(),
@@ -1129,7 +1250,11 @@ impl ClaudeNormalizer {
             input: input.clone(),
             confidence: confidence.into(),
         });
-        self.tools.insert(id.to_string(), ToolInfo { name, input, activity, started: Instant::now() });
+        if let Some(helper) = helper {
+            let tool_call_id = Some(id.to_string());
+            out.push(EventKind::SubAgentProgress { call_id: helper.into(), name: None, step: None, tool_call_id, tool_uses: None, tokens: None, report: None });
+        }
+        self.tools.insert(id.to_string(), ToolInfo { name, input, activity, started: Instant::now(), helper: helper.map(str::to_owned) });
         self.set_status(AgentStatus::Working, out);
     }
 
@@ -1145,8 +1270,9 @@ impl ClaudeNormalizer {
             if !self.tools.values().any(|t| t.activity != ActivityKind::Delegate) {
                 self.set_status(AgentStatus::Thinking, out);
             }
-        } else if !result_text(&v["message"]["content"]).starts_with("[Request interrupted") {
-            // (the CLI's own interruption notice is known and says nothing new)
+        } else if v["parent_tool_use_id"].is_null() && !result_text(&v["message"]["content"]).starts_with("[Request interrupted") {
+            // (the CLI's own interruption notice is known and says nothing new; so is the
+            // prompt a subagent starts with, which its `Agent` call already shows)
             out.push(EventKind::Unknown { raw_type: "user".into() });
         }
     }
@@ -1179,11 +1305,17 @@ impl ClaudeNormalizer {
                     out.push(EventKind::FilesChanged { call_id: Some(id), paths: vec![p.to_string()], source: "tool_input".into() });
                 }
             }
-            "Agent" | "Task" => out.push(EventKind::SubAgent {
-                call_id: id,
-                description: info.input["description"].as_str().unwrap_or("").to_string(),
-                status: if ok { "completed" } else { "failed" }.into(),
-            }),
+            "Agent" | "Task" => {
+                let Some(helper) = self.helpers.get_mut(&id) else { return };
+                if structured["status"] == "async_launched" {
+                    // The call only started it: `task_notification` says when it is done.
+                    helper.background = true;
+                } else if !helper.done {
+                    helper.done = true;
+                    let status = if ok { "completed" } else { "failed" };
+                    out.push(EventKind::SubAgent { call_id: id, description: helper.description.clone(), status: status.into() });
+                }
+            }
             "TaskCreate" | "TaskUpdate" | "TaskList" | "TodoWrite" if self.apply_plan(&info.name, &id, &info.input, ok, &text, structured) => {
                 out.push(self.plan_event());
             }
@@ -1272,6 +1404,19 @@ impl ClaudeNormalizer {
     }
 
     fn on_result(&mut self, v: &Value, out: &mut Vec<EventKind>) {
+        // A session that could not start (2.1.311 §7: `--resume` of a conversation the CLI no
+        // longer has): this one line, with no `system/init` before it and no turn, then the
+        // process exits. It ends no turn of Codly's: it only says why.
+        if !self.init_seen && v["is_error"] == true && v["num_turns"] == 0 {
+            let said = cli_errors(v);
+            let message = match startup::session_trouble(&said) {
+                Some(why) => format!("{why} ({said})"),
+                None if said.is_empty() => "Claude Code could not start this session".to_string(),
+                None => format!("Claude Code could not start this session: {said}"),
+            };
+            self.problem(message, false, out);
+            return;
+        }
         self.flush_text(MessagePhase::Final, out);
         // Per-turn delta: `model_usage_since_last_result` (modelUsage and total_cost_usd are
         // session-cumulative, including earlier runs after --resume).
@@ -1325,6 +1470,20 @@ impl ClaudeNormalizer {
         } else {
             TurnStatus::Failed
         };
+        // Calls that Claude Code denied by itself (a rule, a hook, its permission mode), as the
+        // result lists them: a call Codly was asked about has its card, and one that a
+        // `permission_denied` line named is said already.
+        let mut denied: Vec<&str> = Vec::new();
+        for d in v["permission_denials"].as_array().into_iter().flatten() {
+            let tool = d["tool_name"].as_str().filter(|t| !t.is_empty()).unwrap_or("a tool");
+            if !d["tool_use_id"].as_str().is_some_and(|id| self.denials_known.contains(id)) && !denied.contains(&tool) {
+                denied.push(tool);
+            }
+        }
+        if !denied.is_empty() {
+            // (not kept as the turn's last error: a failed turn still says its own reason)
+            out.push(EventKind::Error { message: format!("Claude Code denied {} without asking", denied.join(", ")), fatal: false });
+        }
         // A failed turn says why, once: not again when its last error or its last message
         // already is that line.
         let retried = self.api_failure.take();
@@ -1345,8 +1504,18 @@ impl ClaudeNormalizer {
         });
         self.interrupt_requested = false;
         self.blocks.clear();
-        self.tools.clear();
+        // A background subagent works on past the end of the turn: it and its open calls stay.
+        // One whose `Agent` call still waited for it is over with the turn.
+        self.helpers.retain(|id, h| {
+            if !h.done && !h.background {
+                out.push(EventKind::SubAgent { call_id: id.clone(), description: h.description.clone(), status: "stopped".into() });
+            }
+            h.background && !h.done
+        });
+        let helpers = &self.helpers;
+        self.tools.retain(|_, t| t.helper.as_ref().is_some_and(|h| helpers.contains_key(h)));
         self.user_denied.clear();
+        self.denials_known.clear();
         self.set_status(AgentStatus::Idle, out);
     }
 
@@ -1457,6 +1626,7 @@ impl ClaudeNormalizer {
             created_at: now_ms(),
         };
         let tool_use_id = approval.call_id.clone();
+        self.denials_known.extend(tool_use_id.clone());
         self.approvals.insert(approval.id.clone(), PendingApproval { request_id, tool_use_id, tool_name: tool, input, suggestions });
         out.push(EventKind::ApprovalRequested { approval });
         self.set_status(AgentStatus::WaitingApproval, out);
@@ -1529,6 +1699,13 @@ impl ClaudeNormalizer {
             .map(|(id, _)| EventKind::ApprovalResolved { approval_id: id, status: ApprovalStatus::Cancelled, by: "provider".into() })
             .collect()
     }
+}
+
+/// A result's `errors`, without the CLI's diagnostic lines.
+fn cli_errors(result: &Value) -> String {
+    let errors: Vec<&str> =
+        result["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|e| !e.starts_with("[ede_diagnostic]")).collect();
+    errors.join("; ")
 }
 
 /// Tokens the model saw on one API call (the context meter, never a sum of turns).
@@ -2179,19 +2356,257 @@ mod tests {
         assert_eq!(errors(&ev), [("The model refused this request, and Claude Code has no fallback model to go on with", false)]);
 
         // Bookkeeping lines make no rows; a subtype Codly does not know still does.
-        for subtype in ["hook_started", "hook_progress", "hook_response", "commands_changed", "session_title_changed", "background_tasks_changed", "files_persisted", "post_turn_summary"] {
+        for subtype in ["hook_started", "hook_progress", "hook_response", "commands_changed", "session_title_changed", "background_tasks_changed", "files_persisted", "post_turn_summary", "task_updated"] {
             assert!(norm.on_message(&system(subtype, json!({}))).is_empty(), "{subtype}");
         }
         let ev = norm.on_message(&system("brand_new_subtype", json!({})));
         assert!(matches!(&ev[..], [EventKind::Unknown { raw_type }] if raw_type == "system/brand_new_subtype"));
 
-        // The user's own MCP servers that did not start: one line. One that still connects,
-        // or that waits for a sign-in (a connector the user never signed in to), is no failure.
+        // The user's own MCP servers that did not start: Codly asks the CLI why, then says it
+        // in one line. One that still connects, or that waits for a sign-in (a connector the
+        // user never signed in to), is no failure.
         let ev = norm.on_message(&system("init", json!({ "tools": [], "mcp_servers": [
             { "name": "codly", "status": "connected" }, { "name": "context7", "status": "failed" }, { "name": "linear", "status": "needs-auth" },
             { "name": "slow", "status": "pending" }, { "name": "git", "status": "connected" }, { "name": "docs", "status": "failed" }
         ] })));
+        assert!(errors(&ev).is_empty(), "{ev:?}");
+        assert_eq!(norm.outbox.last(), Some(&json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } })));
+        // A CLI that does not know the request (its recorded answer to an unknown subtype):
+        // the names are still said.
+        let refused = json!({ "type": "control_response", "response": { "subtype": "error", "request_id": MCP_STATUS_REQUEST, "error": "Unsupported control request subtype: mcp_status" } });
+        let ev = norm.on_message(&refused);
         assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: context7, docs", false)]);
+    }
+
+    /// The CLI's stdout lines of a 2.1.311 recording (docs/research/fixtures/claude-2.1.311),
+    /// without the lines of the recording driver (`_note`, `_t`, `_sent`, `_stderr`, `_meta`).
+    fn recorded(name: &str) -> Vec<Value> {
+        fixture(&format!("claude-2.1.311/{name}.ndjson")).into_iter().filter(|l| l.get("type").is_some()).collect()
+    }
+
+    /// The subagent events, one short line each: only what the event says.
+    fn subagent_lines(events: &[EventKind]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::SubAgent { call_id, description, status } => Some(format!("{call_id} {status}: {description}")),
+                EventKind::SubAgentProgress { call_id, name, step, tool_call_id, tool_uses, tokens, report } => {
+                    let mut line = call_id.clone();
+                    for (key, value) in [("name", name), ("step", step), ("call", tool_call_id), ("report", report)] {
+                        if let Some(value) = value {
+                            line.push_str(&format!(" {key}={value}"));
+                        }
+                    }
+                    for (key, value) in [("uses", tool_uses), ("tokens", tokens)] {
+                        if let Some(value) = value {
+                            line.push_str(&format!(" {key}={value}"));
+                        }
+                    }
+                    Some(line)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_calls(events: &[EventKind]) -> Vec<(&str, &str)> {
+        events.iter().filter_map(|e| if let EventKind::ToolStarted { call_id, name, .. } = e { Some((call_id.as_str(), name.as_str())) } else { None }).collect()
+    }
+
+    fn turn_ends(events: &[EventKind]) -> Vec<(TurnStatus, Option<&str>)> {
+        events.iter().filter_map(|e| if let EventKind::TurnCompleted { status, result_text, .. } = e { Some((*status, result_text.as_deref())) } else { None }).collect()
+    }
+
+    /// Recording `subagent`: the Agent call returns at once ("async_launched"), the turn
+    /// ends, the subagent works on, and the CLI starts a second turn when it is done.
+    #[test]
+    fn a_background_subagent_is_followed_past_the_turn_that_started_it() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("Use the Agent tool to have a subagent run `echo hi`");
+        events.extend(replay(&mut norm, &recorded("subagent")));
+
+        assert_eq!(
+            subagent_lines(&events),
+            [
+                "toolu-1 running: Run echo hi via Bash",
+                "toolu-1 name=general-purpose",
+                // (the call returned and the turn ended: no "completed" yet)
+                "toolu-1 call=toolu-2",
+                "toolu-1 step=Running Echo hi to stdout uses=1 tokens=5932",
+                "toolu-1 report=hi uses=1 tokens=6604",
+                "toolu-1 completed: Run echo hi via Bash",
+            ]
+        );
+        // Its own call is a tool call like any other, and the next event says whose it is.
+        assert_eq!(tool_calls(&events), [("toolu-1", "Agent"), ("toolu-2", "Bash")]);
+        let link = events.iter().position(|e| matches!(e, EventKind::SubAgentProgress { tool_call_id: Some(id), .. } if id == "toolu-2")).unwrap();
+        assert!(matches!(&events[link - 1], EventKind::ToolStarted { call_id, .. } if call_id == "toolu-2"));
+        assert!(events.iter().any(|e| matches!(e, EventKind::ToolCompleted { call_id, ok: true, exit_code: Some(0), .. } if call_id == "toolu-2")), "its call ends with its name known");
+        // What the subagent said is its report, not a message of the agent.
+        let said: Vec<&str> = events.iter().filter_map(|e| if let EventKind::Message { text, .. } = e { Some(text.as_str()) } else { None }).collect();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("I've launched the subagent") && said[1].starts_with("The subagent ran `echo hi`"), "{said:?}");
+        assert_eq!(turn_ends(&events).iter().map(|t| t.0).collect::<Vec<_>>(), [TurnStatus::Completed, TurnStatus::Completed]);
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{events:?}");
+    }
+
+    /// Recording `subagent-foreground`: the Agent call waits for the subagent.
+    #[test]
+    fn a_foreground_subagent_shows_its_kind_its_steps_and_its_report() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("Use the Agent tool to have a subagent run `echo hi`");
+        events.extend(replay(&mut norm, &recorded("subagent-foreground")));
+
+        assert_eq!(
+            subagent_lines(&events),
+            [
+                "toolu-1 running: Run echo hi via Bash",
+                "toolu-1 name=general-purpose",
+                "toolu-1 step=Running Print hi via echo uses=1 tokens=5934",
+                "toolu-1 call=toolu-2",
+                "toolu-1 report=hi uses=1 tokens=6604",
+                // (once: the Agent call's own result comes after it and adds nothing)
+                "toolu-1 completed: Run echo hi via Bash",
+            ]
+        );
+        assert_eq!(tool_calls(&events), [("toolu-1", "Agent"), ("toolu-2", "Bash")]);
+        // The prompt the subagent starts with is a known line, not an "unknown" row.
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{events:?}");
+        assert_eq!(turn_ends(&events).iter().map(|t| t.0).collect::<Vec<_>>(), [TurnStatus::Completed]);
+    }
+
+    /// The same recording, cut before the subagent reports: the turn ends (its recorded
+    /// `result` line) while the Agent call still waits, as when the turn is stopped.
+    #[test]
+    fn a_foreground_subagent_is_over_with_its_turn() {
+        let lines = recorded("subagent-foreground");
+        let cut = lines.iter().position(|l| l["subtype"] == "task_updated").unwrap();
+        let result = lines.iter().find(|l| l["type"] == "result").unwrap();
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("Use the Agent tool to have a subagent run `echo hi`");
+        events.extend(replay(&mut norm, &lines[..cut]));
+        assert_eq!(subagent_lines(&events).last().map(String::as_str), Some("toolu-1 call=toolu-2"), "still at work");
+        let end = norm.on_message(result);
+        assert_eq!(subagent_lines(&end), ["toolu-1 stopped: Run echo hi via Bash"]);
+        assert!(matches!(end.last(), Some(EventKind::StatusChanged { status: AgentStatus::Idle })));
+    }
+
+    /// Recordings `mid-turn-user-message` and `background-wakeup`: `task_*` lines of a command
+    /// (`task_type: "local_bash"`). The command is a tool call already.
+    #[test]
+    fn a_long_or_background_command_is_no_subagent() {
+        for name in ["mid-turn-user-message", "background-wakeup"] {
+            let lines = recorded(name);
+            assert!(lines.iter().any(|l| l["subtype"] == "task_notification"), "{name} has task lines");
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+            let mut events = norm.turn_started("go");
+            events.extend(replay(&mut norm, &lines));
+            assert_eq!(subagent_lines(&events), Vec::<String>::new(), "{name}");
+            assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{name}: {events:?}");
+        }
+    }
+
+    /// Recording `broken-mcp`: two servers that cannot start. The init line names them; the
+    /// answer to `mcp_status` has the reason of each.
+    #[test]
+    fn mcp_servers_that_did_not_start_are_named_with_the_reason() {
+        let lines = recorded("broken-mcp");
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("Reply with the single word: pong");
+        let init = lines.iter().find(|l| l["subtype"] == "init").unwrap();
+        let ev = norm.on_message(init);
+        assert!(!errors(&ev).iter().any(|(message, _)| message.contains("MCP")), "nothing is said before the reason is known: {ev:?}");
+        assert_eq!(norm.outbox, [json!({ "type": "control_request", "request_id": MCP_STATUS_REQUEST, "request": { "subtype": "mcp_status" } })]);
+
+        // An answer to someone else's request (the recording driver's `host-1`) is not Codly's.
+        let other = lines.iter().find(|l| l["response"]["request_id"] == "host-1").unwrap();
+        assert!(!norm.asked(&other["response"]));
+        assert!(norm.on_message(other).is_empty());
+        // The recorded answer to `mcp_status` after the turn (`host-2`), under the id Codly asks with.
+        let mut answer = lines.iter().find(|l| l["response"]["request_id"] == "host-2").unwrap().clone();
+        answer["response"]["request_id"] = json!(MCP_STATUS_REQUEST);
+        assert!(norm.asked(&answer["response"]));
+        let ev = norm.on_message(&answer);
+        assert_eq!(
+            errors(&ev),
+            [(
+                "These MCP servers did not start, so the agent works without their tools in this run: \
+                 exits-at-once (Connection closed), no-such-command (ENOENT: no such file or directory, posix_spawn 'stdio')",
+                false
+            )]
+        );
+        assert!(norm.on_message(&answer).is_empty(), "said once");
+
+        // A server that is no longer failed when the CLI answers (`host-6`: one was switched
+        // off meanwhile) is left out.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.on_message(init);
+        let mut answer = lines.iter().find(|l| l["response"]["request_id"] == "host-6").unwrap().clone();
+        answer["response"]["request_id"] = json!(MCP_STATUS_REQUEST);
+        let ev = norm.on_message(&answer);
+        assert_eq!(errors(&ev), [("These MCP servers did not start, so the agent works without their tools in this run: exits-at-once (Connection closed)", false)]);
+    }
+
+    /// Recordings `limits-max-turns` and `limits-max-budget`.
+    #[test]
+    fn the_clis_own_limits_end_a_turn_with_their_reason() {
+        let own_errors = |events: &[EventKind]| -> Vec<String> {
+            errors(events).into_iter().map(|(message, _)| message.to_string()).filter(|m| !m.starts_with("Claude did not enable requested tools")).collect()
+        };
+        // The step limit ends that turn only: the next message is answered.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("Run `echo one`, then `echo two`");
+        events.extend(replay(&mut norm, &recorded("limits-max-turns")));
+        assert_eq!(turn_ends(&events), [(TurnStatus::MaxTurns, None), (TurnStatus::Completed, Some("alive"))]);
+        assert_eq!(own_errors(&events), Vec::<String>::new(), "the turn's end says it: no second line");
+
+        // The spending limit ends every turn of the run from then on.
+        let budget = "Claude Code reached its spending limit, so it does no more work in this run: Reached maximum budget ($0.0001)";
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("Run `echo one`, then `echo two`");
+        events.extend(replay(&mut norm, &recorded("limits-max-budget")));
+        assert_eq!(turn_ends(&events), [(TurnStatus::Failed, Some(budget)), (TurnStatus::Failed, Some(budget))]);
+        assert_eq!(own_errors(&events), [budget], "said once, before the first turn's end");
+    }
+
+    /// Recording `misc-events`: the result's `permission_denials` lists calls Codly itself was
+    /// asked about. The same entry for a call nobody asked about is Claude Code's own denial.
+    #[test]
+    fn a_denial_codly_was_not_asked_about_is_said() {
+        let lines = recorded("misc-events");
+        let silent = |events: &[EventKind]| !errors(events).iter().any(|(message, _)| message.contains("without asking"));
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("go");
+        events.extend(replay(&mut norm, &lines));
+        assert_eq!(events.iter().filter(|e| matches!(e, EventKind::ApprovalRequested { .. })).count(), 2);
+        assert!(silent(&events), "both denied calls had a card: {:?}", errors(&events));
+
+        let result = lines.iter().find(|l| l["type"] == "result" && l["permission_denials"].as_array().is_some_and(|d| !d.is_empty())).unwrap();
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("go");
+        let ev = norm.on_message(result);
+        assert_eq!(errors(&ev), [("Claude Code denied Bash without asking", false)]);
+        // A call that a `permission_denied` line named is not said twice.
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        norm.turn_started("go");
+        let call = result["permission_denials"][0]["tool_use_id"].clone();
+        norm.on_message(&json!({ "type": "system", "subtype": "permission_denied", "tool_name": "Bash", "tool_use_id": call }));
+        assert!(silent(&norm.on_message(result)));
+    }
+
+    /// Recording `resume-missing`: all the CLI writes for `--resume` of a conversation it no
+    /// longer has is one `result` line (then it exits with code 1).
+    #[test]
+    fn a_conversation_that_is_gone_is_no_failed_turn() {
+        let lines = recorded("resume-missing");
+        assert_eq!(lines.len(), 1);
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let events = replay(&mut norm, &lines);
+        assert!(
+            matches!(&events[..], [EventKind::Error { message, fatal: false }]
+                if message == "Claude Code no longer has this conversation (No conversation found with session ID: sess-1)"),
+            "{events:?}"
+        );
     }
 
     #[test]

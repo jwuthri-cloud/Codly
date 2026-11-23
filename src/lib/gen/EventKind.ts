@@ -53,7 +53,27 @@ source: string, } | { "type": "plan_updated", steps: Array<PlanStep>, } | { "typ
 /**
  * "user" | "policy" | "provider"
  */
-by: string, } | { "type": "usage_updated", usage: Usage, } | { "type": "rate_limit", window: string, used_fraction: number | null, resets_at: number | null, status: string | null, } | { "type": "retrying", attempt: number, reason: string, } | { "type": "sub_agent", call_id: string, description: string, status: string, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "notice", text: string, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
+by: string, } | { "type": "usage_updated", usage: Usage, } | { "type": "rate_limit", window: string, used_fraction: number | null, resets_at: number | null, status: string | null, } | { "type": "retrying", attempt: number, reason: string, } | { "type": "sub_agent", call_id: string, description: string, status: string, } | { "type": "sub_agent_progress", call_id: string, 
+/**
+ * Its kind ("general-purpose", "Explore").
+ */
+name: string | null, 
+/**
+ * What it does now, in the CLI's words ("Running the tests").
+ */
+step: string | null, 
+/**
+ * A tool call of its own: the `ToolStarted` with this id came just before.
+ */
+tool_call_id: string | null, 
+/**
+ * The tool calls it made and the tokens it used so far.
+ */
+tool_uses: number | null, tokens: number | null, 
+/**
+ * What it reported when it was done.
+ */
+report: string | null, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
 /**
  * "rule" | "model" | "human"
  */

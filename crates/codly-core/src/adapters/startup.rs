@@ -34,6 +34,21 @@ pub(crate) fn says_signed_out(text: &str) -> bool {
     SIGNED_OUT.iter().any(|p| text.contains(p))
 }
 
+/// What Claude Code says when it cannot open the conversation it was started for, in plain
+/// words (its texts: docs/research/cli-claude-stream-json-2.1.311.md §7). With `--resume` of a
+/// conversation it no longer has, and with `--session-id` of one it already has, it exits
+/// with code 1 before it reads anything.
+pub(crate) fn session_trouble(text: &str) -> Option<&'static str> {
+    let text = text.to_lowercase();
+    if text.contains("no conversation found with session id") {
+        Some("Claude Code no longer has this conversation")
+    } else if text.contains("session id") && text.contains("is already in use") {
+        Some("Claude Code already has a conversation with the id Codly gave this new one")
+    } else {
+        None
+    }
+}
+
 /// A process exit as text: "code 1", or "killed by a signal" when there is no code.
 pub(crate) fn exit_text(code: Option<i64>) -> String {
     code.map_or_else(|| "killed by a signal".into(), |c| format!("code {c}"))
@@ -75,7 +90,8 @@ pub(crate) fn uses_own_key(spec: &SpawnSpec) -> bool {
 /// error); `version` is the CLI's, when the handshake got far enough to learn it.
 /// - an option was rejected, or the version is below the minimum: update the CLI;
 /// - the text says signed out: the sign-in command. Not with `own_key`: there the credential
-///   is the user's API key, and signing in would not help.
+///   is the user's API key, and signing in would not help;
+/// - Claude Code cannot open the conversation: that, in plain words.
 fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&str>, own_key: bool) -> Option<String> {
     let text = text.to_lowercase();
     let says = |patterns: &[&str]| patterns.iter().any(|p| text.contains(p));
@@ -84,6 +100,11 @@ fn advice(provider: Provider, text: &str, version: Option<&str>, home: Option<&s
     }
     if says_signed_out(&text) {
         return (!own_key).then(|| not_signed_in(provider, home, None));
+    }
+    if provider == Provider::Claude
+        && let Some(why) = session_trouble(&text)
+    {
+        return Some(why.to_string());
     }
     let version = version?;
     env::update_to(provider, version)?;
@@ -173,6 +194,33 @@ mod tests {
 
         assert_eq!(not_signed_in(Provider::Opencode, None, Some("Run `opencode auth login` in the terminal")), "OpenCode is not signed in: Run `opencode auth login` in the terminal");
         assert_eq!(not_signed_in(Provider::Cursor, None, None), "Cursor is not signed in: sign in with its CLI in a terminal first");
+    }
+
+    /// The CLI's own lines, from the recordings `resume-missing` and `session-id-in-use`
+    /// (docs/research/fixtures/claude-2.1.311): what it wrote to stderr before exit code 1.
+    #[test]
+    fn a_conversation_claude_cannot_open_is_said_in_plain_words() {
+        let stderr = |name: &str| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/research/fixtures/claude-2.1.311").join(name);
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let lines: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+            lines.iter().find_map(|l| l["_stderr"].as_str().map(str::to_owned)).expect("a stderr line")
+        };
+        let claude = spec(Provider::Claude, &[]);
+        let gone = stderr("resume-missing.ndjson");
+        assert_eq!(gone, "No conversation found with session ID: sess-1");
+        let e = explain(&claude, None, anyhow!("claude exited during startup (code 1): {gone}"));
+        assert_eq!(e.to_string(), "Claude Code no longer has this conversation");
+        assert!(format!("{e:#}").ends_with("claude exited during startup (code 1): No conversation found with session ID: sess-1"), "{e:#}");
+
+        let taken = stderr("session-id-in-use.ndjson");
+        assert_eq!(taken, "Error: Session ID sess-1 is already in use.");
+        let e = explain(&claude, None, anyhow!("claude exited during startup (code 1): {taken}"));
+        assert_eq!(e.to_string(), "Claude Code already has a conversation with the id Codly gave this new one");
+
+        // Claude Code's words only: another CLI's text stands as it is.
+        assert_eq!(advice(Provider::Codex, &gone, None, None, false), None);
+        assert_eq!(session_trouble("ENOSPC: no space left on device"), None);
     }
 
     #[test]

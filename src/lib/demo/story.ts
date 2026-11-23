@@ -695,7 +695,9 @@ export class Story {
     });
     act.status('working', 'delegate', 'Explore');
     act.emit({ type: 'sub_agent', call_id: call, description, status: 'running' });
+    act.emit({ type: 'sub_agent_progress', call_id: call, name: 'Explore', step: null, tool_call_id: null, tool_uses: null, tokens: null, report: null });
     await act.sleep(ms);
+    act.emit({ type: 'sub_agent_progress', call_id: call, name: null, step: null, tool_call_id: null, tool_uses: null, tokens: null, report: result });
     act.emit({ type: 'sub_agent', call_id: call, description, status: 'completed' });
     act.emit({ type: 'tool_completed', call_id: call, ok: true, output: result, exit_code: null, duration_ms: ms, tests_passed: null, tests_failed: null });
   }

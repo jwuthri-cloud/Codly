@@ -109,6 +109,8 @@ export type Seg = {
   testsPassed: number | null;
   testsFailed: number | null;
   eventId: number;
+  /** A helper (subagent) made this call: the id of the agent's call that started that helper. */
+  parent?: string;
 };
 
 export type FileReason = { prov: Provenance; text: string; eventId: number; ts: number };
@@ -158,7 +160,23 @@ export type RateWindow = {
   ts: number;
 };
 
-export type SubAgent = { callId: string; description: string; status: string; startedAt: number; ts: number };
+/**
+ * A helper (subagent) the agent started with the tool call `callId`. `status` is the CLI's own
+ * word ("running", "completed", "failed"…) and `ts` when it last changed. The rest is what the
+ * CLI said about the helper so far: its kind, what it does now, its tool calls and tokens, its report.
+ */
+export type SubAgent = {
+  callId: string;
+  description: string;
+  status: string;
+  startedAt: number;
+  ts: number;
+  name: string | null;
+  step: string | null;
+  toolUses: number | null;
+  tokens: number | null;
+  report: string | null;
+};
 
 export type AgentLive = {
   segments: Seg[];
@@ -712,17 +730,22 @@ class CodlyStore {
   }
 
   /** `shared`: also drop the live output of the calls that are closed (they were cut off, and
-   *  their output is in no later event). */
-  private closeOpen(l: AgentLive, ts: number, shared: boolean) {
-    const ids = Object.keys(l.open);
+   *  their output is in no later event). `only`: the calls to close (all of them when left out). */
+  private closeOpen(l: AgentLive, ts: number, shared: boolean, only?: (seg: Seg) => boolean) {
+    const ids = Object.keys(l.open).filter((id) => {
+      const seg = l.segments[l.open[id]];
+      return !only || !seg || only(seg);
+    });
     if (!ids.length) return;
     const segs = this.segsOf(l);
+    const open = { ...l.open };
     for (const id of ids) {
-      const i = l.open[id];
+      const i = open[id];
       if (segs[i] && segs[i].end == null) segs[i] = { ...segs[i], end: ts };
       if (shared) this.liveOut.delete(id);
+      delete open[id];
     }
-    l.open = {};
+    l.open = open;
   }
 
   /** What the agent was writing (a reply, a thought) will not be finished: it leaves the screen. */
@@ -799,13 +822,18 @@ class CodlyStore {
           if (l.turn) l.turn = { ...l.turn, endedAt: ev.ts, status: k.status };
           const t = l.turns;
           if (t.length && t[t.length - 1].end == null) l.turns = [...t.slice(0, -1), { ...t[t.length - 1], end: ev.ts }];
-          this.closeOpen(l, ev.ts, !into);
+          // A helper that is still at work goes on after the turn: a call of its own stays
+          // open until its result comes, or until the helper is over (`sub_agent`, `exited`).
+          const atWork = new Set(l.subagents.filter((s) => s.status === 'running').map((s) => s.callId));
+          this.closeOpen(l, ev.ts, !into, (seg) => seg.parent == null || !atWork.has(seg.parent));
           if (!into) this.dropStreams(aid);
         }
         break;
       case 'exited':
         if (l) {
           this.closeOpen(l, ev.ts, !into);
+          // Its helpers ran inside the process that is gone.
+          if (l.subagents.some((s) => s.status === 'running')) l.subagents = l.subagents.map((s) => (s.status === 'running' ? { ...s, status: 'stopped', ts: ev.ts } : s));
           const t = l.turns;
           if (t.length && t[t.length - 1].end == null) l.turns = [...t.slice(0, -1), { ...t[t.length - 1], end: ev.ts }];
         }
@@ -942,8 +970,31 @@ class CodlyStore {
       case 'sub_agent':
         if (l) {
           const prev = l.subagents.find((x) => x.callId === k.call_id);
-          const next: SubAgent = { callId: k.call_id, description: k.description, status: k.status, startedAt: prev?.startedAt ?? ev.ts, ts: ev.ts };
+          const next: SubAgent = {
+            name: null, step: null, toolUses: null, tokens: null, report: null, ...prev,
+            callId: k.call_id, description: k.description, status: k.status, startedAt: prev?.startedAt ?? ev.ts, ts: ev.ts,
+          };
           l.subagents = [...l.subagents.filter((x) => x.callId !== k.call_id), next].slice(-20);
+          // The helper is over: a call of its own that is still open gets no result any more.
+          if (k.status !== 'running') this.closeOpen(l, ev.ts, !into, (seg) => seg.parent === k.call_id);
+        }
+        break;
+      case 'sub_agent_progress':
+        if (l) {
+          // A call of the helper's own (its `tool_started` came just before): it shows under the helper.
+          const i = k.tool_call_id != null ? l.open[k.tool_call_id] : undefined;
+          if (i != null && l.segments[i]) {
+            const segs = this.segsOf(l);
+            segs[i] = { ...segs[i], parent: k.call_id };
+          }
+          const prev = l.subagents.find((x) => x.callId === k.call_id);
+          if (prev && (k.name ?? k.step ?? k.tool_uses ?? k.tokens ?? k.report) != null) {
+            const next: SubAgent = {
+              ...prev, name: k.name ?? prev.name, step: k.step ?? prev.step, toolUses: k.tool_uses ?? prev.toolUses, tokens: k.tokens ?? prev.tokens,
+              report: k.report ?? prev.report,
+            };
+            l.subagents = l.subagents.map((x) => (x === prev ? next : x));
+          }
         }
         break;
       case 'error':

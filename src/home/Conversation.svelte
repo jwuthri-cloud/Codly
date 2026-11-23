@@ -249,7 +249,7 @@
               {@const again = it.retry}
               <TroubleRow agentId={it.agentId} eventId={it.eventId} ts={it.ts} what={it.what} reason={it.reason} onretry={again && i > lastSaid && !isBusy ? () => sendChat(thread, again) : undefined} />
             {:else if it.kind === 'work'}
-              <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={thinkingText(it)} />
+              <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={thinkingText(it)} helpers={it.helpers} />
             {:else if it.kind === 'approval'}
               <ApprovalCard approval={it.approval} twins={it.twins} />
             {:else if it.kind === 'ask'}

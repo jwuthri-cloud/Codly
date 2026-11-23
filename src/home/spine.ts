@@ -12,7 +12,7 @@ import type { Approval } from '../lib/gen/Approval';
 import type { ChatMessage } from '../lib/gen/ChatMessage';
 import type { MessagePhase } from '../lib/gen/MessagePhase';
 import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
-import { store, type Outgoing, type Seg, type Thought } from '../lib/state/store.svelte';
+import { store, type Outgoing, type Seg, type SubAgent, type Thought } from '../lib/state/store.svelte';
 import { groupSame } from '../lib/state/approvalGroups';
 import { isSlotNote } from '../lib/state/queue';
 import { stoppedByYou } from '../lib/state/stops';
@@ -38,7 +38,8 @@ export type Item =
       replyTo: string | null;
     }
   // `thinking`: the thought being written, as it was when the row was made (`thinkingText`: as it is now).
-  | { kind: 'work'; key: string; ts: number; agentId: string; segs: Seg[]; thoughts: Thought[]; thinking: string | null }
+  // `helpers`: the subagents started by calls of this row (their own calls are in `segs` too).
+  | { kind: 'work'; key: string; ts: number; agentId: string; segs: Seg[]; thoughts: Thought[]; thinking: string | null; helpers: SubAgent[] }
   | { kind: 'approval'; key: string; ts: number; approval: Approval; /** Other agents' requests that wait for the same answer. */ twins: Approval[] }
   | { kind: 'ask'; key: string; ts: number; agentId: string; msg: ChatMessage }
   | { kind: 'task-done'; key: string; ts: number; taskId: string }
@@ -157,21 +158,35 @@ export function buildSpine(thread: string): Item[] {
     let groupEnd = Infinity;
     // Both lists are in time order: the next anchor is found by walking on, never from the start.
     let next = 0;
+    /** Which row shows a call. */
+    const rowOf = new Map<string, Item & { kind: 'work' }>();
     for (const w of work) {
+      // A helper's own call stays with the call that started the helper, also when the agent
+      // has spoken since (a helper in the background works on after the turn).
+      const home = w.seg?.parent != null ? rowOf.get(w.seg.parent) : undefined;
+      if (w.seg && home) {
+        home.segs.push(w.seg);
+        rowOf.set(w.seg.callId, home);
+        continue;
+      }
       if (!group || w.ts >= groupEnd) {
         while (next < anchors.length && anchors[next] <= w.ts) next++;
         groupEnd = anchors[next] ?? Infinity;
-        group = { kind: 'work', key: `w:${w.seg?.callId ?? w.thought?.itemId}`, ts: w.ts, agentId: owner.id, segs: [], thoughts: [], thinking: null };
+        group = { kind: 'work', key: `w:${w.seg?.callId ?? w.thought?.itemId}`, ts: w.ts, agentId: owner.id, segs: [], thoughts: [], thinking: null, helpers: [] };
         items.push(group);
       }
-      if (w.seg) group.segs.push(w.seg);
+      if (w.seg) {
+        group.segs.push(w.seg);
+        rowOf.set(w.seg.callId, group);
+      }
       if (w.thought) group.thoughts.push(w.thought);
     }
+    for (const h of live?.subagents ?? []) rowOf.get(h.callId)?.helpers.push(h);
     if (thinking != null) {
       // The newest work row is the last one made (each starts after the one before).
       const lastAnchor = anchors[anchors.length - 1] ?? 0;
       if (group && group.ts > lastAnchor) group.thinking = thinking;
-      else items.push({ kind: 'work', key: `t:live:${owner.id}`, ts: thinkingTs, agentId: owner.id, segs: [], thoughts: [], thinking });
+      else items.push({ kind: 'work', key: `t:live:${owner.id}`, ts: thinkingTs, agentId: owner.id, segs: [], thoughts: [], thinking, helpers: [] });
     }
 
     // ── what went wrong, where it happened (added last: a problem never splits a work row) ──
