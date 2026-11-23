@@ -226,7 +226,8 @@ request), writes in the task's record what it stopped and what it could not stop
 work as it is. The 5 minutes are one budget each time the worker hands in its work: a turn of
 the worker in the middle (a test run that ended woke the CLI) does not start them again. They
 are whole again when Codly sends the work back (a failed check, a file outside the scope, a
-reviewer's request, a merge conflict), and for a retry of the task. A worker that ended its turn
+reviewer's request, a merge conflict), when you send it back from the diff, and for a retry of
+the task. A worker that ended its turn
 with no report is asked for one only after this wait, and the record of a stop says which comes
 next: that question, or the checks. For Codex, a subagent that is still in a turn counts; that
 part is built from the protocol's types and is not verified on a live run. Claude Code says its

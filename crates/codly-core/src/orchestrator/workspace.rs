@@ -516,6 +516,9 @@ impl Inner {
                     bail!("a review of {} is starting right now; send your comments again in a moment", t.key);
                 }
                 note(&worker)?;
+                // A new round, as when the gate sends the work back: what the worker leaves
+                // running after your comments has the whole wait again (background.rs).
+                self.background_round(&worker);
                 self.send_prompt(&worker, prompt)?;
                 self.forget_rounds(task_id);
                 // The worker has a turn to come, and its end runs the gate whatever the task

@@ -11,15 +11,15 @@
 //!   it stopped, and checks the work as it is (`background_wait_over`).
 //!
 //! `WAIT` is one budget for a round of the worker, not a time per wait. A round is the work
-//! the worker hands in once: it begins with the task's brief, or when the gate sends the work
-//! back (a failed check, a file outside the scope, a reviewer's request, a merge conflict:
-//! `Inner::background_round`). A turn of the worker inside a round ends the wait of a pass,
-//! and the pass at the end of that turn waits again: it gets what is left of the budget. With
-//! nothing left Codly stops the open work at once. So a dev server that never ends, beside a
-//! test run that ends after 4 minutes and wakes the CLI, is stopped 5 minutes after the first
-//! wait began, not 9. The next round has the whole budget again: a test run that the worker
-//! leaves open after its fix is waited for, as the worker's rules say (`prompts.rs`). A new
-//! run of the task (a retry) has a new budget too.
+//! the worker hands in once: it begins with the task's brief, when the gate sends the work
+//! back (a failed check, a file outside the scope, a reviewer's request, a merge conflict),
+//! or when you send it back from the diff (`Inner::background_round`). A turn of the worker
+//! inside a round ends the wait of a pass, and the pass at the end of that turn waits again:
+//! it gets what is left of the budget. With nothing left Codly stops the open work at once.
+//! So a dev server that never ends, beside a test run that ends after 4 minutes and wakes the
+//! CLI, is stopped 5 minutes after the first wait began, not 9. The next round has the whole
+//! budget again: a test run that the worker leaves open after its fix is waited for, as the
+//! worker's rules say (`prompts.rs`). A new run of the task (a retry) has a new budget too.
 //!
 //! What is open comes from the adapters. Claude Code says its whole list at every change
 //! (`EventKind::BackgroundTasks`, the one record of that work: the agent sheet shows the same
@@ -100,10 +100,10 @@ impl Background {
         self.end_hold(now);
     }
 
-    /// The gate sends the work back to the worker: a new round begins, with the whole budget.
-    /// A wait that still runs is over (the turn that the gate's message starts would end it),
-    /// and its time is not the new round's. Work that Codly could not stop stays let go: no
-    /// round waits for it again.
+    /// The work goes back to the worker (from the gate, or from you): a new round begins, with
+    /// the whole budget. A wait that still runs is over (the turn that the message starts
+    /// would end it), and its time is not the new round's. Work that Codly could not stop
+    /// stays let go: no round waits for it again.
     pub(super) fn round_starts(&mut self, now: Instant) {
         self.end_hold(now);
         self.waited = Duration::ZERO;
@@ -249,8 +249,10 @@ impl Inner {
         Ok(true)
     }
 
-    /// The gate sends the work back to the worker's live run (`gate.rs`, `back_to_worker`): a
-    /// new round begins there, with the whole wait for what the worker leaves running.
+    /// The work goes back to the worker's live run: from the gate (`gate.rs`, `back_to_worker`)
+    /// or from you (`workspace.rs`, `send_back_task`). A new round begins there, with the whole
+    /// wait for what the worker leaves running. Call it before the message is sent: the turn
+    /// that the message starts can end, and its pass can begin a wait, at once.
     pub(super) fn background_round(&self, worker: &str) {
         if let Some(l) = lock(&self.live).get_mut(worker) {
             l.background.round_starts(Instant::now());

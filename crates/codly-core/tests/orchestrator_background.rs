@@ -13,7 +13,8 @@
 //!   one question comes after it, when the worker's last turn still gave no report, and the
 //!   record of the stop says which of the two comes next, the question or the checks;
 //! - the wait is one budget for a round: a turn of the worker in the middle does not start it
-//!   again, and a round that the gate starts (a failed check) has the whole wait again.
+//!   again, and a round that the gate starts (a failed check) or that you start ("Send back"
+//!   from the diff) has the whole wait again.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -712,6 +713,70 @@ async fn a_round_that_the_gate_starts_waits_again_for_background_work() {
     assert_eq!(cli.lock().unwrap().stops, ["tid-1", "tid-2"]);
     assert_eq!(verified(&after), [false, true], "the draft failed its check, and the fix passed");
     assert_eq!(cli.lock().unwrap().prompts.len(), 2, "the task, and one fix round");
+    core.shutdown().await;
+}
+
+/// Your own "Send back" from the diff starts a round too. The first round has used 2 seconds
+/// or more of its wait on a dev server when your comments arrive. The worker does what you
+/// asked and leaves a test run open: that round waits with the whole budget, not with what the
+/// first one left. (With the first round's wait all used up, Codly would stop the test run at
+/// once and the worker would never see its result.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_round_that_your_send_back_starts_waits_again_for_background_work() {
+    // Long, so that it cannot run out on a slow build box: the test ends the open work itself.
+    const BUDGET: Duration = Duration::from_secs(30);
+    const COMMENTS: &str = "1. `hello.txt:1`\n   Say hello twice.";
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::default();
+    let both = vec![background("tid-1", "command", "npm run dev"), background("tid-2", "command", "npm test")];
+    let state = cli.clone();
+    let worker: Behavior = Arc::new(move |turn: FakeTurn| {
+        let (state, both) = (state.clone(), both.clone());
+        Box::pin(async move {
+            // The first turn: the work, beside a dev server. The turn for your comments: the
+            // change, beside the server and a test run.
+            let first = state.lock().unwrap().prompts.len() == 1;
+            let (content, open) = match first {
+                true => ("hello\n", both[..1].to_vec()),
+                false => ("hello\nhello\n", both),
+            };
+            state.lock().unwrap().open = open.clone();
+            turn.work(content, listed(open)).await;
+        })
+    });
+    let core = start(dir.path(), Provider::Claude, worker, &cli, Some(BUDGET)).await;
+
+    let held = wait_held(&core).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let sent = core.send_back_task(&held.id, COMMENTS).await.unwrap();
+    assert_eq!(sent.status, TaskStatus::ChangesRequested);
+
+    // The pass at the end of the worker's next turn waits for both, 30 seconds again: with
+    // one budget for both rounds it would be 28 seconds or less.
+    let said = wait_for("the wait of the second round", 40, async || {
+        let said = background_decisions(&events(&core).await);
+        (said.len() == 2).then_some(said)
+    })
+    .await;
+    let waits = |what: &str, it: &str| format!("t1: not checked yet, its worker left {what} running; Codly checks the work when that ends, and stops {it} after 30 s");
+    let server = "the background command `npm run dev`";
+    assert_eq!(said[0].0, waits(server, "it"));
+    assert_eq!(said[1].0, waits(&format!("{server}, the background command `npm test`"), "them"), "your comments began a round with the whole wait");
+    assert_eq!(said[1].1["wait_secs"], json!(30));
+
+    // Both end, and Claude Code starts a turn by itself: its end runs the gate.
+    cli.lock().unwrap().open = vec![];
+    emit(&cli, listed(vec![]));
+    emit(&cli, EventKind::TurnStarted { input: None });
+    emit(&cli, EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: Some("The tests pass.".into()), duration_ms: Some(5) });
+    wait_plan_done(&core).await;
+    let after = events(&core).await;
+    assert_eq!(background_decisions(&after).len(), 2, "no other wait, and no stop");
+    assert!(cli.lock().unwrap().stops.is_empty(), "nothing was stopped");
+    assert_eq!(verified(&after), [true], "checked once, on the work with your comments in it");
+    let prompts = cli.lock().unwrap().prompts.clone();
+    assert_eq!(prompts.len(), 2, "the task, and your comments");
+    assert!(prompts[1].contains(COMMENTS), "{}", prompts[1]);
     core.shutdown().await;
 }
 
