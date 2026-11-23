@@ -14,6 +14,8 @@ describe('stoppedByChecks', () => {
     expect(stoppedByChecks([decision('t1', 'gate', { rounds: 2, failed_check: 'npm test' })], 't1')).toBe(true);
     expect(stoppedByChecks([decision('t1', 'gate', { timed_out: 'npm test' })], 't1')).toBe(true);
     expect(stoppedByChecks([decision('t1', 'gate', { held: [{ command: 'rm -rf dist', risks: ['deletes files'] }] })], 't1')).toBe(true);
+    // Your required checks are on, for another text than the file has now.
+    expect(stoppedByChecks([decision('t1', 'gate', { required: '.codly/checks changed since you turned them on' })], 't1')).toBe(true);
   });
 
   it('is false for any other stop', () => {

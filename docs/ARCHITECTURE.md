@@ -374,6 +374,19 @@ that are new there are named (the index does not search them).
   check is refused: the plan is still done, and its message names the check to run yourself).
   Full access runs them. The rules read the command's text only: a test runner still runs the
   worker's code, unsandboxed.
+- The repo owner decides what passes (`required_checks.rs`): `.codly/checks` lists commands,
+  one on each line, that the gate runs for every task after the task's verify commands, and
+  again on every finished plan. They are off until the user turns them on in Settings, which
+  shows each command and what the risk rules see in it; after that they run without the risk
+  hold. Codly reads the file from the user's checkout and runs only the exact text that was
+  turned on: with another text (or no file) nothing runs and nothing passes, the task is
+  blocked for the user and a finished plan says that it was not checked. "Check the work"
+  (an agent's Git tab) runs them in a 1:1 agent's worktree, whose work has no gate: one run
+  for an agent at a time, and the result is recorded (a `gate` decision, which the tab reads)
+  only when the agent got no turn while the commands ran. The
+  planner marks a task whose verify commands all prove nothing (`weak_checks.rs`: `true`,
+  `x || true`, `x | tail`, a file-exists test); the plan card shows the mark before the plan
+  runs and after, and the plan's chat line names the task (a plan that runs at once never waits).
 - A new worktree (`worktree_setup.rs`) gets, once: copies of the checkout's git-ignored files
   that the built-in list (`node_modules`, `.venv`, `venv`, root `.env` files) or the repo's
   `.worktreeinclude` (gitignore syntax) names, never a tracked file, and only a path that the
@@ -497,6 +510,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
+                      required_checks.rs weak_checks.rs   the owner's `.codly/checks` in the gate; verify commands that prove nothing
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
                       activity.rs                         the work under way now, for the shell (keep awake, quit question)
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries

@@ -603,7 +603,8 @@ export class Story {
     sim.committedKeys.add(this.fileKey(task));
     await sim.sleep(1700);
     live();
-    sim.emit({ type: 'verified', command: o.verify, ok: true, exit_code: 0, tail: o.tail }, { agent: act.id, task: task.id });
+    // Like the core: one result for each of the task's verify commands, under its exact text.
+    task.verify.forEach((command, i) => sim.emit({ type: 'verified', command, ok: true, exit_code: 0, tail: i === task.verify.length - 1 ? o.tail : '' }, { agent: act.id, task: task.id }));
     if (o.integration) {
       const branch = (task.plan_id && sim.plans.get(task.plan_id)?.integration_branch) || 'codly/integration';
       sim.patchTask(task.id, { status: 'merging', status_reason: 'In the merge queue' });

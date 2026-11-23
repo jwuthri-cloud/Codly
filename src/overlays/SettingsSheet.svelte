@@ -28,6 +28,7 @@
   import TeamSection from './TeamSection.svelte';
   import TriggersSection from './TriggersSection.svelte';
   import WorktreeSection from './WorktreeSection.svelte';
+  import RequiredChecksSection from './RequiredChecksSection.svelte';
   import BillingBadge from '../components/BillingBadge.svelte';
   import DiagnosticsReport from '../components/DiagnosticsReport.svelte';
   import Dialog from '../components/Dialog.svelte';
@@ -354,6 +355,8 @@
         </select>
       </div>
     </section>
+
+    <RequiredChecksSection />
 
     <WorktreeSection />
 

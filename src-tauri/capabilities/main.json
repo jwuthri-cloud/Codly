@@ -191,6 +191,8 @@
     "allow-refresh-pull-request",
     "allow-merge-state",
     "allow-resolve-merge-conflict",
-    "allow-stop-resolving-merge"
+    "allow-stop-resolving-merge",
+    "allow-required-checks",
+    "allow-check-agent"
   ]
 }

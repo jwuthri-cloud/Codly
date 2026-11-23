@@ -583,6 +583,22 @@ pub async fn worktree_setup(
     state.core().await?.worktree_setup(set).await.map_err(err)
 }
 
+/// The open repo's required checks (`.codly/checks`): the text, its commands with their risks,
+/// on or off. Pass `set` to turn them on, for the text you read, or off.
+#[tauri::command]
+pub async fn required_checks(
+    state: State<'_, AppState>,
+    set: Option<codly_core::orchestrator::required_checks::ChecksChoice>,
+) -> R<codly_core::orchestrator::required_checks::RequiredChecks> {
+    state.core().await?.required_checks(set).await.map_err(err)
+}
+
+/// Run the repo's required checks in the worktree of an agent you chat with ("Check the work").
+#[tauri::command]
+pub async fn check_agent(state: State<'_, AppState>, agent_id: String) -> R<Vec<codly_core::orchestrator::required_checks::CheckResult>> {
+    state.core().await?.check_agent(&agent_id).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn list_connections(state: State<'_, AppState>) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
     state.core().await?.connections().await.map_err(err)

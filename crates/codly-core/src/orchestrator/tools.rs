@@ -160,7 +160,7 @@ impl Inner {
             "acceptance_criteria": task.acceptance, "write_scope": task.write_scope, "verify": task.verify,
             "branch": task.branch, "worktree": task.worktree, "attempt": task.attempt, "status_reason": task.status_reason,
             "depends_on": deps, "notes": notes,
-            "rules": "Do not commit; Codly commits and merges. Call codly_submit_report once when done.",
+            "rules": "Do not commit; Codly commits and merges. Call codly_submit_report when done, and again after each fix Codly asks for.",
         }))
     }
 

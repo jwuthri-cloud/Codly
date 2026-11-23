@@ -1,7 +1,9 @@
 //! The gate (agents-backend §6.7–6.8), run when a worker's turn ends with nothing queued:
 //! Codly commits the worktree → runs every verify command → checks the changed files against
 //! the write scope → optionally asks a reviewer of another vendor → merges, serially, into the
-//! plan's integration branch. Failures go back to the same worker session as feedback, at
+//! plan's integration branch. After the task's verify commands (the Lead wrote them) come the
+//! repo's required checks (yours: `required_checks.rs`), when you turned them on.
+//! Failures go back to the same worker session as feedback, at
 //! most `MAX_FIX_ROUNDS` times; merge conflicts (another task's doing) have their own
 //! `MAX_CONFLICT_ROUNDS`. What the worker cannot fix (a check that ran out of time, a verify
 //! command with a risk nobody allowed) blocks the task for you: its card re-runs the checks
@@ -23,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
+use super::required_checks::{self, Required};
 use super::scope::ScopeMatcher;
 use super::{Inner, approvals, lock, merge_conflict, names, prompts, row, runs::RunReq, runs::new_session, scheduler};
 use crate::git::MergeOutcome;
@@ -37,9 +40,10 @@ const TAIL_LINES: usize = 80;
 /// How long the gate waits before it makes a git step a second time (`Inner::git_step`).
 const GIT_RETRY_AFTER: Duration = Duration::from_secs(2);
 /// Keys in a gate decision's detail that say the task's checks stopped it: one failed its last
-/// fix round, one ran out of time, some wait for your OK. The task's card reads the same keys
-/// (src/lib/util/gate.ts) to offer Merge anyway.
-const CHECK_STOPS: [&str; 3] = ["failed_check", "timed_out", "held"];
+/// fix round, one ran out of time, some wait for your OK, your required checks are not the
+/// text you turned on. The task's card reads the same keys (src/lib/util/gate.ts) to offer
+/// Merge anyway.
+const CHECK_STOPS: [&str; 4] = ["failed_check", "timed_out", "held", "required"];
 
 /// Rounds a task has used since it last started (a retry starts them again).
 #[derive(Default)]
@@ -305,7 +309,21 @@ impl Inner {
                 }
                 return self.hold_checks(&task, &worker, held).await;
             }
-            for cmd in &task.verify {
+            // Then your own commands, the repo's required checks. You turned them on for the
+            // text they have, so they need no OK. Another text by now: nothing runs in their
+            // place and nothing passes; the task waits for you.
+            let required = match self.required_checks(&ws_id, &repo)? {
+                Required::Off => vec![],
+                Required::Run(cmds) => cmds,
+                Required::Stale(why) => {
+                    if self.steered(pass, &worker, turns) {
+                        return self.wait_for_turn(task_id);
+                    }
+                    let reason = format!("blocked: {} Then re-run the checks, or merge anyway.", required_checks::not_run(&why));
+                    return self.park(&task, &worker, reason, json!({ "plan_id": task.plan_id, "required": why })).await;
+                }
+            };
+            for cmd in task.verify.iter().chain(required.iter().filter(|c| !task.verify.contains(c))) {
                 let v = self.run_shell(&wt, cmd).await;
                 self.emit(
                     ws,
@@ -874,7 +892,7 @@ impl Inner {
     /// `CODLY_PORT_BASE`), own process group, the Settings' time limit, last 80 lines of
     /// combined output kept. Only for a command that passed the risk check (`command_risks`)
     /// or that you allowed.
-    async fn run_shell(&self, wt: &Path, cmd: &str) -> VerifyOut {
+    pub(super) async fn run_shell(&self, wt: &Path, cmd: &str) -> VerifyOut {
         let mut env = verify_env(&self.base_env);
         env.extend(self.worktree_env(wt));
         verify_in(wt, cmd, env, self.verify_timeout()).await

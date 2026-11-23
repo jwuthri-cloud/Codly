@@ -48,6 +48,9 @@ import type { Lot } from './gen/Lot';
 import { HousekeepingDemo } from './demo/housekeeping';
 import { WorktreeDemo } from './demo/worktree';
 import type { SetupChoice } from './gen/SetupChoice';
+import { ChecksDemo } from './demo/checks';
+import type { ChecksChoice } from './gen/ChecksChoice';
+import { checksLine } from './util/checks';
 import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import { MockApprovalRules } from './demo/approvalRules';
@@ -176,6 +179,7 @@ export class MockTransport implements Transport {
   private takeovers = new DemoTakeovers();
   private hk: HousekeepingDemo | undefined;
   private worktrees = new WorktreeDemo();
+  private checks = new ChecksDemo();
 
   constructor() {
     const p = params();
@@ -683,6 +687,15 @@ export class MockTransport implements Transport {
         return (this.hk ??= new HousekeepingDemo(sim.now())).handle(cmd, a, sim.tasks.values(), sim.now());
       case 'worktree_setup':
         return this.worktrees.setup((a.set as SetupChoice | null) ?? null);
+      case 'required_checks':
+        return this.checks.status((a.set as ChecksChoice | null) ?? null);
+      case 'check_agent': {
+        // Like the core: the result is also a decision, where the agent's Git tab reads it.
+        const results = this.checks.run();
+        const name = sim.agents.get(String(a.agentId))?.name ?? 'the agent';
+        sim.decision('gate', 'human', `you checked ${name}'s work: ${checksLine(results)}`, { agent_id: String(a.agentId), checks: results });
+        return results;
+      }
       case 'diagnostics':
         // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
         return {

@@ -263,6 +263,8 @@ pub fn run() {
             commands::board_sweep,
             commands::board_archive,
             commands::worktree_setup,
+            commands::required_checks,
+            commands::check_agent,
             commands::list_connections,
             commands::update_connection,
             commands::storage_report,

@@ -25,7 +25,9 @@
 //! - `checkpoints` an agent's files before each turn (private refs), "Restore files to this point"
 //! - `takeover` "Open in my terminal": an idle agent's CLI session goes to you, and comes back
 //! - `merge_conflict` a conflict at the final merge: its files, an agent that resolves it, checks on the merge result
-//! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`
+//! - `required_checks` the repo owner's `.codly/checks`: run by the gate for every task and plan
+//! - pure, unit-tested policy: `planner`, `scheduler`, `approvals`, `scope`, `names`, `prompts`,
+//!   `weak_checks` (a verify command that proves nothing)
 
 pub mod accounts;
 pub mod approvals;
@@ -70,6 +72,8 @@ mod rebrief;
 pub mod worktree_setup;
 pub mod activity;
 pub mod takeover;
+pub mod required_checks;
+mod weak_checks;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -266,6 +270,8 @@ struct Inner {
     stuck_told: Mutex<HashMap<Id, String>>,
     /// The last look for plans merged outside Codly, per office.
     merge_looks: Mutex<HashMap<Id, plans::MergeLook>>,
+    /// 1:1 agents whose work "Check the work" checks now: one run for an agent at a time.
+    checking: Mutex<HashSet<Id>>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -438,6 +444,7 @@ impl Core {
             retries: Mutex::new(retry::Retries::default()),
             stuck_told: Mutex::new(HashMap::new()),
             merge_looks: Mutex::new(HashMap::new()),
+            checking: Mutex::new(HashSet::new()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);

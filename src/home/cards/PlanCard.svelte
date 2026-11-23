@@ -1,8 +1,9 @@
 <!--
   The plan card: the clearest thing in the conversation. What you asked (your words), the Lead's
   plan as a checklist (each task: title, who does it, what it waits on, its state), open
-  questions highlighted, and the one action that matters: Run plan ⌘↵. While the plan runs the
-  same checklist stays here and updates live; once it is over it folds to one line you can open.
+  questions highlighted, and the one action that matters: Run plan ⌘↵. Tasks with no real check
+  are marked (WeakChecks), before the plan runs and after. While the plan runs the same checklist
+  stays here and updates live; once it is over it folds to one line you can open.
   A running plan that cannot go on by itself says so here, with Keep what is merged.
 -->
 <script lang="ts">
@@ -17,6 +18,7 @@
   import Icon from '../../components/Icon.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
   import TaskRow from './TaskRow.svelte';
+  import WeakChecks from './WeakChecks.svelte';
 
   interface Props {
     planId: string;
@@ -120,6 +122,7 @@
         {#each tasks as t (t.id)}<TaskRow task={t} {plan} goal={deciding} />{/each}
       </ol>
 
+      <WeakChecks {plan} />
       {#if deciding && plan.open_questions.length}
         <ul class="qs">
           {#each plan.open_questions as q, i (i)}<li><Icon name="question" size={14} /><span>{q}</span></li>{/each}

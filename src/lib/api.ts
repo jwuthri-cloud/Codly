@@ -27,6 +27,9 @@ import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
 import type { SetupChoice } from './gen/SetupChoice';
 import type { WorktreeSetup } from './gen/WorktreeSetup';
+import type { CheckResult } from './gen/CheckResult';
+import type { ChecksChoice } from './gen/ChecksChoice';
+import type { RequiredChecks } from './gen/RequiredChecks';
 import type { StorageCleanup } from './gen/StorageCleanup';
 import type { StoragePolicy } from './gen/StoragePolicy';
 import type { StorageReport } from './gen/StorageReport';
@@ -511,6 +514,10 @@ export const api = {
   boardArchive: (query: string | null = null) => call<ArchivedItem[]>('board_archive', { query }),
   /** What a new worktree of the open repo gets; pass `set` to turn its setup script on (for the text you read) or off. */
   worktreeSetup: (set: SetupChoice | null = null) => call<WorktreeSetup>('worktree_setup', { set }),
+  /** The open repo's required checks (`.codly/checks`); pass `set` to turn them on (for the text you read) or off. */
+  requiredChecks: (set: ChecksChoice | null = null) => call<RequiredChecks>('required_checks', { set }),
+  /** Run the required checks in the worktree of an agent you chat with; each command's result. */
+  checkAgent: (agentId: string) => call<CheckResult[]>('check_agent', { agentId }),
   /** Default MCP servers for new agents, with their switches and whether each key is stored. */
   listConnections: () => call<Connection[]>('list_connections'),
   /** Switch a server and/or store its key (Keychain; `value: null` removes it). Applies to the next spawn. */

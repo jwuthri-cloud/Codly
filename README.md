@@ -292,6 +292,12 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   in the worktree's top folder, with the program its first line names (`#!/usr/bin/env bash`) or
   `/bin/sh`: use paths from that folder, or `$CODLY_REPO_PATH` for your checkout, not the script's
   own place (`$0`). The script is not sandboxed.
+- You decide what passes. Write the commands that must pass in `.codly/checks`, one on each line
+  (`pnpm check`, `pnpm test`), and turn them on in Settings → Safety → Required checks, which shows
+  them. Codly then runs them for every task, after the checks the Lead wrote, and again on every
+  finished plan; **Check the work**, in the Git tab of an agent you chat with, runs them on that
+  agent's work. Codly runs only the text you turned on: if the file changes, tasks wait until you read
+  it again. A plan card also marks a task whose own checks cannot fail (`true`, `test -f …`).
 - Before each turn of an agent, Codly keeps the files of the agent's worktree as a checkpoint (a commit
   under a private ref, on no branch). **Restore files to this point**, in the agent's Git tab, puts the
   files back and can be undone. It changes files only: the agent still remembers its later turns. An agent

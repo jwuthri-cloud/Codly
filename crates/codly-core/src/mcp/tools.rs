@@ -205,8 +205,9 @@ pub fn tool_specs(role: Role) -> Vec<Value> {
         Role::Worker => {
             tools.push(tool(
                 SUBMIT_REPORT,
-                "Call this exactly once when you finish your task (or cannot continue). Codly then commits your worktree, \
-                 re-runs the verify commands and merges your work. Do not commit yourself.",
+                "Call this when you finish your task (or cannot continue), and again each time you finish a fix that Codly \
+                 asked for. Codly then commits your worktree, re-runs the verify commands and merges your work. Do not \
+                 commit yourself.",
                 json!({ "type": "object", "properties": {
                     "status": { "type": "string", "enum": ["done", "blocked", "failed"] },
                     "summary": { "type": "string", "description": "What you changed and why, in 1-5 short sentences (ASD-STE100: one instruction or fact per sentence)." },

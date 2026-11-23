@@ -10,7 +10,7 @@ fn task(id: &str, scope: &[&str], deps: &[&str]) -> TaskInput {
         acceptance_criteria: vec![format!("{id} works")],
         write_scope: scope.iter().map(|s| s.to_string()).collect(),
         depends_on: deps.iter().map(|s| s.to_string()).collect(),
-        verify: vec!["true".into()],
+        verify: vec!["cargo test".into()],
         size: Some("M".into()),
         ..Default::default()
     }
@@ -108,7 +108,7 @@ fn trivially_small_plans_collapse_to_one_task() {
     let mut b = task("t2", &["docs/intro.md"], &[]);
     a.size = Some("S".into());
     b.size = Some("s".into()); // normalized
-    b.verify = vec!["true".into(), "test -f docs/intro.md".into()];
+    b.verify = vec!["cargo test".into(), "test -f docs/intro.md".into()];
     b.agent_hint = Some("codex".into());
     a.agent_hint = Some("codex".into());
     let v = validate(plan(vec![a, b])).unwrap();
@@ -116,7 +116,7 @@ fn trivially_small_plans_collapse_to_one_task() {
     let t = &v.plan.tasks[0];
     assert_eq!(t.id, "t1");
     assert!(t.goal.contains("1. task t1") && t.goal.contains("2. task t2"), "{}", t.goal);
-    assert_eq!(t.verify, vec!["true", "test -f docs/intro.md"], "deduplicated, in order");
+    assert_eq!(t.verify, vec!["cargo test", "test -f docs/intro.md"], "deduplicated, in order");
     assert_eq!(t.write_scope, vec!["README.md", "docs/intro.md"]);
     assert_eq!(t.agent_hint.as_deref(), Some("codex"));
     assert!(v.fixes.last().unwrap().summary.starts_with("collapsed 2 small tasks"));
@@ -190,4 +190,41 @@ fn small_tasks_staffed_differently_are_not_collapsed() {
     let v = validate(plan(vec![small("t1", "README.md", "Ana"), small("t2", "docs/a.md", "Ana")])).unwrap();
     assert_eq!(v.plan.tasks.len(), 1);
     assert_eq!(v.plan.tasks[0].member(), Some("Ana"), "the merged task keeps its assignee");
+}
+
+/// A task whose checks cannot fail on the work is accepted and marked; one real check is enough.
+#[test]
+fn marks_a_task_whose_verify_commands_prove_nothing() {
+    let mut noop = task("t1", &["a/**"], &[]);
+    noop.verify = vec!["true".into(), "pnpm test || true".into()];
+    let mut exists = task("t2", &["b/**"], &[]);
+    exists.verify = vec!["test -f b/new.ts".into()];
+    let mut real = task("t3", &["c/**"], &[]);
+    real.verify = vec!["echo checking".into(), "pnpm test".into()];
+    let v = validate(plan(vec![noop, exists, real])).unwrap();
+    let weak: Vec<_> = v.fixes.iter().filter(|f| f.detail["rule"] == "weak_verify").collect();
+    assert_eq!(weak.len(), 2, "{:?}", v.fixes.iter().map(|f| &f.summary).collect::<Vec<_>>());
+    assert_eq!(weak[0].summary, "t1: no verify command can fail on the work (`true` always passes, `pnpm test || true` always passes): add the project's test, typecheck or build command");
+    assert_eq!(weak[0].detail["task"], "t1");
+    assert_eq!(weak[0].detail["checks"][1], serde_json::json!({ "command": "pnpm test || true", "why": "always passes" }));
+    assert_eq!(weak[1].detail["task"], "t2");
+    assert_eq!(weak[1].detail["checks"], serde_json::json!([{ "command": "test -f b/new.ts", "why": "only checks that a file is there" }]));
+    assert_eq!(v.plan.tasks.len(), 3, "the plan is kept as the Lead wrote it");
+}
+
+/// Small tasks that Codly merges into one are judged as that one task.
+#[test]
+fn judges_the_checks_of_a_collapsed_task_together() {
+    let small = |id: &str, file: &str, verify: &str| {
+        let mut t = task(id, &[file], &[]);
+        t.size = Some("S".into());
+        t.verify = vec![verify.into()];
+        t
+    };
+    let v = validate(plan(vec![small("t1", "README.md", "true"), small("t2", "docs/a.md", "pnpm check")])).unwrap();
+    assert_eq!(v.plan.tasks.len(), 1);
+    assert!(!v.fixes.iter().any(|f| f.detail["rule"] == "weak_verify"), "the merged task has a real check");
+    let v = validate(plan(vec![small("t1", "README.md", "true"), small("t2", "docs/a.md", "echo ok")])).unwrap();
+    let weak = v.fixes.last().unwrap();
+    assert_eq!((&weak.detail["rule"], &weak.detail["task"]), (&serde_json::json!("weak_verify"), &serde_json::json!("t1")));
 }
