@@ -222,6 +222,11 @@ without a turn: n=4, the two here and the two `idle-interrupt` recordings of sec
   at the helper's own `task_notification` has no helper left open when the interrupted turn ends, and needs no rule
   of its own for it. (Only a host that did not follow that line and kept a background helper as "still at work"
   would be wrong.)
+- What "EVERY helper" rests on: each recording of this part has ONE helper, always in the middle of a Bash call.
+  Part 5, section 4, adds TWO background helpers at once (each ended with its own `task_updated` / `task_notification`
+  pair, the list going from 2 to 1 to 0, all before the answer; n=2) and a helper that waited for its model answer,
+  with no Bash call (ended the same way, its one `user` line is `[Request interrupted by user]`; n=2). A nested
+  helper and a helper with a background command of its own are still not recorded.
 
 ## 2. The stop of a helper inside a shutdown; `stop_task` on a foreground helper
 
@@ -318,6 +323,8 @@ Every line from the driver's note before `stop_task` (first recording):
 # t=13.23
 {"_meta":{"after_the_exit":{"lines_after_stdin_was_closed":["assistant","assistant","result/success"],"sleep_139_alive":false,"sleep_67_alive":false}},"_t":13.229}
 ```
+
+The note `before_stdin_is_closed` above is older than its time stamp: the driver listed the lines, then looked for two processes, then wrote the note, and the `user`, `user` and `system/init` lines came in between (they are in the file before the note; its `init_of_a_turn` is null and its list has 4 lines). Stdin was closed after that `init`. Part 5 ("Notes written late", "Part 4") lists every note of part 4 this touches; the script is fixed.
 
 ### `idle-interrupt-again`: the self-started turn is interrupted
 

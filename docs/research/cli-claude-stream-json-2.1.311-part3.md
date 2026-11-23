@@ -117,7 +117,9 @@ What the adapter can rely on (n=2):
 - Different from a Bash task (part 2, scenario 6: no turn after a stop): after the stop of a subagent the CLI starts a
   turn BY ITSELF at once (`system/init`, the model says the helper was stopped, `result` with
   `origin.kind:"task-notification"`). A host that stops a helper must expect one more turn, and at shutdown it must
-  stop that turn too or close before it.
+  stop that turn too or close before it. (Corrected by part 4, section 2: closing stdin right after the answer to
+  `stop_task` does not stop that turn, it runs to its end; send `interrupt` in place of `stop_task` for helpers. And
+  part 5, section 11: with a turn of the agent running, no turn starts by itself after the stop.)
 - `get_task_output` does not know a subagent's id: a control ERROR
   (`get_task_output: no shell or Monitor task with that task_id in this session`), before and after the stop.
 - `stop_task` on the stopped subagent answers `{}` again and writes nothing (as for a Bash task).

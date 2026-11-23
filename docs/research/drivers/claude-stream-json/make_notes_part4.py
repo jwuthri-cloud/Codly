@@ -285,6 +285,11 @@ without a turn: n=4, the two here and the two `idle-interrupt` recordings of sec
   at the helper's own `task_notification` has no helper left open when the interrupted turn ends, and needs no rule
   of its own for it. (Only a host that did not follow that line and kept a background helper as "still at work"
   would be wrong.)
+- What "EVERY helper" rests on: each recording of this part has ONE helper, always in the middle of a Bash call.
+  Part 5, section 4, adds TWO background helpers at once (each ended with its own `task_updated` / `task_notification`
+  pair, the list going from 2 to 1 to 0, all before the answer; n=2) and a helper that waited for its model answer,
+  with no Bash call (ended the same way, its one `user` line is `[Request interrupted by user]`; n=2). A nested
+  helper and a helper with a background command of its own are still not recorded.
 """ % (secs([t["answer"] for t in T1B + T1I]), WITH_BASH, len(STOPS), len(STOPS)))
 
 # ================================================================= 2
@@ -307,6 +312,14 @@ w(block(tl(N2["sequence"][0], SEQ2, start=from_note("before_the_stop"), text=120
 w("### `idle-close-now`: `stop_task` with no turn running, stdin closed at once\n")
 w("Every line from the driver's note before `stop_task` (first recording):\n")
 w(block(tl(N2["idle-close-now"][0], SEQ2, start=from_note("before_the_stop"), text=120, maxlist=9)))
+_late = meta(N2["idle-close-now"][0], "before_stdin_is_closed")[0]
+_before = fx(N2["idle-close-now"][0])[:[i for i, l in enumerate(fx(N2["idle-close-now"][0])) if from_note("before_stdin_is_closed")(l)][0]]
+check(_late["seconds_from_stop_task"]["init_of_a_turn"] is None and len(_late["before_stdin_is_closed"]["lines_since_the_first_request"]) == 4
+      and any(sub(l) == "init" for l in _before[[i for i, l in enumerate(_before) if "_sent" in l][-1]:]), "the late note of idle-close-now")
+w("The note `before_stdin_is_closed` above is older than its time stamp: the driver listed the lines, then looked for two "
+  "processes, then wrote the note, and the `user`, `user` and `system/init` lines came in between (they are in the file before "
+  "the note; its `init_of_a_turn` is null and its list has 4 lines). Stdin was closed after that `init`. Part 5 (\"Notes written late\", "
+  "\"Part 4\") lists every note of part 4 this touches; the script is fixed.\n")
 w("### `idle-interrupt-again`: the self-started turn is interrupted\n")
 w("From `stop_task` on (first recording):\n")
 w(block(tl(N2["idle-interrupt-again"][0], SEQ2, start=lambda l: "_sent" in l and l["_sent"].get("request", {}).get("subtype") == "stop_task", text=120, maxlist=9)))

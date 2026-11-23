@@ -17,5 +17,8 @@ s.control("mcp_reconnect", serverName="exits-at-once", wait=30)
 s.control("mcp_status")
 s.control("mcp_toggle", serverName="no-such-command", enabled=False)
 s.control("mcp_status")
+# The switch is saved in ~/.claude.json under the work folder (part 5, section 1): turn the server on again so that the
+# folder's `disabledMcpServers` ends empty (a failed "on" still empties it: part 5, section 9).
+s.control("mcp_toggle", serverName="no-such-command", enabled=True)
 time.sleep(1)
 print("exit:", s.close())

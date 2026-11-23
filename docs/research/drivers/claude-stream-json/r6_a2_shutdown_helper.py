@@ -82,10 +82,13 @@ if variant == "idle-interrupt-again":
     times["seconds_from_the_interrupt"] = stamps(s, sent_at(s, "interrupt"), answer=answer_to(s), result=is_result)
 elif variant == "idle-outwait":
     print("the self-started turn's result:", s.wait_results(n + 1, 40))
-times["seconds_from_stop_task"] = stamps(s, sent_at(s, "stop_task"), answer=stop_answer, task_notification=system("task_notification"),
-                                         init_of_a_turn=is_init, result_of_a_turn=is_result)
-s.note(before_stdin_is_closed=dict(lines_since_the_first_request=kinds(s, m0), list=open_tasks(s), sleep_139_alive=bool(helper.alive()),
-                                   sleep_67_alive=bool(fg.alive())), **times)
+alive = dict(sleep_139_alive=bool(helper.alive()), sleep_67_alive=bool(fg.alive()))
+# The process checks come first: the lines, the times and the note are then taken under the driver's lock in one step,
+# so no line can come between the list and the note's time stamp (the recordings of part 4 were made before this fix).
+with s.cv:
+    times["seconds_from_stop_task"] = stamps(s, sent_at(s, "stop_task"), answer=stop_answer, task_notification=system("task_notification"),
+                                             init_of_a_turn=is_init, result_of_a_turn=is_result)
+    s.note(before_stdin_is_closed=dict(lines_since_the_first_request=kinds(s, m0), list=open_tasks(s), **alive), **times)
 note_exit(s)
 m = s.mark()
 
