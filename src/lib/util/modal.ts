@@ -5,6 +5,9 @@
 // once the build targets Safari 17 (before that the top layer hides toasts, tooltips and menus).
 import { on } from 'svelte/events';
 
+/** What a closing dialog carries from the moment its close starts (components/Dialog.svelte). */
+export const CLOSING = '[data-closing]';
+
 const TABBABLE = 'a[href], button, input, select, textarea, summary, [tabindex]';
 
 export function modal(node: HTMLElement, onclose: () => void) {
@@ -12,8 +15,11 @@ export function modal(node: HTMLElement, onclose: () => void) {
   if (!node.hasAttribute('tabindex')) node.tabIndex = -1;
   if (!node.contains(prev)) node.focus();
   const stops = () => [...node.querySelectorAll<HTMLElement>(TABBABLE)].filter((el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.getClientRects().length);
+  // A dialog that is closing (it fades out) takes no key: an Esc then goes to what is under it.
+  const closing = () => !!node.closest(CLOSING);
   // `on`, not addEventListener: a field inside that handles its own Esc still goes first.
   const off = on(node, 'keydown', (e) => {
+    if (closing()) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -30,7 +36,7 @@ export function modal(node: HTMLElement, onclose: () => void) {
   // The focused control can go away (a button swapped for its confirm): focus is then on <body>
   // and no key reaches the node. The dialog on top still closes on Esc and takes Tab back in.
   const offDoc = on(document, 'keydown', (e) => {
-    if ((e.key !== 'Escape' && e.key !== 'Tab') || node.contains(document.activeElement)) return;
+    if ((e.key !== 'Escape' && e.key !== 'Tab') || node.contains(document.activeElement) || closing()) return;
     const open = document.querySelectorAll('[aria-modal="true"]');
     if (open[open.length - 1] !== node) return;
     e.preventDefault();

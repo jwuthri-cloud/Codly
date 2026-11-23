@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Plan } from '../gen/Plan';
 import type { Task } from '../gen/Task';
-import { denyKeyInField, ESC_STOP_WINDOW, escStep, escStop, type EscState } from '../state/esc';
+import { denyKeyInField, ESC_STOP_WINDOW, escStep, escStop, openOne, type EscState } from '../state/esc';
 import { keyTargetChanges } from '../state/keys';
 import { store } from '../state/store.svelte';
 import { ui } from '../state/ui.svelte';
 
-const home: EscState = { repeat: false, artifactOpen: false, selection: false, mode: 'blend', room: 'home', popupOpen: false, inOffice: false, findOpen: false, readingClosed: false };
+const home: EscState = { repeat: false, artifactOpen: false, selection: false, mode: 'blend', room: 'home', popupOpen: false, inOffice: false, findOpen: false, readingClosed: false, toastWaits: false };
 
 describe('Esc outside a text field', () => {
   it('closes what is open first, one step per press, and only then stops the turn', () => {
@@ -53,6 +53,42 @@ describe('Esc outside a text field', () => {
     expect(escStep({ ...home, room: 'terminal' })).toBeNull();
     expect(escStep({ ...home, popupOpen: true })).toBeNull();
     expect(escStep({ ...home, inOffice: true })).toBeNull();
+  });
+});
+
+describe('Esc and a toast that waits for you', () => {
+  it('dismisses the toast first and does nothing else: the sheet, the artifact and the turn wait for the next press', () => {
+    expect(escStep({ ...home, toastWaits: true, selection: true })).toBe('dismiss-toast');
+    expect(escStep({ ...home, toastWaits: true, artifactOpen: true })).toBe('dismiss-toast');
+    expect(escStep({ ...home, toastWaits: true, mode: 'office' })).toBe('dismiss-toast');
+    expect(escStep({ ...home, toastWaits: true })).toBe('dismiss-toast');
+    // Once it is gone, the next press closes the sheet.
+    expect(escStep({ ...home, selection: true })).toBe('deselect');
+  });
+
+  it('a dialog, a menu and the office keep their own Esc', () => {
+    expect(escStep({ ...home, toastWaits: true, popupOpen: true })).toBeNull();
+    expect(escStep({ ...home, toastWaits: true, popupOpen: true, selection: true })).toBe('deselect');
+    expect(escStep({ ...home, toastWaits: true, inOffice: true })).toBeNull();
+  });
+
+  it('a held key dismisses no more toasts and closes nothing while one waits', () => {
+    expect(escStep({ ...home, toastWaits: true, repeat: true, selection: true })).toBeNull();
+  });
+});
+
+describe('a dialog that is closing', () => {
+  /** An element of the page: `closing` says whether it is inside a dialog whose close has started. */
+  const el = (closing: boolean) => ({ closest: (selector: string) => (selector === '[data-closing]' && closing ? {} : null) });
+
+  it('is not open: an Esc while it fades out goes to what is under it', () => {
+    expect(openOne([el(true)])).toBe(false);
+    expect(openOne([])).toBe(false);
+  });
+
+  it('another dialog that is open still counts', () => {
+    expect(openOne([el(true), el(false)])).toBe(true);
+    expect(openOne([el(false)])).toBe(true);
   });
 });
 
