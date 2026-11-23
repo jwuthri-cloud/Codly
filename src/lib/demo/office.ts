@@ -240,8 +240,8 @@ export function demoCloseOffice(sim: Sim, workspaceId: string, rest: Sim[] = [])
     if (open) throw new Error(`${name} still has unfinished work (${open.key} "${open.title}"): finish or cancel it first`);
     const busy = [...office.agents.values()].find((a) => office.actor(a.id).inTurn);
     if (busy) throw new Error(`${busy.name} is in the middle of a turn in ${name}: wait for it, or stop it first`);
-    // Its agents stop, and the repo is no longer in the recent list.
-    for (const a of [...office.agents.values()]) if (a.status !== 'offline') office.patchAgent(a.id, { status: 'offline', activity: null, activity_label: null });
+    // Its agents stop, their runs end with their processes, and the repo is no longer in the recent list.
+    for (const a of [...office.agents.values()]) if (a.status !== 'offline' || a.run_id) office.patchAgent(a.id, { status: 'offline', activity: null, activity_label: null, run_id: null });
     office.recent = office.recent.filter((r) => r.repo_path !== office.workspace?.repo_path);
     office.workspace = null;
   } else if (other) {

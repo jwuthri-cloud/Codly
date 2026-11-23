@@ -28,8 +28,11 @@ index 3f1c2aa..9d0e4b7 100644
 
 export class DemoCheckpoints {
   private byAgent = new Map<string, Checkpoint[]>();
+  /** `changed`: has the agent changed a file yet? Codly takes a point only when a turn changed something: an agent that changed nothing has none. */
+  constructor(private changed: (agentId: string) => boolean = () => true) {}
 
   private points(agent: Agent, now: number): Checkpoint[] {
+    if (!this.changed(agent.id)) return [];
     let list = this.byAgent.get(agent.id);
     if (!list) {
       list = [

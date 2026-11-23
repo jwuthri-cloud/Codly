@@ -70,4 +70,16 @@ describe('DemoCheckpoints', () => {
     expect(() => demo.restore(agent({}), 99, NOW)).toThrow('that point is gone');
     expect(demo.list(agent({}), NOW).checkpoints).toHaveLength(3);
   });
+
+  it('an agent that changed nothing yet has no point and no last turn', () => {
+    const changed = new Set<string>();
+    const demo = new DemoCheckpoints((id) => changed.has(id));
+    const ada = agent({});
+    expect(demo.list(ada, NOW)).toEqual({ off: null, checkpoints: [], task: null, left_out: [] });
+    expect(demo.lastTurn(ada, NOW)).toBeNull();
+    expect(() => demo.restore(ada, 1, NOW)).toThrow('that point is gone');
+    // Once a turn changed a file, it has its points.
+    changed.add(ada.id);
+    expect(demo.list(ada, NOW).checkpoints).toHaveLength(3);
+  });
 });
