@@ -145,6 +145,30 @@ describe("a helper's call that is open when the turn ends", () => {
   });
 });
 
+describe('a Codex helper', () => {
+  // What the Codex adapter emits when the subagent's own turn starts before the `spawnAgent`
+  // call names its thread: nothing for that turn's start, then the helper when the call ends,
+  // under the call's id. A helper shows at the call whose id it carries.
+  it('shows at the call that started it, also when its thread started first', () => {
+    const codexHelper = (ts: number, status: string) => ev(ts, { type: 'sub_agent', call_id: 'k1', description: 'Find the flaky test', status });
+    apply(
+      ev(10, { type: 'turn_started', input: 'Have a subagent find the flaky test' }),
+      started(11, 'k1', 'collabAgentToolCall', 'delegate'),
+      completed(13, 'k1'),
+      codexHelper(13, 'running'),
+    );
+    let [row] = works();
+    expect(calls(row.segs)).toEqual(['k1']);
+    expect(row.helpers).toMatchObject([{ callId: 'k1', description: 'Find the flaky test', status: 'running' }]);
+    expect(helperState(row.helpers[0], row.segs[0])).toBe('running'); // its call returned, the helper did not
+
+    apply(codexHelper(20, 'completed'));
+    [row] = works();
+    expect(row.helpers).toHaveLength(1);
+    expect(helperState(row.helpers[0], row.segs[0])).toBe('done');
+  });
+});
+
 describe('splitHelpers', () => {
   const seg = (callId: string, parent?: string): Seg => ({
     callId, agentId: 'l1', taskId: null, activity: 'execute', name: 'Bash', label: '', target, input: {}, confidence: 'observed',

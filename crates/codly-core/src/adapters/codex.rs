@@ -207,7 +207,7 @@ impl State {
                 let item = &params["item"];
                 let children: Vec<&str> = match item["type"].as_str() {
                     Some("collabAgentToolCall") if item["tool"].as_str().is_some_and(|tool| WAKES_SUBAGENT.contains(&tool)) => {
-                        item["receiverThreadIds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect()
+                        receiver_threads(item)
                     }
                     Some("subAgentActivity") => item["agentThreadId"].as_str().into_iter().collect(),
                     _ => return,
@@ -244,6 +244,11 @@ const WAKES_SUBAGENT: [&str; 5] = ["spawnAgent", "resumeAgent", "sendInput", "se
 /// The thread a server message is about: its `threadId`, or the thread of a `thread/started`.
 fn thread_of(params: &Value) -> Option<&str> {
     params["threadId"].as_str().or(params["thread"]["id"].as_str())
+}
+
+/// The threads a `collabAgentToolCall` item names: for `spawnAgent`, the one it created.
+fn receiver_threads(item: &Value) -> Vec<&str> {
+    item["receiverThreadIds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect()
 }
 
 struct AppServer {
@@ -1387,6 +1392,8 @@ struct ItemInfo {
     command: Option<String>,
     /// The subagent thread that runs it. None: the agent's own thread.
     thread: Option<String>,
+    /// A `spawnAgent` call that named no thread when it started: it may name one when it ends.
+    unnamed_spawn: bool,
 }
 
 /// A thread one of the agent's Codex subagents works on.
@@ -1400,6 +1407,9 @@ struct Subagent {
     /// thread before the row was first told (one row for the call and its subagent), else
     /// its thread.
     row: Option<String>,
+    /// What its row waits to say (`subagent_row`) while a `spawnAgent` call that has named no
+    /// thread yet is open: that call may name this thread, and the row is then the call's.
+    held: Option<String>,
     /// What its row last said (description, status): the same words are not told twice.
     told: Option<(String, String)>,
     /// Its running turn: stopped when the agent is.
@@ -1542,8 +1552,19 @@ impl CodexNormalizer {
     /// Tell the subagent's row in the agent's list of helpers, when it has news. It says who
     /// works and on what, as far as Codex told: "Ada (explorer): <prompt>", the name, the
     /// prompt, or "Codex subagent".
+    ///
+    /// The conversation shows a helper at the call that is its row's key, so a subagent that
+    /// has no row waits while a `spawnAgent` call that named no thread is open: its own
+    /// `turn/started` can come before the call names it. From the codex-cli 0.166.0 types, not
+    /// verified live: the types do not say in which order the two threads' messages come.
     fn subagent_row(&mut self, thread: &str, status: &str, out: &mut Vec<EventKind>) {
+        let unnamed_spawn = self.items.values().any(|i| i.unnamed_spawn);
         let sub = self.subagents.entry(thread.to_string()).or_default();
+        if sub.row.is_none() && unnamed_spawn {
+            sub.held = Some(status.to_string());
+            return;
+        }
+        sub.held = None;
         let call_id = sub.row.get_or_insert_with(|| thread.to_string()).clone();
         let description = match (&sub.name, &sub.prompt) {
             (Some(name), Some(prompt)) => format!("{name}: {prompt}"),
@@ -1556,19 +1577,33 @@ impl CodexNormalizer {
         }
     }
 
+    /// The rows that waited for a `spawnAgent` call to name their threads, once no such call
+    /// is open: nothing named them, so each subagent has a row of its own, keyed by its thread.
+    fn tell_held(&mut self, out: &mut Vec<EventKind>) {
+        if self.items.values().any(|i| i.unnamed_spawn) {
+            return;
+        }
+        let mut held: Vec<(String, String)> = self.subagents.iter().filter_map(|(thread, s)| Some((thread.clone(), s.held.clone()?))).collect();
+        held.sort();
+        for (thread, status) in held {
+            self.subagent_row(&thread, &status, out);
+        }
+    }
+
     /// The rows of a collab call. Only `spawnAgent` has any: it names the threads it created
     /// (`receiverThreadIds`) and what it asked of them (`prompt`), and each subagent has one
-    /// row. A thread whose row was not told yet takes the call for its key, so the list of
-    /// helpers shows the subagent at the call that started it; a thread that has a row keeps
-    /// it and gets the prompt. The other calls (`wait`, `closeAgent`, `sendInput`...) are tool
-    /// calls about subagents that have their rows: they add none. `ended`: the call is over.
+    /// row. A thread whose row was not told yet (it may have waited for this call: `held`)
+    /// takes the call for its key, so the list of helpers shows the subagent at the call that
+    /// started it; a thread that has a row keeps it and gets the prompt. The other calls
+    /// (`wait`, `closeAgent`, `sendInput`...) are tool calls about subagents that have their
+    /// rows: they add none. `ended`: the call is over.
     /// From the codex-cli 0.166.0 types (the `collabAgentToolCall` item), not verified live:
     /// the types do not say whether the call names its thread when it starts or when it ends.
     fn spawned(&mut self, call: &str, item: &Value, ended: bool, out: &mut Vec<EventKind>) {
         if item["tool"] != "spawnAgent" {
             return;
         }
-        let threads: Vec<&str> = item["receiverThreadIds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let threads = receiver_threads(item);
         let prompt = item["prompt"].as_str().map(str::trim).filter(|p| !p.is_empty()).map(|p| classify::truncate_chars(p, NOTICE_MAX));
         let call_status = if ended { item["status"].as_str().unwrap_or("completed") } else { "started" };
         for thread in &threads {
@@ -1578,8 +1613,8 @@ impl CodexNormalizer {
             }
             // One row cannot stand for two subagents: those of a call that names several are
             // keyed by their threads.
-            if threads.len() == 1 && sub.row.is_none() {
-                sub.row = Some(call.to_string());
+            if sub.row.is_none() {
+                sub.row = Some(if threads.len() == 1 { call } else { *thread }.to_string());
             }
             // Its own thread has the last word on what it does; the call speaks until then.
             let status = if sub.turn.is_some() { "running" } else { sub.ended.unwrap_or(call_status) };
@@ -1590,6 +1625,9 @@ impl CodexNormalizer {
         if ended && threads.is_empty() {
             let description = prompt.unwrap_or_else(|| "Codex subagent".into());
             out.push(EventKind::SubAgent { call_id: call.to_string(), description, status: call_status.into() });
+        }
+        if ended {
+            self.tell_held(out);
         }
     }
 
@@ -1680,6 +1718,8 @@ impl CodexNormalizer {
                 } else if running {
                     self.subagent_ended(thread, "stopped", &mut out);
                 }
+                // A `spawnAgent` call of its own went with its turn.
+                self.tell_held(&mut out);
                 let st = self.resting_status();
                 self.set_status(st, &mut out);
             }
@@ -1744,6 +1784,8 @@ impl CodexNormalizer {
                 // A subagent's turn is its own: what it runs or waits for outlives this one.
                 out.extend(self.cancel_approvals(None));
                 self.items.retain(|_, i| i.thread.is_some());
+                // A `spawnAgent` call that was open names no thread any more.
+                self.tell_held(&mut out);
                 self.waiting = false;
                 self.interrupt_requested = false;
                 self.turn_announced = false;
@@ -1911,6 +1953,7 @@ impl CodexNormalizer {
                 diff: diff.map(|d| classify::truncate_output(&d, OUTPUT_MAX)),
                 command: item["command"].as_str().map(str::to_owned),
                 thread: thread.map(str::to_owned),
+                unnamed_spawn: ty == "collabAgentToolCall" && item["tool"] == "spawnAgent" && receiver_threads(item).is_empty(),
             },
         );
         let st = self.busy_status();
@@ -2916,8 +2959,9 @@ mod tests {
         let ev = norm.on_notification("turn/completed", &turn("s2", "su2", "completed"));
         assert_eq!(rows(&ev), [row("k2", "Find the flaky test", "completed")]);
 
-        // A thread nothing named yet has a row of its own, and the row is not blank. The call
-        // that names it afterwards adds no second row: the subagent's row now says what it does.
+        // A thread nothing named yet, with no `spawnAgent` call open that could name it, has a
+        // row of its own, and the row is not blank. A call that names it afterwards adds no
+        // second row: the subagent's row now says what it does.
         let ev = norm.on_notification("turn/started", &turn("s3", "su3", "inProgress"));
         assert_eq!(rows(&ev), [row("s3", "Codex subagent", "running")]);
         let ev = norm.on_notification("item/started", &begun("main", "u1", spawn("k3", "inProgress", json!([]))));
@@ -2926,6 +2970,35 @@ mod tests {
         assert_eq!(rows(&ev), [row("s3", "Find the flaky test", "running")]);
         let ev = norm.on_notification("turn/completed", &turn("s3", "su3", "completed"));
         assert_eq!(rows(&ev), [row("s3", "Find the flaky test", "completed")]);
+
+        // The subagent's turn starts while the call that started it is open and has named no
+        // thread: its row waits for the call, and is the call's like the others (the
+        // conversation shows a helper at the call that is its row's key). A stop reaches it.
+        norm.on_notification("item/started", &begun("main", "u1", spawn("k9", "inProgress", json!([]))));
+        let ev = norm.on_notification("turn/started", &turn("s9", "su9", "inProgress"));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        assert_eq!(norm.subagent_turns(), [("s9".to_string(), "su9".to_string())]);
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k9", "completed", json!(["s9"]))));
+        assert_eq!(rows(&ev), [row("k9", "Find the flaky test", "running")]);
+        let ev = norm.on_notification("turn/completed", &turn("s9", "su9", "completed"));
+        assert_eq!(rows(&ev), [row("k9", "Find the flaky test", "completed")]);
+
+        // A quick subagent's turn is over before the call names it: one row, at the call.
+        norm.on_notification("item/started", &begun("main", "u1", spawn("k10", "inProgress", json!([]))));
+        let mut ev = norm.on_notification("turn/started", &turn("s10", "su10", "inProgress"));
+        ev.extend(norm.on_notification("turn/completed", &turn("s10", "su10", "completed")));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k10", "completed", json!(["s10"]))));
+        assert_eq!(rows(&ev), [row("k10", "Find the flaky test", "completed")]);
+
+        // The call ends and names nobody: the subagent that waited has a row of its own.
+        norm.on_notification("item/started", &begun("main", "u1", spawn("k11", "inProgress", json!([]))));
+        let ev = norm.on_notification("turn/started", &turn("s11", "su11", "inProgress"));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("item/completed", &ended("main", "u1", spawn("k11", "failed", json!([]))));
+        assert_eq!(rows(&ev), [row("k11", "Find the flaky test", "failed"), row("s11", "Codex subagent", "running")]);
+        let ev = norm.on_notification("turn/completed", &turn("s11", "su11", "completed"));
+        assert_eq!(rows(&ev), [row("s11", "Codex subagent", "completed")]);
 
         // The subagent's own thread has the last word: a call that ends after a failed
         // subagent does not turn its row to "completed".
@@ -2970,6 +3043,14 @@ mod tests {
         assert_eq!(norm.subagent_turns(), [("s4".to_string(), "su4".to_string())]);
         let ev = norm.turn_failed();
         assert!(matches!(&ev[..], [EventKind::TurnCompleted { status: TurnStatus::Failed, .. }, EventKind::StatusChanged { status: AgentStatus::Working }]), "{ev:?}");
+
+        // The agent's turn ends with the call still open: no call names the subagent that
+        // waited, so it has a row of its own. (`s4` never had a row to tell: it gets none.)
+        norm.on_notification("item/started", &begun("main", "u2", spawn("k12", "inProgress", json!([]))));
+        let ev = norm.on_notification("turn/started", &turn("s12", "su12", "inProgress"));
+        assert!(rows(&ev).is_empty(), "{ev:?}");
+        let ev = norm.on_notification("turn/completed", &turn("main", "u2", "interrupted"));
+        assert_eq!(rows(&ev), [row("s12", "Codex subagent", "running")]);
     }
 
     #[test]
