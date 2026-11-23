@@ -28,7 +28,7 @@ HOME = os.path.expanduser("~")
 DOC_NAME = os.environ.get("DOC_NAME", "the document next to the fixtures")
 # MCP servers the scenarios themselves configure. Every other server name is this machine's and is removed.
 OWN_MCP = ("exits-at-once", "no-such-command", "needs-login", "ping-project",
-           "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user")
+           "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user", "ping-live")
 
 
 def cli_version():
@@ -148,6 +148,8 @@ def transform(v, ids, sig, key=None):
             d["terminal_slash_commands"] = d["terminal_slash_commands"][:1]
         d["mcp_servers"] = [s for s in d.get("mcp_servers", []) if s.get("name") in OWN_MCP]
         d["tools"] = [t for t in d.get("tools", []) if not t.startswith("mcp__") or t.split("__")[1] in OWN_MCP]
+        if d.get("output_style", "default") != "default":  # a run that reads the user's own settings names their output style
+            d["output_style"] = "<output-style>"
     if d.get("type") == "system" and d.get("subtype") == "commands_changed":
         d["commands"] = keep_commands(d.get("commands", []))
     if "commands" in d and "models" in d and "account" in d:  # initialize response

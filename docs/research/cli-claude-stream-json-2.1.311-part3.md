@@ -357,19 +357,25 @@ A background command (`sleep 307; echo late`) runs since turn 1. Turn 2 runs `ec
 {"_meta":{"after_the_exit":{"sleep_307_alive":false,"sleep_61_alive":false}},"_t":8.306}
 ```
 
-What the adapter can rely on (n=1; an earlier recording of the same script, not kept, had the same order of lines,
-0.20 s to the result and exit code 1):
+What the adapter can rely on (n=1; an earlier recording of the same script, not kept, had the same order of lines
+and exit code 1):
 - The three steps work in this order with no wait between them other than "read until the `result`":
   1. `interrupt {"cancel_queued":true}`: the waiting message gets `cancelled`, the answer names it in `cancelled`, the
-     running tool call is rejected, the turn's error `result` comes (0.21 s after the request by the driver's clock,
-     the same time stamp in the stream), then `cancelled` for the turn's own message.
-  2. `stop_task` for the background command: `killed` / `stopped` / list `[]` / answer `{}`, answered 0.217 s after the
-     interrupt. No turn starts.
+     running tool call is rejected, the turn's error `result` comes, then `cancelled` for the turn's own message. By
+     the stream's own time stamps all of this came less than 0.25 s after the request: the fixture has no time mark
+     between the request and the `result`, and a mark is written once 0.25 s have passed.
+  2. `stop_task` for the background command: `killed` / `stopped` / list `[]` / answer `{}`, within 0.005 s of the
+     request (the driver's next note has that stamp). No turn starts.
   3. stdin closed: the driver noted the exit 1.0 s later (it notes it 0.3 s after the fact), exit code 1 (the last
      `result` was the interrupted one: as in part 2, scenario 8).
+- Correction (made with part 4): an earlier text of this section gave "0.21 s after the request" for the `result` and
+  "0.217 s" for the `stop_task` answer. Those are the driver's notes `result_after_interrupt_s` and
+  `stop_task_answered_after_s`, taken around a wait that looks for the `result` every 0.2 s: they are the driver's
+  poll interval (the driver wrote `stop_task` 0.212 s after the interrupt, when its poll saw the `result`), not a
+  latency of the CLI. Part 4, section 2, measures the same steps with the time stamp of each line.
 - After the exit neither `sleep 307` nor `sleep 61` was alive. Nothing had to be signalled.
 - Not in this run: a background SUBAGENT at shutdown. Section 1 says its stop starts a turn; a shutdown that stops a
-  helper has to interrupt or outwait that turn before stdin close (not recorded as one run).
+  helper has to interrupt or outwait that turn before stdin close (not recorded as one run here: part 4, section 2).
 
 ### Three messages wait, then the interrupt
 
@@ -1125,7 +1131,7 @@ What this shows (n=3 with the sentence, n=3 without; WEAK evidence):
 | 1 | `stop_task` on a background subagent | Works: `killed` / `stopped` / list `[]`, then `{}`. The helper's tool call is rejected, the helper ends, its `sleep` is gone. The CLI then starts a turn by itself. `get_task_output` on its id is an error | 2 | `r5-stop-subagent-1`, `-2` |
 | 2 | Background command with exit 1; who is listed | `task_notification.status` `failed` (`patch.status` `failed`), then list `[]`, then a self-started turn. Background subagent: listed (`task_type:"local_agent"`, `subagent_type`, `description`, ids). Foreground helper or command: never listed, unless the host sends `background_tasks` (then listed, `patch.is_backgrounded:true`) | 1 | `r5-background-fail` |
 | 3 | `tool_progress` for other tools | Same heartbeat line: `tool_use_id` `<call id>-heartbeat-N`, `parent_tool_use_id` = the call id (never null), `tool_name` = the tool, at 30, 60, 90 s. MCP tool and `Agent` recorded; a Bash call inside a helper has none; WebFetch not recorded | 1 each | `r5-tool-progress-mcp`, `-subagent`, `-webfetch` |
-| 4 | Stop sequence; three waiting; folded | Sequence works: 0.2 s to the stopped turn's `result` and the task's stop, exit about 1 s after stdin close, exit code 1, nothing left running. Three waiting: `still_queued` in written order; plain = ONE turn with all three; `cancel_queued` = three `cancelled` lines before the answer. Folded: not in the answer, `cancelled` with the turn, not run again | 1 each | `r5-stop-sequence`, `r5-stop-three-plain`, `-cancel`, `r5-stop-folded-plain`, `-cancel` |
+| 4 | Stop sequence; three waiting; folded | Sequence works: the stopped turn's `result` and the task's stop each come less than 0.25 s after their request (the stream's time stamps), the exit is noted 1.0 s after stdin close, exit code 1, nothing left running. Three waiting: `still_queued` in written order; plain = ONE turn with all three; `cancel_queued` = three `cancelled` lines before the answer. Folded: not in the answer, `cancelled` with the turn, not run again | 1 each | `r5-stop-sequence`, `r5-stop-three-plain`, `-cancel`, `r5-stop-folded-plain`, `-cancel` |
 | 5 | Sandbox + no auto-allow: `git push`, `curl` | Both ask, in `acceptEdits` and in `manual`, exactly as with the sandbox off; `curl` then also gets the network request | 1 per mode | `r5-commands-noauto`, `r5-commands-manual-noauto` (against `r5-commands-off`, `r5-commands-manual-off`) |
 | 6 | Second command to an allowed host | After a plain allow: not asked again in the same process (2 s later; 304 s later with another turn in between), asked again in a new process that resumes the session. After a saved rule: not asked again. `network_allowed_domains` stays `[]`. `updatedPermissions` saves `WebFetch(domain:…)` (local file or session) | 1 per run (plain allow in one process: 2) | `r5-sandbox-network-once`, `-once-later`, `-once-restart-a`, `-b`, `-rule-local`, `-rule-session` |
 | 7 | Effort on a `--effort high` process | `get_settings` shows the new level at once; `null` gives `medium`, not the start flag's `high`. The turn's use of it: not visible | 1 | `r5-effort-started-high`, `-none` |
