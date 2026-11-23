@@ -6,9 +6,12 @@ in isolated git worktrees, with two synchronized views of the same truth: a **Wo
 (chat, timeline, board, dependency graph, diffs, terminal, inspector) and a **World** (an
 animated three.js office where every motion is a real event).
 
-Research behind every decision: `docs/research/` (7 reports + `CRITIQUE.md`, the
-consolidated decision list) and `docs/research/munder/` (a source-level teardown of
-Munder Difflin). Fixtures captured from the real CLIs: `docs/research/fixtures/`.
+Research behind every decision: `docs/research/` (8 reports, `CRITIQUE.md`, the
+consolidated decision list, and four documents of Claude Code 2.1.311 recordings,
+`cli-claude-stream-json-2.1.311*.md`) and `docs/research/munder/` (a source-level teardown of
+Munder Difflin). Fixtures captured from the real CLIs: `docs/research/fixtures/` (the Claude Code 2.1.311
+recordings in `fixtures/claude-2.1.311/`, with the scripts that made them in
+`docs/research/drivers/claude-stream-json/`).
 
 ## 1. Decisions in one table
 
@@ -160,6 +163,24 @@ of activity or usage at each tool call: its row and the UI follow it, the log do
   Observed (CLI event), Inferred (Codly heuristic), Provided (Codly put it in context, with
   citations), Model-stated (the model's own words).
 
+**The approval flow.** (1) The CLI asks: Claude Code sends a `can_use_tool` control request,
+Codex a JSON-RPC request, an ACP agent `request_permission`. The adapter keeps the provider's
+request id, makes a Codly approval id, adds the risks it knows (a sandbox override, a network
+host) and emits `ApprovalRequested`. (2) `orchestrator/ingest.rs` stores and broadcasts the
+event, so the card exists before anything is decided, and hands it to the broker. (3) The
+broker denies at once when the agent's tools are blocked (`controls.rs` `control_deny`); else
+it builds the policy context (mode, the trust you gave the agent as `outside.rs` limits it,
+worktree, checkout, the Connections of the run) and runs `approvals::evaluate`, then the saved
+rules (`approval_rules.rs` `with_saved_rules`). (4) An allow sends `allow_once` to the run,
+emits `ApprovalResolved` by "policy" and writes an `approval_policy` decision; an ask writes
+only a decision that says why. (5) The UI shows the card from the event (`ApprovalCard.svelte`)
+and the shell a native notification (`notify.rs`). (6) Your answer goes through the
+`resolve_approval` command to `workspace.rs` `resolve_approval`, which checks that the request
+is still open and that the choice was offered, sends it to the run (or marks it expired when
+the run is gone) and emits `ApprovalResolved` by "user"; the adapter turns it into the
+provider's reply. "Always allow in this repo" saves a rule and answers the waiting requests it
+covers.
+
 ## 4. Orchestration
 
 ```
@@ -171,7 +192,7 @@ you ─► Lead (read-only agent: Read/Grep/Glob + codly tools)
           ▼ (you click Run plan, or auto-run)
        integration branch codly/<plan>/integration + worktree
           ▼
-       scheduler: deps merged ∧ scope lease free ∧ slots (3 total, 2 per provider) → route
+       scheduler: deps merged ∧ scope lease free ∧ slots (3 total, 2 per account) → route
           ▼
        worker (worktree, branch codly/<plan>/<key>) ◄─ prompt = task brief + pointer pack
           │                                             + memory pack + dependency notes
@@ -328,8 +349,8 @@ not what a script or program then does, so this is a deny-list and not a sandbox
 agents have an OS sandbox; a tool of an MCP server that is neither Codly's own nor one of the
 Connections this run was given asks, so a Connection that is off lends its name to no server of the
 user's own setup or of the repo) and **Full access**
-(auto-approve everything, risky commands included, except the hard floors: questions, permission
-changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
+(auto-approve everything, risky commands included, except the hard floors: questions, a plan
+the agent shows you (Claude's plan mode), permission changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
 dir still ask; and so does a command that can lose work in the user's own checkout: a history
 rewrite, `git reset --hard`, `git clean`, a force push, `rm -rf` outside the build folders,
 from an agent hired with Git isolation off or pointed there from a worktree by its `cwd`, a
@@ -348,8 +369,9 @@ another CLI gives its request offers no rule and matches none. A rule covers a p
 the project and a git command that changes the repository (the exact command also covers other
 network use); deletes, `git push`, `sudo`, a pipe into a shell, secrets, paths outside the
 worktree (an install for the whole machine too: `npm install -g`), a publish, a change to your own
-account or settings (`cargo login`, `npm config set …`) and what cannot be checked always ask, and so do strict mode
-and read-only agents. Settings → Safety lists the rules; removing one makes Codly ask again.
+account or settings (`cargo login`, `npm config set …`), a command that can lose work in the
+user's own checkout, and what cannot be checked always ask, and so do strict mode and
+read-only agents. Settings → Safety lists the rules; removing one makes Codly ask again.
 
 **Triggers and inbound** (Settings → Triggers / Inbound). `triggers.rs` holds the pure policy and
 `orchestrator/triggers.rs` the loop: schedules that send a prompt to the Lead on a repeating clock
@@ -464,9 +486,9 @@ that are new there are named (the index does not search them).
   `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_OAUTH_TOKEN` of the login
   shell in a Claude agent's env (and in the sign-in probes, so the status matches).
 - Approval broker: rules (path outside worktree, symlinks followed; `rm -rf`, `git push`,
-  `curl | sh`, `sudo`, `npx`/`uvx` downloads, `printenv` and `.env` reads, changes to an agent's
-  own CLI settings, git inside a nested repository → ask you, except in Full access, which
-  approves them), then you. No silent timeouts; choices mirror the provider's. The rules read
+  `curl | sh`, `sudo`, `npx`/`uvx` downloads, `printenv` and `.env` reads, git inside a nested
+  repository → ask you, except in Full access, which approves them; changes to an agent's own
+  CLI settings and to Codly's data dir ask in Full access too), then you. No silent timeouts; choices mirror the provider's. The rules read
   the command line only: what a test, a script or an interpreter does once it runs is not
   checked (Codex has an OS sandbox; Claude has one only with `claude_sandbox` on). A Codex agent's command reaches the broker only
   when Codex asks to leave its sandbox. With `codex_network_access` on, a command that needs
@@ -647,7 +669,9 @@ crates/codly-core/src/    the engine: no Tauri dependency
   model.rs          contract: domain + event types (ts-rs → src/lib/gen)
   env.rs            login-shell env, CLI and sign-in detection, scrubbed child envs
   proc.rs           process groups, bounded NDJSON reader, shutdown ladder
-  adapters/         claude.rs (stream-json + control), codex.rs (app-server), acp.rs, classify.rs;
+  adapters/         mod.rs (the adapter contract), claude.rs (stream-json + control), codex.rs
+                    (app-server), acp.rs, classify.rs (risk hints), attachments.rs (attached
+                    images reach the model as images), startup.rs (a failed start in plain words);
                     codex/account.rs = questions to a Codex sign-in outside a run (models, usage
                     windows, the user's own MCP servers, compaction);
                     testdata/ = the recorded transcripts that the tests replay
@@ -685,7 +709,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
                       activity.rs                         the work under way now, for the shell (keep awake, quit question)
                       resume.rs                           after a restart: the question before work goes on, round counts, what stood
-  store/            SQLite: schema.sql, later migrations (m2…m4), typed queries; backup.rs: a copy
+  store/            SQLite: schema.sql, later migrations (m2…m6), typed queries; backup.rs: a copy
                     of the database once a day and before a migration (`<data dir>/backups/`), and
                     the way back from a database that cannot be used (it is moved aside, never deleted;
                     a start with no data moves the copies aside too, as `backups.before-<time>/`)
@@ -759,8 +783,13 @@ docs/                     this file, RELEASE.md (how a release is built and sign
 
 ## 9. Verification
 
-The repo has no CI: every check is run by hand. This section says what each check covers and
-when a live check was last done. It does not record test results: run the tests.
+CI (`.github/workflows/ci.yml`) runs `scripts/verify.sh` on Linux for every pull request and
+every push to `main`: `pnpm check`, `pnpm test`, `pnpm build` and `cargo test --workspace`, and
+it fails when the tests rewrite `src/lib/gen`. A second job runs `cargo check --workspace
+--all-targets` on macOS: it compiles the macOS-only code there, and runs no test.
+`.github/workflows/release.yml` builds a tagged release (docs/RELEASE.md). This section says what
+each check covers and when a live check was last done. It does not record test results: run the
+tests.
 
 **Covered by tests** (`cargo test --workspace`, `pnpm check`, `pnpm test`):
 
@@ -773,8 +802,8 @@ when a live check was last done. It does not record test results: run the tests.
 | No CLI credential is read by default | `orchestrator/accounts.rs`, test `claude_tokens_are_read_only_after_the_user_switched_it_on` |
 | This file's code map, and trust claims that are no longer true | `crates/codly-core/tests/docs.rs` |
 
-**Checked by hand with live CLIs on 2026-10-25. Not re-verified since** (about 250 commits later;
-the CLI versions are the ones of that day):
+**Checked by hand with live CLIs on 2026-10-25. Not re-verified since** (the CLI versions are
+the ones of that day):
 
 | What | How | Result on 2026-10-25 |
 |---|---|---|
@@ -783,7 +812,16 @@ the CLI versions are the ones of that day):
 | Lead → plan → worker → verify → merge | `examples/e2e.rs` | 1 task on Codex in 28 s; 2 parallel Claude tasks + Codex reviewers in 45 s; correct diffs |
 | Memory + knowledge graph from real events | `examples/e2e.rs` | task-summary memory, 12 temporal triples with repo-relative file entities |
 
+**Recorded since, without a live run of Codly**: Claude Code 2.1.311 was driven by scripts
+(`docs/research/drivers/claude-stream-json/`) and its output recorded
+(`docs/research/fixtures/claude-2.1.311/`, `docs/research/cli-claude-stream-json-2.1.311*.md`);
+the Claude adapter's tests replay these recordings. The Codex parts added after 2026-10-25
+(subagents, Compact now, the usage read, thread names) follow the protocol types that
+codex-cli 0.166.0 generates (`codex app-server generate-ts`), and say so in the code: they were
+never run against a live Codex. Gemini CLI and OpenCode were not run again.
+
 **Never verified**: driving the bundled app window end to end, Cursor and Copilot (not
-installed), resume after an app crash with live CLIs. No live check is recorded here for
-anything added after 2026-10-25 (Push, several accounts, inbound webhooks, `codly serve`,
-dictation, voice, build mode).
+installed), resume after an app crash with live CLIs, the app in WebKit (the browser reviews
+used Chromium). No live check of Codly with a real CLI is recorded here for anything added after
+2026-10-25 (Push, several accounts, inbound webhooks, `codly serve`, dictation, voice, build
+mode, the Claude sandbox switch, checkpoints, the merge-conflict agent, the pull-request step).
