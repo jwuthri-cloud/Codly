@@ -1566,9 +1566,67 @@ pub(crate) fn is_interpreter(prog: &str) -> bool {
     is_python(prog) || prog == "deno" || INTERPRETERS.iter().any(|(names, ..)| names.contains(&prog))
 }
 
-/// awk programs that run a command: `system(…)`, a pipe to or from one (`print | "sh"`,
-/// `"date" | getline`). A program that only prints is a text filter.
-static AWK_RUNS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"system\s*\(|\|\s*getline|\|&|\|\s*""#).unwrap());
+/// What starts a command in awk code that holds no string and no pattern any more
+/// (`awk_code`): `system(…)`, and a `|` with something after it that is not the "or" `||`.
+static AWK_RUNS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bsystem\s*\(|(?:^|[^|])\|\s*[^|\s]").unwrap());
+
+/// Does a word of an awk line start a command: `system(…)`, or a pipe to or from one
+/// (`print | "sh"`, `print | cmd`, `"date" | getline`, `|&`)? In awk code every single `|`
+/// is such a pipe. A `|` in a string (`" | "`, `FS="|"`) or in a pattern (`/a|b/`) is text,
+/// and `||` is "or": a program that only prints is a text filter.
+fn awk_starts_command(program: &str) -> bool {
+    AWK_RUNS.is_match(&awk_code(program))
+}
+
+/// An awk program without what its strings and patterns hold: each string is left as `""`,
+/// each pattern as `//`. Both end at the first `"` or `/` that no `\` comes before, which is
+/// where every awk ends them or earlier (gawk reads on inside `[…]`), so nothing that runs
+/// is taken out. A comment stays as it is written: a `#` may be in a pattern that this
+/// reading took for a division.
+fn awk_code(program: &str) -> String {
+    let mut code = String::with_capacity(program.len());
+    let mut chars = program.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '/' if c == '"' || awk_pattern_starts(&code) => {
+                while let Some(inside) = chars.next() {
+                    match inside {
+                        '\\' => drop(chars.next()),
+                        end if end == c => break,
+                        _ => {}
+                    }
+                }
+                code.extend([c, c]);
+            }
+            '#' => {
+                code.push(c);
+                code.extend(chars.by_ref().take_while(|x| *x != '\n'));
+                code.push('\n');
+            }
+            // A line that goes on in the next one.
+            '\\' if chars.peek() == Some(&'\n') => drop(chars.next()),
+            _ => code.push(c),
+        }
+    }
+    code
+}
+
+/// Does a `/` after this much awk code start a pattern (`$1 ~ /a|b/`), not a division? As awk
+/// reads it: where a value is expected, which is at the start, after an operator or one of
+/// `( , { } ;`, on a new line, and after a word like `print`. After `++` or `--` it divides
+/// (`i++ / 2`).
+fn awk_pattern_starts(code: &str) -> bool {
+    let before = code.trim_end_matches([' ', '\t']);
+    let Some(last) = before.chars().next_back() else { return true };
+    match last {
+        '+' | '-' => !before[..before.len() - 1].ends_with(last),
+        c if "\n(,{};!~&|=?:*%^<>".contains(c) => true,
+        _ => {
+            let word = before.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+            ["print", "printf", "return", "else", "do", "case", "in"].contains(&word)
+        }
+    }
+}
 
 /// Does the line give an interpreter code to run (`python -c …`, `node -e …`, `perl -pe …`,
 /// `deno eval …`, an awk program that starts a command)? What such code reads, writes or
@@ -1583,7 +1641,18 @@ pub(crate) fn inline_code(prog: &str, args: &[String]) -> bool {
         return first_non_flag(args) == Some("eval");
     }
     if matches!(prog, "awk" | "gawk" | "mawk" | "nawk") {
-        return args.iter().any(|a| AWK_RUNS.is_match(a));
+        // A field separator and a variable's value are text, never code (`-F'|'`, `-v sep='|'`),
+        // in the next word or in the option's own. Every other word may be the program.
+        let text = |a: &str| ["-F", "-v", "--field-separator=", "--assign="].iter().any(|option| a.starts_with(option));
+        let mut words = args.iter().map(String::as_str);
+        while let Some(a) = words.next() {
+            if matches!(a, "-F" | "-v" | "--field-separator" | "--assign") {
+                words.next();
+            } else if !text(a) && awk_starts_command(a) {
+                return true;
+            }
+        }
+        return false;
     }
     let Some(&(_, code, valued, long_code, long_valued)) = INTERPRETERS.iter().find(|(names, ..)| names.contains(&prog)) else { return false };
     let mut i = 0;
@@ -2436,5 +2505,59 @@ mod tests {
         assert_eq!(split_model_effort(Some("anthropic.claude-v1:0")), (Some("anthropic.claude-v1:0".into()), None));
         assert_eq!(split_model_effort(Some(":high")), (None, Some("high".into())));
         assert_eq!(split_model_effort(None), (None, None));
+    }
+
+    /// An awk program starts a command with `system(…)` or a pipe in its code. A `|` in a
+    /// string, a pattern, a field separator or a variable's value is text.
+    #[test]
+    fn awk_pipes_are_read_in_the_code_not_in_its_text() {
+        let awk = |args: &[&str]| inline_code("awk", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        for program in [
+            r#"BEGIN { system("id") }"#,
+            r#"{ print | "sh" }"#,
+            r#"{ print $1 | "sort -u" }"#,
+            r#"{ print | cmd }"#,
+            r#"{ print $1/2 | "sh" }"#,
+            r#"BEGIN { "date" | getline d; print d }"#,
+            r#"BEGIN { while ((cmd | getline line) > 0) print line }"#,
+            r#"BEGIN { print "x" |& "cat" }"#,
+            // A string or a pattern before the pipe does not hide it.
+            r#"{ print "a | b" | "sh" }"#,
+            r#"/a|b/ { print | "sh" }"#,
+            r#"/"/ { print | "sh" }"#,
+            r#"{ print /"/ | "sh" }"#,
+            r#"{ n = i++ / 2 | "sh"; m = 1 / 2 }"#,
+            "{ x = 1 # a \" in a comment\n print | \"sh\" }",
+            "{ x = a \\\n / b | \"sh\"; y = c / d }",
+        ] {
+            assert!(awk(&[program, "notes.txt"]), "{program}");
+        }
+        assert!(awk(&["-F", "|", r#"{ print | "sh" }"#]));
+        assert!(awk(&["-v", "n=1", "-e", r#"BEGIN { system("id") }"#]));
+        for args in [
+            &[r#"{print $1 " | " $2}"#, "a.csv"][..],
+            &["-F,", r#"{print $1 " | " $2}"#, "a.csv"],
+            &[r#"BEGIN{FS="|"} {print $2}"#, "t.md"],
+            &[r#"BEGIN{OFS="|"} {$1=$1; print}"#, "f"],
+            &[r#"{n=split($0,a,"|"); print a[2]}"#, "f"],
+            &[r#"{ printf "%s | %s\n", $1, $2 }"#],
+            &[r#"{ print "a \" | \" b" }"#],
+            &["/a|b/ {print}"],
+            &["$1 ~ /^(a|b)$/ && !/c|d/"],
+            &["{ if ($0 ~ /a|b/) print; else print /c|d/ }"],
+            &[r#"{ gsub(/\/|"/, ""); print }"#],
+            &[r#"$1 == "a" || "b" == $2"#],
+            &["{ print $1/2, $2/4 }"],
+            &["-F|", "{print $2}"],
+            &["-F", "|", "{print $2}"],
+            &["-v", "sep=|", "{print $1 sep $2}"],
+            &["-vsep=a|b", "{print $1 sep $2}"],
+            &["--assign=sep=a|b", "{print $1 sep $2}"],
+            &["{print $1 sep $2}", "sep=|", "f"],
+            &["-f", "report.awk", "data/a.csv"],
+        ] {
+            assert!(!awk(args), "{args:?}");
+        }
+        assert_eq!(awk_code(r#"$1 ~ /a|b/ { print "x | y", $2 / 2 }"#), r#"$1 ~ // { print "", $2 / 2 }"#);
     }
 }

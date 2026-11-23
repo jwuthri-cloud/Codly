@@ -275,7 +275,8 @@ hands the work to a team member or consultant at once).
 strict (ask for everything), autonomous (allow what shows no risk; the rules read the command line,
 not what a script or program then does, so this is a deny-list and not a sandbox: §6 says which
 agents have an OS sandbox; a tool of an MCP server that is neither Codly's own nor one of the
-Connections asks) and **Full access**
+Connections this run was given asks, so a Connection that is off lends its name to no server of the
+user's own setup or of the repo) and **Full access**
 (auto-approve everything, risky commands included, except the hard floors: questions, permission
 changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
 dir still ask; and so does a command that can lose work in the user's own checkout: a history

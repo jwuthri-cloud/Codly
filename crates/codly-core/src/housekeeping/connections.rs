@@ -346,10 +346,21 @@ pub fn load_ready(raw_log: &Path) -> Vec<ReadyMcp> {
 }
 
 pub fn load_ready_with(raw_log: &Path, store: &dyn SecretStore) -> Vec<ReadyMcp> {
+    materialize(&read_sidecar(raw_log), store)
+}
+
+/// The names of the servers this run was given beside `codly`: what `write_sidecar` put next
+/// to its raw log. No key is looked up, so the approval rules can ask at every request. A
+/// server whose key went away between the two reads of a spawn is still named here.
+pub fn given(raw_log: &Path) -> Vec<String> {
+    read_sidecar(raw_log).into_iter().map(|x| x.name).collect()
+}
+
+fn read_sidecar(raw_log: &Path) -> Vec<ExtraMcp> {
     let Ok(text) = std::fs::read_to_string(sidecar_path(raw_log)) else { return vec![] };
     let Ok(extra) = serde_json::from_str::<Vec<ExtraMcp>>(&text) else { return vec![] };
     // The `codly` name is ours; an extra server may never replace it.
-    materialize(&extra.into_iter().filter(|x| x.name != "codly").collect::<Vec<_>>(), store)
+    extra.into_iter().filter(|x| x.name != "codly").collect()
 }
 
 #[cfg(test)]
@@ -454,6 +465,32 @@ pub(crate) mod tests {
         assert_eq!(load_ready_with(&raw, &store).len(), 6);
         // No sidecar, no extras.
         assert!(load_ready_with(&dir.path().join("none").join("raw.ndjson"), &store).is_empty());
+    }
+
+    #[test]
+    fn the_servers_a_run_was_given_are_the_ones_that_were_on_with_their_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("raw.ndjson");
+        let store = MemoryStore::default();
+        // By default: the servers that only read. GitHub is off, and has no key.
+        write_sidecar(&raw, &resolve(&McpPrefs::default(), &store, Path::new("/r"))).unwrap();
+        let by_default = given(&raw);
+        assert!(by_default.iter().any(|name| name == "fetch") && !by_default.iter().any(|name| name == "github"), "{by_default:?}");
+        // Switched on without its key, it is still not given; with the key it is.
+        let mut prefs = McpPrefs::default();
+        prefs.enabled.insert("github".into(), true);
+        prefs.enabled.insert("fetch".into(), false);
+        write_sidecar(&raw, &resolve(&prefs, &store, Path::new("/r"))).unwrap();
+        assert!(!given(&raw).iter().any(|name| name == "github"));
+        store.set("github:GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_x").unwrap();
+        write_sidecar(&raw, &resolve(&prefs, &store, Path::new("/r"))).unwrap();
+        let names = given(&raw);
+        assert!(names.iter().any(|name| name == "github") && !names.iter().any(|name| name == "fetch"), "{names:?}");
+        // `codly` is never one of them, and a run without a sidecar was given none.
+        let codly = ExtraMcp { name: "codly".into(), command: "x".into(), args: vec![], env: vec![], secret_env: vec![], read_only: true };
+        write_sidecar(&raw, &[codly]).unwrap();
+        assert!(given(&raw).is_empty());
+        assert!(given(&dir.path().join("none").join("raw.ndjson")).is_empty());
     }
 
     #[test]

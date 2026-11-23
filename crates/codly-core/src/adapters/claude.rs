@@ -2221,7 +2221,7 @@ mod tests {
         harmless["request"]["input"]["command"] = json!("ls");
         let a = approval_of(&norm.on_message(&harmless));
         assert_eq!(a.risks, vec![UNSANDBOXED.to_string()]);
-        let ctx = |mode| PolicyCtx { mode, worktree: Some(worker.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None };
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(worker.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None, own_mcp: &[] };
         for mode in [ApprovalMode::Balanced, ApprovalMode::Strict, ApprovalMode::Autonomous] {
             assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
             assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");
@@ -2269,7 +2269,7 @@ mod tests {
         assert_eq!(a.risks, vec!["network (example.com)".to_string()]);
         assert_eq!(a.reason.as_deref(), Some("Allow network connection to example.com?"));
         assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel], "no session or permanent grant");
-        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None };
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None, own_mcp: &[] };
         for mode in [ApprovalMode::Balanced, ApprovalMode::Strict, ApprovalMode::Autonomous] {
             assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
             assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");

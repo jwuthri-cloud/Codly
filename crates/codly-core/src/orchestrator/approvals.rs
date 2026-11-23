@@ -18,7 +18,7 @@
 //!    that plans first is one until you accept its plan) get only reads in every other mode;
 //!    balanced allows read-only actions, the task's own verify commands and test runners;
 //!    autonomous allows anything with no detected risk, except a tool of an MCP server that
-//!    Codly did not set up (`foreign_mcp_tool`): what such a tool does is not in its name;
+//!    Codly did not give this run (`foreign_mcp_tool`): what such a tool does is not in its name;
 //!    full allows everything.
 //!
 //! Only `allow_once` is ever chosen automatically, never a session or permanent grant.
@@ -49,7 +49,6 @@ use std::sync::RwLock;
 
 use crate::adapters::claude::EXIT_PLAN_MODE;
 use crate::adapters::classify::{self, ShellRun, first_non_flag, git_read_only, git_sub, has, long_flag, operands, options, read_only, short_flag};
-use crate::housekeeping::connections;
 use crate::mcp::tools;
 use crate::model::*;
 
@@ -70,6 +69,10 @@ pub struct PolicyCtx<'a> {
     /// and no checkpoint stands between a command that acts there and your work, so full mode
     /// still asks before one that can lose it (`loses_work`). None: no repo is known.
     pub checkout: Option<&'a Path>,
+    /// The MCP servers Codly gave this run beside its own, by name: your Connections that were
+    /// on, with their keys, when the run started (`connections::given`). A server of any other
+    /// name comes from your own CLI setup or from the repo.
+    pub own_mcp: &'a [String],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,7 +144,7 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
         },
         // Not "stays inside the worktree": what a script or program does is not checked.
         ApprovalMode::Autonomous => match (&a.subject, ctx.worktree) {
-            (ApprovalSubject::Tool { name, .. }, _) if foreign_mcp_tool(name) => {
+            (ApprovalSubject::Tool { name, .. }, _) if foreign_mcp_tool(name, ctx.own_mcp) => {
                 ask(format!("tool {name} is from an MCP server that Codly did not set up"))
             }
             (_, Some(_)) => allow("autonomous: no risk detected".into()),
@@ -249,8 +252,9 @@ fn own_account(cmd: &str, depth: u8) -> bool {
             // Deeper than this, `command_risks` says "runs dynamic code": nothing is offered.
             return matches!(classify::shell_run(args), ShellRun::Command(inner) if depth < 3 && own_account(inner, depth + 1));
         }
-        let sub = if prog == "git" { git_sub(args).0 } else { first_non_flag(args) };
-        SUBCOMMAND_TOOLS.contains(&prog) && sub.is_some_and(|s| OWN_ACCOUNT.contains(&s))
+        // Behind an option's value too (`npm --prefix web config set …`).
+        let subs = if prog == "git" { git_sub(args).0.into_iter().collect() } else { subcommands(prog, args) };
+        SUBCOMMAND_TOOLS.contains(&prog) && subs.iter().any(|sub| OWN_ACCOUNT.contains(sub))
     })
 }
 
@@ -319,11 +323,19 @@ fn mcp_server(name: &str) -> Option<&str> {
     name.strip_prefix("mcp__")?.split_once("__").map(|(server, _)| server).filter(|server| !server.is_empty())
 }
 
-/// Is the tool from an MCP server that Codly did not set up: not Codly's own server, and not
-/// one of Settings → Connections (`connections::CATALOG`)? Such a server comes from your own
-/// CLI setup or from the repo (`.mcp.json`), and nothing here says what its tools do.
-fn foreign_mcp_tool(name: &str) -> bool {
-    mcp_server(name).is_some_and(|server| server != "codly" && !connections::CATALOG.iter().any(|entry| entry.id == server))
+/// Is the tool from an MCP server that Codly did not give this run: not one of Codly's own
+/// tools, and not a tool of one of `own` (`PolicyCtx::own_mcp`)? Such a server comes from your
+/// own CLI setup or from the repo (`.mcp.json`), whatever its name is (a Connection that is
+/// off gives its name to no server), and nothing here says what its tools do.
+///
+/// A server's name may hold `__` too, so `mcp__github__x__tool` can be the tool `x__tool` of
+/// `github` or a tool of a server named `github__x`. A name that reads both ways asks.
+fn foreign_mcp_tool(name: &str, own: &[String]) -> bool {
+    let given = |server: &String| {
+        let tool = name.strip_prefix("mcp__").and_then(|rest| rest.strip_prefix(server.as_str())).and_then(|rest| rest.strip_prefix("__"));
+        tool.is_some_and(|tool| !tool.is_empty() && !tool.contains("__"))
+    };
+    mcp_server(name).is_some() && !is_codly_tool(name) && !own.iter().any(given)
 }
 
 /// Codly's own MCP tools, as each CLI names them (`mcp__codly__codly_board` for Claude,
@@ -857,13 +869,37 @@ fn publishes(prog: &str, args: &[String]) -> bool {
     match prog {
         "mvn" | "mvnw" => words.any(|goal| goal == "deploy" || goal.starts_with("release:")),
         "gradle" | "gradlew" => words.any(|task| task.rsplit(':').next().is_some_and(|name| name.starts_with("publish"))),
-        _ => {
-            let sub = words.next().unwrap_or("");
-            // `yarn npm publish` (yarn 2 and later)
-            let sub = if prog == "yarn" && sub == "npm" { words.next().unwrap_or("") } else { sub };
-            PUBLISHES.iter().any(|(progs, subs)| progs.contains(&prog) && subs.contains(&sub))
-        }
+        _ => PUBLISHES.iter().any(|(progs, subs)| progs.contains(&prog) && subcommands(prog, args).iter().any(|sub| subs.contains(sub))),
     }
+}
+
+/// The words of a package manager's line that can be its subcommand: the first word that is
+/// not an option, and before it each word that may be an option's value instead
+/// (`pnpm --filter web publish`: `web`, then `publish`). Which options take a value is not
+/// listed here, so a word after any option that holds no `=` counts as both. Nothing after
+/// `--` is read: those words go to a script.
+///
+/// yarn names a workspace first, and its `npm` has subcommands of its own:
+/// `yarn workspace web npm publish`, `yarn workspaces foreach -A npm publish`.
+fn subcommands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a str> {
+    let (mut found, mut after_option) = (vec![], false);
+    let mut words = args.iter().map(String::as_str).take_while(|w| *w != "--");
+    while let Some(w) = words.next() {
+        if w.starts_with('-') {
+            after_option = !w.contains('=');
+            continue;
+        }
+        found.push(w);
+        match w {
+            "workspace" if prog == "yarn" => drop(words.next()),
+            "npm" | "workspaces" | "foreach" if prog == "yarn" => {}
+            // `cargo +nightly publish` names a toolchain first.
+            _ if after_option || (prog == "cargo" && w.starts_with('+')) => {}
+            _ => break,
+        }
+        after_option = false;
+    }
+    found
 }
 
 /// Programs that start another program in the project's environment (`uv run python -c …`,
@@ -1140,17 +1176,19 @@ const BUILD_DIRS: &[&str] = &[
 fn checkout_loss(subject: &ApprovalSubject, ctx: &PolicyCtx) -> Option<&'static str> {
     let (ApprovalSubject::Command { command, cwd }, Some(checkout)) = (subject, ctx.checkout) else { return None };
     let start = cwd.as_deref().map(Path::new).filter(|dir| dir.is_absolute()).or(ctx.worktree);
-    loses_work(command, start, checkout, 0)
+    // Does the agent work in your folder (Git isolation off)? A folder that is not known may be it.
+    let works_there = yours(ctx.worktree.map(lexical).as_deref(), checkout);
+    loses_work(command, start, checkout, works_there, 0)
 }
 
 /// Does the line run a command that can lose work for good in `checkout`, your project
 /// folder: git history rewritten, work that is not committed dropped, a force push, a
-/// recursive delete outside the build folders, a file of yours deleted from another folder?
-/// Behind a wrapper or `sh -c` too. `start` is where the line runs; `cd`, `git -C` and the
-/// paths on the line say where each command acts. A folder the line does not name
-/// (`cd $DIR`, no `start`) may be yours, and counts as yours.
+/// recursive delete outside the build folders, a file of yours deleted by an agent that does
+/// not work there (`works_there`)? Behind a wrapper or `sh -c` too. `start` is where the line
+/// runs; `cd`, `git -C` and the paths on the line say where each command acts. A folder the
+/// line does not name (`cd $DIR`, no `start`) may be yours, and counts as yours.
 /// Like every rule here it reads the command line: what a script does is not looked into.
-fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, depth: u8) -> Option<&'static str> {
+fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, works_there: bool, depth: u8) -> Option<&'static str> {
     // Where the next simple command runs: `cd` moves it.
     let mut dir = start.map(lexical);
     parse(cmd).segments.iter().find_map(|seg| {
@@ -1166,7 +1204,7 @@ fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, depth: u8) -> Op
                 None
             }
             prog if classify::SHELLS.contains(&prog) => match classify::shell_run(&args) {
-                ShellRun::Command(inner) if depth < 3 => loses_work(inner, here, checkout, depth + 1),
+                ShellRun::Command(inner) if depth < 3 => loses_work(inner, here, checkout, works_there, depth + 1),
                 _ => None,
             },
             "git" => {
@@ -1181,9 +1219,10 @@ fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, depth: u8) -> Op
                     deletes_work(targets, here, checkout)
                 } else {
                     // One file by its name is everyday work for an agent that works in your
-                    // folder. From another folder it is not, and a file of yours that is not
-                    // committed is gone for good.
-                    (!yours(here, checkout) && targets.any(|w| deletes_yours(w, here, checkout))).then_some(DELETES_FILES)
+                    // folder. For an agent with a worktree of its own it is not, from there
+                    // or after a `cd` into your folder: a file of yours that is not committed
+                    // is gone for good.
+                    (!works_there && targets.any(|w| deletes_yours(w, here, checkout))).then_some(DELETES_FILES)
                 }
             }
             // `find` deletes what it finds below the folders it starts from (its words before
@@ -1772,7 +1811,7 @@ mod tests {
     }
 
     fn eval_in(root: &Path, mode: ApprovalMode, read_only: bool, subject: ApprovalSubject) -> Verdict {
-        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false, checkout: None })
+        evaluate(&approval(subject), &PolicyCtx { mode, worktree: Some(root), verify: &[], read_only, edits: false, checkout: None, own_mcp: &[] })
     }
 
     fn command(c: &str, cwd: &Path) -> ApprovalSubject {
@@ -2131,7 +2170,7 @@ mod tests {
         };
         let cmd = |c: &str, cwd: &str| approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
         let eval = |a: &Approval, read_only| {
-            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false, checkout: None })
+            evaluate(a, &PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(wt)), verify: &[], read_only, edits: false, checkout: None, own_mcp: &[] })
         };
         let allowed = |v: Verdict| matches!(v, Verdict::Allow { choice: ApprovalChoice::AllowOnce, .. });
 
@@ -2293,13 +2332,44 @@ mod tests {
             "timeout 60 npm publish",
             "sh -c 'cargo yank --version 1.0.0'",
             "cd web && npm publish 2>&1 | tail -5",
+            // behind an option's value or a workspace's name
+            "pnpm --filter web publish",
+            "pnpm -F web publish",
+            "pnpm -C packages/web publish",
+            "pnpm --filter=web publish",
+            "pnpm -r publish --tag next",
+            "npm --workspace web publish",
+            "npm -w web publish",
+            "npm --prefix web publish",
+            "npm --registry https://r.example publish",
+            "npm --otp 123456 --tag next publish",
+            "npm -w web token create",
+            "yarn --cwd web publish",
+            "yarn workspace web npm publish",
+            "yarn workspaces foreach -A npm publish",
+            "bun --cwd web publish",
+            "cargo +nightly publish",
+            "cargo --manifest-path web/Cargo.toml publish",
+            "uv --directory web publish",
+            "poetry -C web publish",
         ] {
             assert!(risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
         }
         for c in [
             "npm install",
             "npm install token",
+            "npm install -D token",
             "npm run publish-docs",
+            "npm run build -- publish",
+            "npm test -- token",
+            "pnpm --filter web add left-pad",
+            "pnpm --filter web run build",
+            "pnpm -r run build -- publish",
+            "npm --prefix web install",
+            "yarn workspace web add left-pad",
+            "yarn workspace publish add left-pad",
+            "yarn workspaces foreach -A run build",
+            "cargo +nightly build",
             "yarn npm info left-pad",
             "cargo build",
             "cargo add owner",
@@ -2374,6 +2444,8 @@ mod tests {
             "awk 'BEGIN { system(\"id\") }'",
             "awk '{ print | \"sh\" }' notes.txt",
             "awk 'BEGIN { \"date\" | getline d; print d }'",
+            "awk '{ print $1 | cmd }' cmd=sh notes.txt",
+            "awk -F'|' '{ print \"a | b\" | \"sh\" }' notes.txt",
             // behind a wrapper, a runner or `find -exec`
             "timeout 5 python3 -c 'print(1)'",
             "env FOO=1 node -e 'run()'",
@@ -2411,6 +2483,14 @@ mod tests {
             "awk -F'|' '{print $2}' notes.txt",
             "awk '/a|b/ {print}' notes.txt",
             "awk '$1 == \"a\" || $2 == \"b\"' notes.txt",
+            // a `|` in a string of the program, or in a variable's value, is text
+            "awk -F, '{print $1 \" | \" $2}' a.csv",
+            "awk 'BEGIN{FS=\"|\"} {print $2}' t.md",
+            "awk 'BEGIN{OFS=\"|\"} {$1=$1; print}' f",
+            "awk '{n=split($0,a,\"|\"); print a[2]}' f",
+            "awk '{ printf \"%s | %s\\n\", $1, $2 }' f",
+            "awk -v sep='|' '{print $1 sep $2}' f",
+            "awk '$1 ~ /^(a|b)$/ || \"x\" == $2' f",
             "uv run pytest",
             "pnpm exec vitest run",
             "npm install python-shell",
@@ -2474,7 +2554,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("docs"), root.join("dist")).unwrap();
         std::os::unix::fs::symlink(root.join("src"), root.join("node_modules/pkg")).unwrap();
         let full = |c: &str| {
-            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(root.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()) };
+            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(root.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()), own_mcp: &[] };
             evaluate(&approval(command(c, &root)), &ctx)
         };
         for (c, why) in [
@@ -2513,7 +2593,7 @@ mod tests {
         // From a worktree, a build folder of yours that is a link is not a build folder either.
         let (_tmp2, wt) = worktree();
         let from_wt = |c: &str| {
-            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(wt.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()) };
+            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(wt.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()), own_mcp: &[] };
             evaluate(&approval(command(c, &wt)), &ctx)
         };
         let v = from_wt(&format!("rm -rf {}/dist/guide", root.display()));

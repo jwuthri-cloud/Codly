@@ -31,7 +31,7 @@ fn cmd(c: &str) -> Approval {
 
 fn eval(a: &Approval, mode: ApprovalMode) -> Verdict {
     let verify = vec!["pnpm -F web test".to_string()];
-    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false, edits: false, checkout: None })
+    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false, edits: false, checkout: None, own_mcp: &[] })
 }
 
 fn allowed(v: &Verdict) -> bool {
@@ -184,7 +184,7 @@ fn only_allow_once_is_ever_chosen() {
 
 #[test]
 fn read_only_agents_get_reads_only() {
-    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true, edits: false, checkout: Some(Path::new("/repo")) };
+    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true, edits: false, checkout: Some(Path::new("/repo")), own_mcp: &[] };
     let a = approval(ApprovalSubject::Command { command: "npm test".into(), cwd: Some("/repo".into()) });
     assert!(!allowed(&evaluate(&a, &ctx(ApprovalMode::Autonomous))), "the Lead never runs writes in the user's checkout");
     let r = approval(ApprovalSubject::Command { command: "git log --oneline -5".into(), cwd: Some("/repo".into()) });
@@ -205,7 +205,7 @@ fn a_trusted_senior_works_alone_in_its_worktree() {
 
 #[test]
 fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
-    let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true, checkout: None });
+    let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true, checkout: None, own_mcp: &[] });
     let edit = approval(ApprovalSubject::FileChange { paths: vec![format!("{WT}/src/a.ts")], diff: None });
     assert!(!allowed(&eval(&edit, ApprovalMode::Balanced)), "untrusted: balanced asks");
     // The decision names your trust in the agent sheet's words, not a rank: any rank can have it.
@@ -220,7 +220,7 @@ fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
 // ───────────── "always allow in this repo": what a request can be saved as ─────────────
 
 fn offer(a: &Approval, mode: ApprovalMode) -> ApprovalRuleOffer {
-    rule_offer(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None })
+    rule_offer(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[] })
 }
 
 fn saved(kind: ApprovalRuleKind, command: &str) -> ApprovalRule {
@@ -349,6 +349,8 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
         "timeout 60 npm login",
         "cd web && cargo login x",
         "sh -c 'npm config set registry http://localhost:4873'",
+        "npm --prefix web config set registry http://localhost:4873",
+        "pnpm -C web config set registry http://localhost:4873",
         // An install for your account or the whole machine writes outside the worktree.
         "npm install -g some-pkg",
         "npm install --location=global some-pkg",
@@ -384,7 +386,7 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
     // one-time allow to answer with, and everything that is not a command.
     let install = cmd("pnpm install");
     assert!(offer(&install, ApprovalMode::Strict).is_empty());
-    let ctx = |read_only, worktree| PolicyCtx { mode: ApprovalMode::Balanced, worktree, verify: &[], read_only, edits: false, checkout: None };
+    let ctx = |read_only, worktree| PolicyCtx { mode: ApprovalMode::Balanced, worktree, verify: &[], read_only, edits: false, checkout: None, own_mcp: &[] };
     assert!(rule_offer(&install, &ctx(true, Some(Path::new(WT)))).is_empty());
     assert!(rule_offer(&install, &ctx(false, None)).is_empty());
     let mut no_once = cmd("pnpm install");
@@ -487,7 +489,7 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
     // The same rule in another agent's worktree: it is the repo's, not one agent's.
     let other = "/data/worktrees/repo/p/t2";
     let there = approval(ApprovalSubject::Command { command: "pnpm install lodash".into(), cwd: Some(other.into()) });
-    let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(other)), verify: &[], read_only: false, edits: false, checkout: None };
+    let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(other)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[] };
     assert!(rule_offer(&there, &ctx).offers(&install));
 
     // An exact rule is the whole line and nothing else; it is not a prefix.
@@ -537,7 +539,12 @@ fn autonomous_asks_about_a_tool_of_an_mcp_server_codly_did_not_set_up() {
         assert!(allowed(&eval(&a, ApprovalMode::Full)), "full access allows it: {name}");
         assert!(reason(eval(&a, ApprovalMode::Balanced)).contains("not read-only"), "balanced asks as before: {name}");
     }
-    // Codly's own tools and the servers of Settings → Connections do not ask.
+    // Codly's own tools, and the tools of the Connections this run was given, do not ask.
+    let given: Vec<String> = ["sequential-thinking", "context7", "github", "google-workspace"].map(String::from).to_vec();
+    let eval_given = |name: &str| {
+        let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &given };
+        evaluate(&tool(name, json!({})), &ctx)
+    };
     for name in [
         "mcp__codly__codly_board",
         "mcp__sequential-thinking__sequentialthinking",
@@ -545,11 +552,23 @@ fn autonomous_asks_about_a_tool_of_an_mcp_server_codly_did_not_set_up() {
         "mcp__github__create_issue",
         "mcp__google-workspace__send_gmail_message",
     ] {
-        assert!(allowed(&eval(&tool(name, json!({})), ApprovalMode::Autonomous)), "{name}");
+        assert!(allowed(&eval_given(name)), "{name}");
     }
+    assert!(allowed(&eval(&tool("mcp__codly__codly_board", json!({})), ApprovalMode::Autonomous)), "Codly's own tools need no Connection");
+    // A Connection that is off, or has no key, was not given to the run: a server of that
+    // name is one of your own setup or of the repo, and asks like any other.
     for entry in codly_core::housekeeping::connections::CATALOG {
         let name = format!("mcp__{}__any_tool", entry.id);
-        assert!(allowed(&eval(&tool(&name, json!({})), ApprovalMode::Autonomous)), "{name}");
+        let r = reason(eval(&tool(&name, json!({})), ApprovalMode::Autonomous));
+        assert!(r.contains("an MCP server that Codly did not set up"), "{name}: {r}");
+    }
+    for name in ["mcp__git__git_commit", "mcp__fetch__fetch", "mcp__filesystem__write_file", "mcp__database__query"] {
+        assert!(reason(eval_given(name)).contains("an MCP server that Codly did not set up"), "{name}");
+    }
+    // A server's name can hold `__`: a name that may be a tool of `codly__x` or `github__x`
+    // is not read as a tool of `codly` or `github`. Neither is a tool Codly does not have.
+    for name in ["mcp__codly__x__tool", "mcp__codly__x__codly_board", "mcp__codly__not_a_tool", "mcp__github__x__tool", "mcp__github____tool", "mcp__githubx__tool"] {
+        assert!(reason(eval_given(name)).contains("an MCP server that Codly did not set up"), "{name}");
     }
     // A CLI's own tools are judged as before; a risk still asks whoever the server is.
     assert!(allowed(&eval(&tool("TodoWrite", json!({})), ApprovalMode::Autonomous)));
@@ -591,7 +610,7 @@ fn an_mcp_tool_can_be_saved_by_its_name() {
     assert!(offer(&hinted, ApprovalMode::Autonomous).is_empty());
     // The floors of every rule.
     assert!(offer(&ping, ApprovalMode::Strict).is_empty());
-    let read_only = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(WT)), verify: &[], read_only: true, edits: false, checkout: None };
+    let read_only = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(WT)), verify: &[], read_only: true, edits: false, checkout: None, own_mcp: &[] };
     assert!(rule_offer(&ping, &read_only).is_empty());
     let mut no_once = tool(PROJECT_TOOL, json!({}));
     no_once.choices = vec![ApprovalChoice::AllowAlways, ApprovalChoice::Deny];
@@ -617,7 +636,7 @@ fn full(c: &str, own_checkout: bool) -> Verdict {
 fn full_at(c: &str, cwd: &str, own_checkout: bool) -> Verdict {
     let dir = if own_checkout { REPO } else { WT };
     let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
-    let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)) };
+    let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[] };
     evaluate(&a, &ctx)
 }
 
@@ -710,6 +729,14 @@ fn full_access_asks_a_worktree_agent_before_work_is_lost_in_your_folder() {
         ("rm /Users/me/code/app/.env", WT),
         ("rm -f notes.txt /Users/me/code/app/src/a.ts", WT),
         ("rm ../../../../../Users/me/code/app/TODO.md", WT),
+        // The same file, after the line or an earlier one went into your folder.
+        ("cd /Users/me/code/app && rm TODO.md", WT),
+        ("pushd /Users/me/code/app; rm -f src/a.ts", WT),
+        ("sh -c 'cd /Users/me/code/app && rm TODO.md'", WT),
+        ("cd /Users/me/code/app/web && rm ../TODO.md", WT),
+        ("rm TODO.md", REPO),
+        ("rm src/a.ts", "/Users/me/code/app/web"),
+        ("cd $PROJECT && rm x", WT),
         // A folder the line does not name may be yours.
         ("cd $PROJECT && git reset --hard", WT),
         ("cd - && git clean -fd", WT),
@@ -733,6 +760,9 @@ fn full_access_asks_a_worktree_agent_before_work_is_lost_in_your_folder() {
         "rm notes.txt",
         "rm /tmp/scratch.log",
         "rm /Users/me/code/app/node_modules/.cache/x.json",
+        "cd /Users/me/code/app && rm node_modules/.cache/x.json",
+        "cd web && rm old.ts",
+        "cd /tmp && rm scratch.log",
         "git pull --rebase",
         "git reset HEAD~1",
     ] {
@@ -751,9 +781,11 @@ fn full_access_in_your_own_folder_allows_what_loses_no_work() {
         "rm -rf target build .next",
         "rm -rf packages/a/node_modules/.cache",
         "find node_modules -name '*.tmp' -delete",
-        // One file, by name.
+        // One file, by name: everyday work for an agent that works in your folder.
         "rm old.ts",
         "rm -f tmp.log",
+        "cd web && rm old.ts",
+        "rm /Users/me/code/app/TODO.md",
         // git that keeps your work or only adds to it.
         "git push origin main",
         "git push -u origin feature",
@@ -791,7 +823,7 @@ fn work_lost_in_your_own_folder_is_never_saved_as_a_rule() {
     let offer_in = |c: &str, own_checkout: bool| {
         let dir = if own_checkout { REPO } else { WT };
         let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(dir.into()) });
-        let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)) };
+        let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[] };
         rule_offer(&a, &ctx)
     };
     // In a worktree these offer a rule, as before; in your own folder they always ask.
@@ -808,7 +840,7 @@ fn work_lost_in_your_own_folder_is_never_saved_as_a_rule() {
 fn the_own_folder_floor_adds_nothing_outside_full_access() {
     let eval_in = |c: &str, mode, read_only| {
         let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(REPO.into()) });
-        evaluate(&a, &PolicyCtx { mode, worktree: Some(Path::new(REPO)), verify: &[], read_only, edits: false, checkout: Some(Path::new(REPO)) })
+        evaluate(&a, &PolicyCtx { mode, worktree: Some(Path::new(REPO)), verify: &[], read_only, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[] })
     };
     assert!(reason(eval_in("git reset --hard", ApprovalMode::Autonomous, false)).starts_with("risk: discards changes"));
     assert!(reason(eval_in("git reset --hard", ApprovalMode::Full, true)).starts_with("risk: discards changes"));
