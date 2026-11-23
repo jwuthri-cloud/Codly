@@ -54,8 +54,8 @@ merged into. Agents can ask the Lead a question mid-task, and the answer comes b
 
 Commands an agent wants to run arrive in one approvals inbox. Codly checks each request against its rules
 first (here: it deletes files, stays inside the agent's worktree, and makes no network calls), then asks
-you. Approve once, allow for the session, or deny. For a command you trust, or a tool of an MCP server,
-choose "Always allow in this repo": Codly then stops asking every agent in that repo about it (never about
+you. Approve once, allow for the session, or deny. For a command you trust, or a tool of an MCP server
+that a Claude Code agent asks for, choose "Always allow in this repo": Codly then stops asking every agent in that repo about it (never about
 deletes, `git push`, `sudo`, secrets or paths outside the worktree), and Settings lists the rules so you
 can remove them.
 

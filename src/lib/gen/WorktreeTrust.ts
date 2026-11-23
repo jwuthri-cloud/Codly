@@ -12,7 +12,9 @@ export type WorktreeTrust = {
  */
 path: string, 
 /**
- * Every file there that a CLI loads by itself, tracked or not.
+ * The files there that a CLI loads by itself and that are the worktree's own: what git
+ * tracks, and what an agent may have written. Not listed: your own files that Codly
+ * copied in from your checkout, and Claude Code's local settings file.
  */
 files: Array<TrustFile>, 
 /**

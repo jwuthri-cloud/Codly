@@ -31,7 +31,7 @@ fn cmd(c: &str) -> Approval {
 
 fn eval(a: &Approval, mode: ApprovalMode) -> Verdict {
     let verify = vec!["pnpm -F web test".to_string()];
-    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false, edits: false, checkout: None, own_mcp: &[] })
+    evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &verify, read_only: false, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) })
 }
 
 fn allowed(v: &Verdict) -> bool {
@@ -184,7 +184,7 @@ fn only_allow_once_is_ever_chosen() {
 
 #[test]
 fn read_only_agents_get_reads_only() {
-    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true, edits: false, checkout: Some(Path::new("/repo")), own_mcp: &[] };
+    let ctx = |mode| PolicyCtx { mode, worktree: Some(Path::new("/repo")), verify: &[], read_only: true, edits: false, checkout: Some(Path::new("/repo")), own_mcp: &[], provider: Some(Provider::Claude) };
     let a = approval(ApprovalSubject::Command { command: "npm test".into(), cwd: Some("/repo".into()) });
     assert!(!allowed(&evaluate(&a, &ctx(ApprovalMode::Autonomous))), "the Lead never runs writes in the user's checkout");
     let r = approval(ApprovalSubject::Command { command: "git log --oneline -5".into(), cwd: Some("/repo".into()) });
@@ -205,7 +205,7 @@ fn a_trusted_senior_works_alone_in_its_worktree() {
 
 #[test]
 fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
-    let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true, checkout: None, own_mcp: &[] });
+    let junior = |a: &Approval, mode| evaluate(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: true, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) });
     let edit = approval(ApprovalSubject::FileChange { paths: vec![format!("{WT}/src/a.ts")], diff: None });
     assert!(!allowed(&eval(&edit, ApprovalMode::Balanced)), "untrusted: balanced asks");
     // The decision names your trust in the agent sheet's words, not a rank: any rank can have it.
@@ -220,7 +220,7 @@ fn a_trusted_junior_edits_its_worktree_but_commands_still_ask() {
 // ───────────── "always allow in this repo": what a request can be saved as ─────────────
 
 fn offer(a: &Approval, mode: ApprovalMode) -> ApprovalRuleOffer {
-    rule_offer(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[] })
+    rule_offer(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) })
 }
 
 fn saved(kind: ApprovalRuleKind, command: &str) -> ApprovalRule {
@@ -247,6 +247,13 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("git switch -c feature", Some("git switch")),
         ("uv pip install requests", Some("uv pip install")),
         ("uv tool run ruff check src", Some("uv tool run ruff")),
+        ("pnpm exec vitest run", Some("pnpm exec vitest")),
+        ("npm run make", Some("npm run make")),
+        // A program with subcommands of its own, started by another: the exact command only.
+        ("pnpm exec npm install left-pad", None),
+        ("uv run cargo test", None),
+        // The subcommand behind an option's value: the exact command only.
+        ("pnpm --filter web add left-pad", None),
         // Not a program that takes a subcommand, or no plain subcommand: the exact command only.
         ("node scripts/migrate.js", None),
         ("pnpm -F web build", None),
@@ -287,6 +294,8 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("pnpm install 2>&1 | tail -5", Some("pnpm install")),
         ("pnpm install --frozen-lockfile 2>&1 | grep -v WARN | head -40", Some("pnpm install")),
         ("cd web && cargo test -p core 2>&1 | tail -20", Some("cargo test")),
+        // `c` is `config` for npm and pnpm only: for cargo it is `check`.
+        ("cargo c -p core", Some("cargo c")),
         ("git add -A && git status", Some("git add")),
         ("pnpm install || true", Some("pnpm install")),
         ("pnpm install && echo done", Some("pnpm install")),
@@ -351,6 +360,28 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
         "sh -c 'npm config set registry http://localhost:4873'",
         "npm --prefix web config set registry http://localhost:4873",
         "pnpm -C web config set registry http://localhost:4873",
+        // A write to a package manager's settings, under any of its forms.
+        "npm set registry http://localhost:4873",
+        "yarn config set registry http://localhost:4873",
+        "pip config set global.index-url http://localhost:3141",
+        "poetry config repositories.local http://localhost:3141",
+        "gem sources --add http://localhost:9292",
+        // The same commands behind a package runner.
+        "pnpm exec npm publish",
+        "npx npm publish",
+        "pnpm --filter web exec npm publish",
+        "pnpm exec npm config set registry http://localhost:4873",
+        // Behind the runner's own options, and as a line for a shell.
+        "npm exec -w web -- npm publish",
+        "npm exec --prefix web -- npm publish",
+        "npx -c 'npm publish'",
+        "bunx -c 'npm publish'",
+        "bun exec 'npm publish'",
+        "pnpm --shell-mode exec 'npm publish'",
+        // npm's short name for `config`, and an option's value in front of what it is told to do.
+        "npm c set registry http://localhost:4873",
+        "npm c get registry",
+        "npm config --location global set registry http://localhost:4873",
         // An install for your account or the whole machine writes outside the worktree.
         "npm install -g some-pkg",
         "npm install --location=global some-pkg",
@@ -386,7 +417,7 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
     // one-time allow to answer with, and everything that is not a command.
     let install = cmd("pnpm install");
     assert!(offer(&install, ApprovalMode::Strict).is_empty());
-    let ctx = |read_only, worktree| PolicyCtx { mode: ApprovalMode::Balanced, worktree, verify: &[], read_only, edits: false, checkout: None, own_mcp: &[] };
+    let ctx = |read_only, worktree| PolicyCtx { mode: ApprovalMode::Balanced, worktree, verify: &[], read_only, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) };
     assert!(rule_offer(&install, &ctx(true, Some(Path::new(WT)))).is_empty());
     assert!(rule_offer(&install, &ctx(false, None)).is_empty());
     let mut no_once = cmd("pnpm install");
@@ -470,6 +501,11 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
         ("uv tool run", "uv tool run some-pkg"),
         ("go run", "go run example.com/cmd/tool@latest"),
         ("deno run", "deno run https://example.com/x.ts"),
+        // A rule for a package runner never covers what the program it starts can do.
+        ("pnpm exec", "pnpm exec npm publish"),
+        ("pnpm exec npm", "pnpm exec npm publish"),
+        ("pnpm exec npm", "pnpm exec npm install left-pad"),
+        ("pnpm exec npm", "pnpm exec npm run deploy"),
     ] {
         assert!(!covers(&saved(ApprovalRuleKind::Prefix, rule), c), "`{rule}` must not cover `{c}`");
     }
@@ -489,7 +525,7 @@ fn a_saved_rule_allows_only_the_requests_that_offer_it() {
     // The same rule in another agent's worktree: it is the repo's, not one agent's.
     let other = "/data/worktrees/repo/p/t2";
     let there = approval(ApprovalSubject::Command { command: "pnpm install lodash".into(), cwd: Some(other.into()) });
-    let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(other)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[] };
+    let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(other)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) };
     assert!(rule_offer(&there, &ctx).offers(&install));
 
     // An exact rule is the whole line and nothing else; it is not a prefix.
@@ -542,7 +578,7 @@ fn autonomous_asks_about_a_tool_of_an_mcp_server_codly_did_not_set_up() {
     // Codly's own tools, and the tools of the Connections this run was given, do not ask.
     let given: Vec<String> = ["sequential-thinking", "context7", "github", "google-workspace"].map(String::from).to_vec();
     let eval_given = |name: &str| {
-        let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &given };
+        let ctx = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &given, provider: Some(Provider::Claude) };
         evaluate(&tool(name, json!({})), &ctx)
     };
     for name in [
@@ -610,7 +646,7 @@ fn an_mcp_tool_can_be_saved_by_its_name() {
     assert!(offer(&hinted, ApprovalMode::Autonomous).is_empty());
     // The floors of every rule.
     assert!(offer(&ping, ApprovalMode::Strict).is_empty());
-    let read_only = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(WT)), verify: &[], read_only: true, edits: false, checkout: None, own_mcp: &[] };
+    let read_only = PolicyCtx { mode: ApprovalMode::Autonomous, worktree: Some(Path::new(WT)), verify: &[], read_only: true, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) };
     assert!(rule_offer(&ping, &read_only).is_empty());
     let mut no_once = tool(PROJECT_TOOL, json!({}));
     no_once.choices = vec![ApprovalChoice::AllowAlways, ApprovalChoice::Deny];
@@ -621,6 +657,37 @@ fn an_mcp_tool_can_be_saved_by_its_name() {
     let line = cmd(PROJECT_TOOL);
     assert!(offer(&line, ApprovalMode::Balanced).is_empty());
     assert!(!offer(&line, ApprovalMode::Balanced).offers(&rule));
+}
+
+/// Only Claude Code names the tool of an MCP server itself. Another CLI names a request by a
+/// title, which is free text: a title that reads like a tool's name offers no rule, and a rule
+/// saved from a Claude agent's request never answers it.
+#[test]
+fn a_tool_rule_is_only_for_a_cli_that_names_the_tool_itself() {
+    let rule = saved(ApprovalRuleKind::Exact, PROJECT_TOOL);
+    let offer_of = |provider: Option<Provider>, a: &Approval, mode| {
+        rule_offer(a, &PolicyCtx { mode, worktree: Some(Path::new(WT)), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[], provider })
+    };
+    let named = tool(PROJECT_TOOL, json!({}));
+    // An ACP request carries its protocol kind beside the title (`acp.rs`).
+    let titled = tool(PROJECT_TOOL, json!({ "_kind": "other" }));
+    for mode in [ApprovalMode::Balanced, ApprovalMode::Autonomous, ApprovalMode::Full] {
+        let o = offer_of(Some(Provider::Claude), &named, mode);
+        assert_eq!((o.exact.as_deref(), o.prefix.as_deref()), (Some(PROJECT_TOOL), None), "{mode:?}");
+        assert!(o.offers(&rule), "{mode:?}");
+        for provider in [Some(Provider::Gemini), Some(Provider::Opencode), Some(Provider::Cursor), Some(Provider::Copilot), Some(Provider::Codex), None] {
+            for a in [&titled, &named] {
+                let o = offer_of(provider, a, mode);
+                assert!(o.is_empty(), "{provider:?} in {mode:?}: {o:?}");
+                assert!(!o.offers(&rule), "{provider:?} in {mode:?}");
+            }
+        }
+    }
+    // A command's rule does not depend on the CLI that asks.
+    for provider in Provider::ALL {
+        let o = offer_of(Some(provider), &cmd("pnpm install"), ApprovalMode::Balanced);
+        assert_eq!(o.prefix.as_deref(), Some("pnpm install"), "{provider:?}");
+    }
 }
 
 // ───────────── full access in your own project folder (Git isolation off) ─────────────
@@ -636,7 +703,7 @@ fn full(c: &str, own_checkout: bool) -> Verdict {
 fn full_at(c: &str, cwd: &str, own_checkout: bool) -> Verdict {
     let dir = if own_checkout { REPO } else { WT };
     let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(cwd.into()) });
-    let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[] };
+    let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[], provider: Some(Provider::Claude) };
     evaluate(&a, &ctx)
 }
 
@@ -823,7 +890,7 @@ fn work_lost_in_your_own_folder_is_never_saved_as_a_rule() {
     let offer_in = |c: &str, own_checkout: bool| {
         let dir = if own_checkout { REPO } else { WT };
         let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(dir.into()) });
-        let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[] };
+        let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(Path::new(dir)), verify: &[], read_only: false, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[], provider: Some(Provider::Claude) };
         rule_offer(&a, &ctx)
     };
     // In a worktree these offer a rule, as before; in your own folder they always ask.
@@ -840,7 +907,7 @@ fn work_lost_in_your_own_folder_is_never_saved_as_a_rule() {
 fn the_own_folder_floor_adds_nothing_outside_full_access() {
     let eval_in = |c: &str, mode, read_only| {
         let a = approval(ApprovalSubject::Command { command: c.into(), cwd: Some(REPO.into()) });
-        evaluate(&a, &PolicyCtx { mode, worktree: Some(Path::new(REPO)), verify: &[], read_only, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[] })
+        evaluate(&a, &PolicyCtx { mode, worktree: Some(Path::new(REPO)), verify: &[], read_only, edits: false, checkout: Some(Path::new(REPO)), own_mcp: &[], provider: Some(Provider::Claude) })
     };
     assert!(reason(eval_in("git reset --hard", ApprovalMode::Autonomous, false)).starts_with("risk: discards changes"));
     assert!(reason(eval_in("git reset --hard", ApprovalMode::Full, true)).starts_with("risk: discards changes"));

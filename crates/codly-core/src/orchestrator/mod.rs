@@ -437,6 +437,7 @@ impl Core {
             accounts::detect(&base_env, &clis, &settings.accounts, !fixed_clis, None, settings.claude_shell_auth).await.unwrap_or_default();
         let quota = accounts::stored_limits(&store);
         let rounds = resume::stored_rounds(&store);
+        let outside_turns = outside::stored(&store)?;
         let breaker = Mutex::new(breaker_run::Runtime::load(&store));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (artifact_copies, artifact_jobs) = mpsc::unbounded_channel();
@@ -485,7 +486,7 @@ impl Core {
             stuck_told: Mutex::new(HashMap::new()),
             merge_looks: Mutex::new(HashMap::new()),
             checking: Mutex::new(HashSet::new()),
-            outside_turns: Mutex::new(HashMap::new()),
+            outside_turns: Mutex::new(outside_turns),
             rechecks: tokio::sync::Mutex::new(()),
             held_work: Mutex::new(None),
         });
