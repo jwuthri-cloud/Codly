@@ -30,7 +30,7 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot};
 
 use super::classify::{self, OUTPUT_MAX};
-use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, startup};
+use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec, attachments, startup};
 use crate::model::{
     ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, EventKind, Id,
     MessagePhase, PlanStep, Provider, TurnStatus, Usage, new_id, now_ms,
@@ -161,6 +161,7 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         stderr,
         next_id: 0,
         session_id: None,
+        takes_images: false,
         pending: HashMap::new(),
         prompt_in_flight: false,
         queue: VecDeque::new(),
@@ -209,6 +210,8 @@ struct Actor {
     system_prompt: Option<String>,
     next_id: i64,
     session_id: Option<String>,
+    /// The agent said at `initialize` that a prompt may hold images.
+    takes_images: bool,
     pending: HashMap<i64, Pending>,
     prompt_in_flight: bool,
     queue: VecDeque<String>,
@@ -305,6 +308,7 @@ impl Actor {
             .and_then(|r| r.map_err(|e| anyhow!("initialize failed: {}", err_msg(&e))))
             .map_err(|e| startup::explain(&self.spec, None, e))?;
         check_protocol(self.spec.provider, &init)?;
+        self.takes_images = takes_images(&init);
         let caps = &init["agentCapabilities"];
         let cwd = self.spec.cwd.to_string_lossy().into_owned();
         let mcp = mcp_servers(&self.spec);
@@ -576,7 +580,18 @@ impl Actor {
             Some(sys) => format!("<codly_instructions>\n{sys}\n</codly_instructions>\n\n{text}"),
             None => text.clone(),
         };
-        let id = self.request("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": full }] })).await;
+        // An agent that takes images gets the attached ones as image blocks (no GIF: see
+        // `attachments::acp_images`); any other opens them by their paths, which the text
+        // keeps either way.
+        let mut images = Vec::new();
+        if self.takes_images {
+            let attached = attachments::acp_images(&text).await;
+            if let Some(note) = attached.note {
+                self.emit(EventKind::Error { message: note, fatal: false });
+            }
+            images = attached.images;
+        }
+        let id = self.request("session/prompt", json!({ "sessionId": sid, "prompt": attachments::acp_prompt(&full, &images) })).await;
         self.pending.insert(id, Pending::Prompt);
         self.prompt_in_flight = true;
         let events = self.norm.turn_started(&text);
@@ -677,6 +692,12 @@ fn check_protocol(provider: Provider, init: &Value) -> anyhow::Result<()> {
         }
         _ => Ok(()),
     }
+}
+
+/// Does the agent take image blocks in a prompt (`promptCapabilities.image` of `initialize`)?
+/// The protocol lets a client send one only then.
+fn takes_images(init: &Value) -> bool {
+    init["agentCapabilities"]["promptCapabilities"]["image"] == true
 }
 
 /// How the agent itself says to sign in (`authMethods` of `initialize`): a method's own
@@ -1593,6 +1614,7 @@ mod tests {
             stderr: StderrTail::default(),
             next_id: 0,
             session_id: Some("s".into()),
+            takes_images: false,
             pending: HashMap::new(),
             prompt_in_flight: false,
             queue: VecDeque::new(),
@@ -1607,6 +1629,58 @@ mod tests {
 
     fn emitted(events: &mut mpsc::UnboundedReceiver<AdapterEvent>) -> Vec<EventKind> {
         std::iter::from_fn(|| events.try_recv().ok()).map(|e| e.kind).collect()
+    }
+
+    /// Both recorded agents say at `initialize` that a prompt may hold images; an agent that
+    /// does not say so takes none.
+    #[test]
+    fn the_image_capability_is_read_from_initialize() {
+        for name in ["acp-gemini.jsonl", "acp-opencode.jsonl"] {
+            let init = fixture(name).into_iter().find(|l| l["dir"] == "a2c" && l["msg"]["result"]["agentCapabilities"].is_object()).unwrap();
+            assert!(takes_images(&init["msg"]["result"]), "{name}");
+        }
+        assert!(!takes_images(&json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": true, "promptCapabilities": { "embeddedContext": true } } })));
+        assert!(!takes_images(&json!({ "protocolVersion": 1 })));
+    }
+
+    /// An attached image is an image block of the prompt only for an agent that takes images:
+    /// any other gets the text alone, which names the file's path. A GIF is never a block.
+    #[tokio::test]
+    async fn an_attached_image_is_an_image_block_for_an_agent_that_takes_images() {
+        use crate::adapters::attachments::testing::{attach, message, png_of};
+        /// The `prompt` of the `session/prompt` Codly wrote, from the raw log of `dir`.
+        fn prompt_sent(dir: &Path) -> Value {
+            let log = std::fs::read_to_string(dir.join("raw.ndjson")).unwrap();
+            let mut sent = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["codly_sent"].clone()).filter(|l| l["method"] == "session/prompt");
+            let prompt = sent.next().expect("a prompt was sent")["params"]["prompt"].clone();
+            assert!(sent.next().is_none());
+            prompt
+        }
+
+        for takes_images in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, mut events, _child) = silent_actor(dir.path());
+            actor.takes_images = takes_images;
+            let shot = attach(dir.path(), "shot.png", &png_of(300));
+            let big = attach(dir.path(), "big.png", &png_of(4_000_000));
+            let gif = attach(dir.path(), "anim.gif", b"GIF89a\x01\0\x01\0");
+            let text = message("Make it look like this.", &[&gif, &shot, &big]);
+            actor.on_cmd(AgentCmd::Prompt(text.clone())).await;
+
+            let kinds = emitted(&mut events);
+            let told = kinds.iter().position(|k| matches!(k, EventKind::Error { message, fatal: false } if message.starts_with("big.png is over 3.5 MB")));
+            let started = kinds.iter().position(|k| matches!(k, EventKind::TurnStarted { input: Some(input) } if *input == text));
+            assert!(started.is_some(), "the turn shows the text: {kinds:?}");
+            if takes_images {
+                // The raw log keeps the block without its bytes (`proc::without_image_data`).
+                let image = json!({ "type": "image", "mimeType": "image/png", "data": "<400 base64 characters left out>" });
+                assert_eq!(prompt_sent(dir.path()), json!([{ "type": "text", "text": text }, image]));
+                assert!(told.is_some() && told < started, "the image over the limit stays a path, and the user is told: {kinds:?}");
+            } else {
+                assert_eq!(prompt_sent(dir.path()), json!([{ "type": "text", "text": text }]));
+                assert!(told.is_none(), "nothing was left out of what this agent takes: {kinds:?}");
+            }
+        }
     }
 
     /// A turn that does not end after `session/cancel` is not waited for without end. (The
