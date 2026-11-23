@@ -621,7 +621,13 @@ impl Inner {
             let _g = self.repo_lock.lock().await;
             match repo {
                 Some(repo) => match self.git.check_worktree(&repo, &cwd).await {
-                    Ok(()) => self.git.commit_all(&cwd, &message).await,
+                    // Not a merge it has not finished resolving: that stays open for its next
+                    // turn, and its conversation says that nothing was committed.
+                    Ok(()) => match self.may_snapshot(ws.as_deref(), &agent, &cwd).await {
+                        Ok(true) => self.git.commit_all(&cwd, &message).await,
+                        Ok(false) => Ok(None),
+                        Err(e) => Err(e),
+                    },
                     Err(e) => Err(e),
                 },
                 None => Err(anyhow::anyhow!("no workspace")),

@@ -188,6 +188,9 @@
     "allow-draft-pull-request",
     "allow-create-pull-request",
     "allow-push-pr-branch",
-    "allow-refresh-pull-request"
+    "allow-refresh-pull-request",
+    "allow-merge-state",
+    "allow-resolve-merge-conflict",
+    "allow-stop-resolving-merge"
   ]
 }

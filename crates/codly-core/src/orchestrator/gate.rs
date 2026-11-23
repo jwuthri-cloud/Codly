@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
 use super::scope::ScopeMatcher;
-use super::{Inner, approvals, lock, names, prompts, row, runs::RunReq, runs::new_session, scheduler};
+use super::{Inner, approvals, lock, merge_conflict, names, prompts, row, runs::RunReq, runs::new_session, scheduler};
 use crate::git::MergeOutcome;
 use crate::model::*;
 use crate::store;
@@ -339,12 +339,17 @@ impl Inner {
 
         // 4. Scope: changed files ⊆ write_scope ∪ declared exceptions.
         let plan = task.plan_id.as_deref().map(|p| self.plan(p)).transpose()?;
-        let base_ref = match plan.as_ref().and_then(|p| p.integration_branch.clone()) {
+        // A task that resolves a conflict with your branch committed on the plan's own branch:
+        // its work is measured from where that branch was, and what the merge brought in from
+        // your branch has no write scope to stay in.
+        let in_place = plan.as_ref().is_some_and(|p| merge_conflict::in_place(&task, p).is_some());
+        let base_ref = match plan.as_ref().and_then(|p| p.integration_branch.clone()).filter(|_| !in_place) {
             Some(b) => b,
             None => self.store.task_commits(task_id)?.0.ok_or_else(|| anyhow!("the task has no base commit"))?,
         };
         let files = self.git.changed_files(&wt, &base_ref).await?;
-        let matcher = ScopeMatcher::new(&task.write_scope).map_err(|e| anyhow!(e))?;
+        let scope: &[String] = if in_place { &[] } else { &task.write_scope };
+        let matcher = ScopeMatcher::new(scope).map_err(|e| anyhow!(e))?;
         let exceptions: Vec<String> = report["scope_exceptions"]
             .as_array()
             .map(|a| a.iter().filter_map(|e| e.as_str().map(String::from)).collect())
@@ -386,7 +391,11 @@ impl Inner {
 
         // 6. Optional cross-vendor review; it resumes the gate from review_done().
         let staff = self.agent(&worker).is_ok_and(|a| crate::career::trusts(&a.career, Rank::Staff));
-        if self.settings().review_gate && !files.is_empty() && staff {
+        if self.settings().review_gate && !files.is_empty() && in_place {
+            // Its diff is mostly your own commits. The plan's checks, run above and again when
+            // the plan finishes, judge the result.
+            self.decide(ws, Some(task_id), "gate", format!("{}: no review, it resolves a merge with your branch", task.key), json!({ "plan_id": task.plan_id }))?;
+        } else if self.settings().review_gate && !files.is_empty() && staff {
             self.decide(ws, Some(task_id), "gate", format!("{}: no review, you trust its worker to merge without one", task.key), json!({ "plan_id": task.plan_id }))?;
         } else if self.settings().review_gate && !files.is_empty() {
             let notes = report["notes_for_reviewer"].as_str().map(String::from);
@@ -1304,6 +1313,8 @@ impl Inner {
             && let Ok(plan) = self.plan(plan_id)
             && let (Some(integ), Some(ws)) = (plan.integration_branch.as_deref(), ws.and_then(|w| self.store.workspace(w).ok().flatten()))
             && !self.is_member_worktree(&ws, Path::new(wt))
+            // Not the plan's own worktree (a task that resolved a conflict there): the plan still needs it.
+            && plan.integration_worktree.as_deref() != Some(wt)
         {
             let _g = self.repo_lock.lock().await;
             if let Err(e) = self.git.worktree_remove(Path::new(&ws.repo_path), Path::new(wt), Some(integ), false).await {
@@ -1509,7 +1520,7 @@ fn first_line(e: &anyhow::Error) -> String {
     format!("{e:#}").lines().next().unwrap_or_default().to_string()
 }
 
-fn files_with_markers(wt: &Path, files: &[String]) -> Vec<String> {
+pub(super) fn files_with_markers(wt: &Path, files: &[String]) -> Vec<String> {
     files
         .iter()
         .filter(|f| {

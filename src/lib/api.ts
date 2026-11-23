@@ -31,6 +31,7 @@ import type { StorageCleanup } from './gen/StorageCleanup';
 import type { StoragePolicy } from './gen/StoragePolicy';
 import type { StorageReport } from './gen/StorageReport';
 import type { RepoSync } from './gen/RepoSync';
+import type { MergeState } from './gen/MergeState';
 import type { MergeWarning } from './gen/MergeWarning';
 import type { PrConfirm } from './gen/PrConfirm';
 import type { PrDraft } from './gen/PrDraft';
@@ -386,8 +387,18 @@ export const api = {
   /** Send back: the review comments on a task's diff, as one message, go to the agent that did the work.
    *  Refused for a done task (its work is merged: the changes are a new request). */
   sendBackTask: (taskId: string, comments: string) => call<Task>('send_back_task', { taskId, comments }),
-  /** Merge a plan into your checked-out branch. `into`: the branch you confirmed after `mergePlanWarning`. */
-  mergePlan: (planId: string, into: string | null = null) => call<string>('merge_plan', { planId, into }),
+  /** Merge a plan into your checked-out branch. `into`: the branch you confirmed after `mergePlanWarning`.
+   *  When your branch has commits the plan was never checked with, the plan's checks run on the merge
+   *  result first and a failure stops the merge; `unchecked`: you merge without them. */
+  mergePlan: (planId: string, into: string | null = null, unchecked = false) => call<string>('merge_plan', { planId, into, unchecked }),
+  /** What stands between a plan's branch (or a solo agent's) and your branch: the files that conflict,
+   *  and the plan's checks that failed on the merge result. Reads only. */
+  mergeState: (source: PrSource) => call<MergeState>('merge_state', { source }),
+  /** Have an agent resolve the conflict with your branch, in Codly's own worktree (your checkout is not touched).
+   *  `into`: the branch you confirmed after `mergePlanWarning`, for a plan that did not start from it. */
+  resolveMergeConflict: (source: PrSource, into: string | null = null) => call<MergeState>('resolve_merge_conflict', { source, into }),
+  /** Stop a solo agent's conflict resolution: the merge is taken out of its worktree, its branch is as before. */
+  stopResolvingMerge: (agentId: string) => call<MergeState>('stop_resolving_merge', { agentId }),
   /** What to confirm before merging a plan: your checkout is not on the branch it started from (null: nothing). */
   mergePlanWarning: (planId: string) => call<MergeWarning | null>('merge_plan_warning', { planId }),
   /** Undo the last merge Codly made into your branch (`sha` from `repoSync().last_merge`). */

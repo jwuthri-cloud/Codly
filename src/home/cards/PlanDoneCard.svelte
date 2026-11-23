@@ -1,6 +1,7 @@
 <!--
   The plan landed on its integration branch: what changed in total, what each task did, what
   the agents made, and the decision that is yours — merge into your branch, or keep the branch.
+  A merge that would conflict with your branch says so here, with the two ways out.
 -->
 <script lang="ts">
   import { keepBranch, mergePlan } from '../../lib/state/actions';
@@ -13,6 +14,7 @@
   import { idVar, GLOSSARY } from '../../lib/util/labels';
   import ArtifactThumb from '../../components/ArtifactThumb.svelte';
   import Icon from '../../components/Icon.svelte';
+  import MergeConflictStep from '../../components/MergeConflictStep.svelte';
   import RepoSyncBar from '../../components/RepoSyncBar.svelte';
   import PullRequestStep from '../../components/PullRequestStep.svelte';
 
@@ -36,9 +38,10 @@
   const kept = $derived(ui.keptPlans.includes(planId) || !!store.planMap.get(planId)?.kept);
   const target = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
   let busy = $state(false);
-  async function merge() {
+  // `unchecked`: after the plan's checks failed on the merge result, you merge anyway.
+  async function merge(unchecked = false) {
     busy = true;
-    await mergePlan(planId);
+    await mergePlan(planId, null, unchecked);
     busy = false;
   }
   async function keep() {
@@ -82,11 +85,12 @@
         <span class="done"><Icon name="check" size={13} stroke={2} />Merged into <code>{target}</code> at <code>{shortSha(merged.sha)}</code></span>
         <button class="btn ghost sm" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {:else}
-        <button class="btn primary" disabled={busy || kept} onclick={merge}><Icon name="merge" size={14} />Merge into {target}</button>
+        <button class="btn primary" disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
         <button class="btn" disabled={busy || kept} onclick={keep}>Keep the branch</button>
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}
     </footer>
+    {#if !merged && !kept}<MergeConflictStep source={{ kind: 'plan', id: planId }} refresh={busy} onunchecked={() => merge(true)} />{/if}
     {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} {planId} />{/if}
     {#if plan.integration_branch}<PullRequestStep source={{ kind: 'plan', id: planId }} canPush={!merged} />{/if}
   </article>

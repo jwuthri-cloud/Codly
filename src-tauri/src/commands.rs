@@ -264,13 +264,15 @@ pub async fn send_back_task(state: State<'_, AppState>, task_id: String, comment
     state.core().await?.send_back_task(&task_id, &comments).await.map_err(err)
 }
 
-/// `into`: the branch the user confirmed after `merge_plan_warning`.
+/// `into`: the branch the user confirmed after `merge_plan_warning`. `unchecked`: the user
+/// merges without the plan's checks on the merge result (they failed, and the user goes on).
 #[tauri::command]
-pub async fn merge_plan(state: State<'_, AppState>, plan_id: String, into: Option<String>) -> R<String> {
+pub async fn merge_plan(state: State<'_, AppState>, plan_id: String, into: Option<String>, unchecked: bool) -> R<String> {
     let core = state.core().await?;
-    match into {
-        Some(branch) => core.merge_plan_into(&plan_id, &branch).await,
-        None => core.merge_plan(&plan_id).await,
+    match (unchecked, into) {
+        (true, into) => core.merge_plan_unchecked(&plan_id, into.as_deref()).await,
+        (false, Some(branch)) => core.merge_plan_into(&plan_id, &branch).await,
+        (false, None) => core.merge_plan(&plan_id).await,
     }
     .map_err(err)
 }

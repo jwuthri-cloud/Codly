@@ -102,14 +102,14 @@ describe('merging into your branch', () => {
     ask!.action!.run();
     await vi.waitFor(() => expect(store.mergeOf('p1')?.sha).toBe('abc1234def'));
     // The branch you confirmed goes along: the core refuses if the checkout moved again.
-    expect(merge).toHaveBeenCalledWith('p1', 'main');
+    expect(merge).toHaveBeenCalledWith('p1', 'main', false);
   });
 
   it('a plan merges straight away on the branch it started from', async () => {
     vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(null);
     const merge = vi.spyOn(api, 'mergePlan').mockResolvedValue('abc1234def');
     await mergePlan('p2');
-    expect(merge).toHaveBeenCalledWith('p2', null);
+    expect(merge).toHaveBeenCalledWith('p2', null, false);
     expect(store.mergeOf('p2')?.sha).toBe('abc1234def');
   });
 
