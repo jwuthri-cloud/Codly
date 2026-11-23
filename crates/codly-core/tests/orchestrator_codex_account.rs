@@ -83,7 +83,7 @@ impl Spawner for Fake {
                             send(EventKind::Exited { code: Some(0) });
                             break;
                         }
-                        AgentCmd::Interrupt | AgentCmd::Approval { .. } => {}
+                        AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. } => {}
                     }
                 }
             });

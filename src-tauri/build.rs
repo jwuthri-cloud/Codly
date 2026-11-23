@@ -4,6 +4,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
         "agent_control", "set_agent_block_tools", "stop_agent_after_step", "resume_agent", "steer_agent",
         "set_agent_permission_mode", "compact_agent", "agent_context_usage",
+        "agent_takeover", "list_takeovers", "take_over_agent", "open_takeover_terminal", "give_back_agent",
         "retry_core", "ui_subscribe", "ui_set_visible", "detect_clis", "list_accounts", "recent_workspaces", "list_repos", "open_workspace", "update_settings",
         "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "hire_agent", "list_models", "model_catalog", "set_agent_model", "set_agent_look", "set_workspace_team", "set_request_prefs",
         "approval_rule_offer", "add_approval_rule", "approval_rules", "remove_approval_rule",

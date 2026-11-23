@@ -98,6 +98,11 @@ fn commands_round_trip_with_frontend_arg_names() {
             crate::agent_controls::set_agent_permission_mode,
             crate::agent_controls::compact_agent,
             crate::agent_controls::agent_context_usage,
+            crate::takeover_commands::agent_takeover,
+            crate::takeover_commands::list_takeovers,
+            crate::takeover_commands::take_over_agent,
+            crate::takeover_commands::open_takeover_terminal,
+            crate::takeover_commands::give_back_agent,
             crate::onboarding_commands::install_cli,
             crate::onboarding_commands::byok_status,
             crate::onboarding_commands::byok_configure,
@@ -304,6 +309,13 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(invoke(&wv, "model_catalog", json!({})).is_err(), "provider is required");
     let e = invoke(&wv, "compact_agent", json!({ "agentId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent"), "{e}");
+    // "Open in my terminal", with the key the agent sheet sends: the core answers (no agent
+    // here), not the argument check, and no terminal opens for an agent that is not in one.
+    for cmd in ["agent_takeover", "take_over_agent", "open_takeover_terminal", "give_back_agent"] {
+        let e = invoke(&wv, cmd, json!({ "agentId": "nope" })).unwrap_err();
+        assert!(e.to_string().contains("unknown agent nope"), "{cmd}: {e}");
+    }
+    assert_eq!(invoke(&wv, "list_takeovers", json!({})).unwrap(), json!([]), "no agent is in your terminal");
 
     // The index builds in the background; the command must answer either way.
     let _ = invoke(&wv, "search_code", json!({ "query": "retained sampling" }));

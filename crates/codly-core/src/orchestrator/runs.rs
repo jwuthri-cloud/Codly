@@ -40,6 +40,8 @@ impl Inner {
     /// Start a CLI run. The run row is written before spawning, so events the adapter emits
     /// during its handshake are already attributable to this run.
     pub(super) async fn spawn_run(self: &Arc<Self>, req: RunReq) -> Result<Id> {
+        // Its session is open in your terminal (takeover.rs): a second process would corrupt it.
+        self.not_in_terminal(&req.agent)?;
         let provider = req.agent.provider;
         let cli = self.clis().into_iter().find(|c| c.provider == provider);
         let Some(cli) = cli.filter(|c| c.path.is_some()) else { bail!("{} is not installed", provider.label()) };
@@ -130,6 +132,11 @@ impl Inner {
                     interrupt: Default::default(),
                 },
             );
+        }
+        // Looked at again now that the run is in the live table: a take-over writes its mark and
+        // then reads that table (`take_over`), so one of the two always sees the other.
+        if let Err(e) = self.not_in_terminal(&req.agent) {
+            return Err(self.spawn_failed(&req.agent.id, &run_id, &token, e));
         }
         let session_id = match &req.session {
             SessionMode::New { session_id } => session_id.clone(),

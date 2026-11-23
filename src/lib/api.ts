@@ -49,6 +49,8 @@ import type { ContextUsage } from './gen/ContextUsage';
 import type { ControlState } from './gen/ControlState';
 import type { PermissionMode } from './gen/PermissionMode';
 import type { ModelCatalog } from './gen/ModelCatalog';
+import type { Takeover } from './gen/Takeover';
+import type { TakeoverState } from './gen/TakeoverState';
 import type { EventRow } from './gen/EventRow';
 import type { IdeChange } from './gen/IdeChange';
 import type { IdeEntry } from './gen/IdeEntry';
@@ -271,6 +273,16 @@ export const api = {
   /** Ask a running Claude or Codex agent to compact its conversation now. Resolves when the CLI took the request. */
   compactAgent: (agentId: string) => call<void>('compact_agent', { agentId }),
   agentContextUsage: (agentId: string) => call<ContextUsage>('agent_context_usage', { agentId }),
+  /** "Open in my terminal" (agent sheet). Is the agent in your terminal, and if not, may it go there now? */
+  agentTakeover: (agentId: string) => call<TakeoverState>('agent_takeover', { agentId }),
+  /** Every agent that is in your terminal: what the window marks them with. */
+  listTakeovers: () => call<Takeover[]>('list_takeovers'),
+  /** Codly stops its own process for the agent's session and starts none until `giveBackAgent`. */
+  takeOverAgent: (agentId: string) => call<TakeoverState>('take_over_agent', { agentId }),
+  /** A terminal (attach with `ptyAttach`) in the worktree of an agent that is in your terminal, with the CLI's resume command typed, not run. */
+  openTakeoverTerminal: (agentId: string) => call<string>('open_takeover_terminal', { agentId }),
+  /** Closes that terminal; the agent's next message or task resumes the same session in Codly. */
+  giveBackAgent: (agentId: string) => call<TakeoverState>('give_back_agent', { agentId }),
   hireAgent: (provider: Provider, model: string | null = null, title: string | null = null) => call<Agent>('hire_agent', { provider, model, title }),
   listModels: (provider: Provider) => call<string[]>('list_models', { provider }),
   /** A CLI's models with the thinking efforts each one takes, and where the list comes from. */

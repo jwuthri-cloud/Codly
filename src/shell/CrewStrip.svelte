@@ -6,6 +6,7 @@
 <script lang="ts">
   import { narrate } from '../lib/state/narration';
   import { store } from '../lib/state/store.svelte';
+  import { takeovers } from '../lib/state/takeover.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import type { Provider } from '../lib/gen/Provider';
   import Icon from '../components/Icon.svelte';
@@ -19,9 +20,10 @@
 
   const leads = $derived(store.leads.filter((a) => a.status !== 'offline'));
   const crew = $derived(
-    // The team first (always there, even idle), then everyone else by arrival.
+    // The team first (always there, even idle), then everyone else by arrival. An agent that is
+    // in your terminal stays in sight, also when its row says it stopped (after a restart).
     store.agents
-      .filter((a) => a.role !== 'lead' && (a.status !== 'offline' || a.member))
+      .filter((a) => a.role !== 'lead' && (a.status !== 'offline' || a.member || takeovers.has(a.id)))
       .sort((a, b) => Number(!a.member) - Number(!b.member) || a.created_at - b.created_at),
   );
   // Workers drop their sentence only when the strip itself runs out of room, not when the window is

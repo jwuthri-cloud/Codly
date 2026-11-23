@@ -198,6 +198,24 @@ yours, the circuit breaker's or a tool block's, a worker's task waits for you, B
 nothing restarts it. A write to a CLI that stopped reading its stdin gives up after 10 s and ends
 that process.
 
+**An agent's session can go to your terminal.** "Open in my terminal" in an agent's sheet
+(`orchestrator/takeover.rs`) hands the agent's CLI session to you: Codly stops its own process
+for it, opens a terminal in the agent's worktree and types the CLI's own resume command there
+(`claude --resume <id>`, and nothing else; Enter is yours). Only an agent between turns goes,
+and not while its process starts or its task runs, is checked or merges. The Lead never goes
+(a terminal has none of Codly's tools). Neither does an agent of a CLI for which no command
+that opens one session by its id is on record (Gemini, OpenCode, Cursor, Copilot), nor a Codex
+agent for now: Codly's Codex agents share one `codex app-server`, and nothing on record shows
+that the session Codly resumes after the give-back has what the terminal did
+(docs/research/cli-claude-codex.md §3.5). While the agent is there Codly starts no process for
+it: a message to it is refused, a task for it waits and says so, and it is not picked for a
+review. Two guards keep a start and a take-over apart: the take-over writes its mark and then
+looks at the live runs, a start enters the live runs and then looks at the mark, so one of the
+two always sees the other. The agent reads "In your terminal" wherever its one sentence shows,
+and has a tab in the Terminal room; both outlive a restart of Codly. "Give it back" closes the
+terminal Codly opened, and the agent's next message or task resumes the same session. Codly
+cannot see a terminal of your own: quit the CLI there before you give the agent back.
+
 **A plan that cannot go on says so.** When nothing of a running plan runs or can start (a task is
 blocked or failed and the rest waits for it), Codly says so once in the plan's thread. You can
 retry the task, cancel it together with the tasks that wait for it, or keep what is merged: the
@@ -422,7 +440,8 @@ that are new there are named (the index does not search them).
 | Tree-sitter symbol tables | regex symbols miss too much on the benchmark |
 | ~~Deep Agents + OpenRouter sidecar (API-key backend)~~ | dropped (2026-10-26): OpenCode with its OpenRouter provider covers API-key models |
 | Launchd daemon so agents survive app restarts | resume-by-session-id proves insufficient |
-| PTY "take over" of a headless agent | users ask to drive an agent by hand mid-task |
+| Take-over of an agent in the middle of a turn, of the Lead, and of Gemini, OpenCode, Cursor and Copilot agents | a live check shows a resume command that opens the session Codly started; users ask to drive an agent by hand mid-turn |
+| Take-over of a Codex agent (`codex resume <id>`) | a live check shows that the shared app-server no longer holds the thread after Codly's `thread/unsubscribe`, and that `thread/resume` after the give-back has the terminal's turns (docs/research/cli-claude-codex.md §3.5) |
 | Slack Socket Mode connection (the source and its gates exist, the socket does not) | a user asks for Slack as an inbound path |
 | Windows/Linux | after macOS ships |
 
@@ -459,6 +478,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       pull_request.rs                     the pull-request step: push a Codly branch, `gh pr create`, checks
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
+                      takeover.rs                         "Open in my terminal": a session goes to you, and comes back
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script
@@ -499,6 +519,7 @@ src-tauri/src/            the macOS shell
   commands.rs       most Tauri commands: thin wrappers over Core
   agent_controls.rs ask_me.rs dictation.rs hire_commands.rs ide_commands.rs inbound.rs
   onboarding_commands.rs pr_commands.rs    the other commands, one file per topic
+  takeover_commands.rs  "Open in my terminal": the take-over commands and the terminal they open
   ui_bus.rs         one ordered Channel of coalesced event batches per webview
   notify.rs         native notifications: event → notice, one per kind within a few seconds, the switches
   web.rs            `codly serve`: the same UI over HTTP; passes /api/voice/ws to the voice relay

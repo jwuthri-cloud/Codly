@@ -714,10 +714,11 @@ impl Inner {
         })
     }
 
-    /// Agents a task cannot go to right now: every live run but quiet chats.
+    /// Agents a task cannot go to right now: every live run but quiet chats, and every agent
+    /// that is in your terminal (takeover.rs).
     pub(super) fn busy_agents(&self) -> HashSet<Id> {
         let ids: Vec<Id> = lock(&self.live).keys().cloned().collect();
-        ids.into_iter().filter(|id| !self.preemptible(id)).collect()
+        ids.into_iter().filter(|id| !self.preemptible(id)).chain(self.in_terminal_ids()).collect()
     }
 }
 

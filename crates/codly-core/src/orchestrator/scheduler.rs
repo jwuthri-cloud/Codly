@@ -39,6 +39,9 @@ pub struct SchedInput<'a> {
     /// Why no task may start right now, as the waiting tasks show it (`breaker::Budget::hold`:
     /// a token or cost budget is used up). None: tasks start.
     pub hold: Option<&'a str>,
+    /// The agents of `busy` that are in your terminal (takeover.rs): a task for one of them
+    /// waits until you give it back, and says so.
+    pub in_terminal: &'a HashSet<Id>,
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -310,6 +313,7 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
             accounts: &accounts,
             doing: &doing,
             now: input.now,
+            in_terminal: input.in_terminal,
         };
         match route(t, &ctx, &taken_names, &used_colors) {
             Err(reason) => actions.push(wait(reason)),
@@ -351,6 +355,7 @@ struct RouteCtx<'a> {
     accounts: &'a Accounts,
     doing: &'a HashMap<Id, String>,
     now: i64,
+    in_terminal: &'a HashSet<Id>,
 }
 
 /// The account a run goes on, with its running count, (with several accounts) why, and the
@@ -434,6 +439,9 @@ fn route(t: &Task, ctx: &RouteCtx, taken: &[String], colors: &[i64]) -> Result<R
     let cap = ctx.cap;
     let pin = t.account_hint.as_deref().and_then(|id| ctx.accounts.get(id));
     if let Some(a) = t.assignee.as_deref().and_then(|id| ctx.agent_by_id.get(id)) {
+        if ctx.in_terminal.contains(&a.id) {
+            return Err(format!("waiting: {} (assigned) is in your terminal: give it back", a.name));
+        }
         if ctx.busy.contains(&a.id) {
             return Err(match ctx.doing.get(&a.id) {
                 Some(k) => format!("waiting: {} (assigned) is busy with {k}", a.name),

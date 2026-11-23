@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-take-over-agent"
+description = "Enables the take_over_agent command without any pre-configured scope."
+commands.allow = ["take_over_agent"]
+
+[[permission]]
+identifier = "deny-take-over-agent"
+description = "Denies the take_over_agent command without any pre-configured scope."
+commands.deny = ["take_over_agent"]

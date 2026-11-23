@@ -15,6 +15,7 @@ mod hire_commands;
 mod onboarding_commands;
 mod pr_commands;
 mod quit;
+mod takeover_commands;
 #[cfg(test)]
 mod ipc_tests;
 mod logging;
@@ -142,6 +143,11 @@ pub fn run() {
             agent_controls::set_agent_permission_mode,
             agent_controls::compact_agent,
             agent_controls::agent_context_usage,
+            takeover_commands::agent_takeover,
+            takeover_commands::list_takeovers,
+            takeover_commands::take_over_agent,
+            takeover_commands::open_takeover_terminal,
+            takeover_commands::give_back_agent,
             commands::stop_agent,
             commands::hire_agent,
             commands::list_models,

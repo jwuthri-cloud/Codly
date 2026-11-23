@@ -488,6 +488,7 @@ impl Inner {
         settings.paused |= settings.paused_offices.contains(&ws.id);
         // A quiet 1:1 chat does not keep an agent from its task (it is stopped for it).
         let busy: HashSet<Id> = self.busy_agents();
+        let in_terminal: HashSet<Id> = self.in_terminal_ids().into_iter().collect();
         let accounts = self.account_states();
         let now = now_ms();
         let not_before = lock(&self.retries).holds(now);
@@ -504,6 +505,7 @@ impl Inner {
             elsewhere: &elsewhere,
             not_before: &not_before,
             hold: hold.as_deref(),
+            in_terminal: &in_terminal,
         };
         let actions = scheduler::schedule(&input);
         let stuck = scheduler::stuck_plans(&input, &actions);

@@ -664,6 +664,8 @@ impl Inner {
                 Said::Outside(msg) => self.inbound_to_lead(&ws, thread_of(&agent), msg).await,
             };
         }
+        // In your terminal (takeover.rs): refused here, before the message is recorded.
+        self.not_in_terminal(&agent)?;
         let thread = format!("agent:{agent_id}");
         let prompt = match said {
             Said::User(text) => {
@@ -744,7 +746,9 @@ impl Inner {
         let started = self.spawn_run(req).await;
         match self.spawned_or_live(agent_id, started) {
             Ok(()) => {}
-            Err(e) if resumed => {
+            // Not a start that was refused because the session went to your terminal meanwhile:
+            // that session is fine, and it is the one to keep.
+            Err(e) if resumed && !self.in_terminal(agent_id)? => {
                 tracing::warn!("resuming {} failed ({e}); starting a new session", agent.name);
                 self.update_agent(agent_id, |a| a.session_id = None)?;
                 Box::pin(self.chat_agent_spawn_fresh(agent_id, prompt)).await?;

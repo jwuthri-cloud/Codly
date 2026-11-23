@@ -115,6 +115,7 @@ struct World {
     elsewhere: Vec<Agent>,
     not_before: HashMap<Id, i64>,
     hold: Option<String>,
+    in_terminal: HashSet<Id>,
 }
 
 impl World {
@@ -131,6 +132,7 @@ impl World {
             elsewhere: vec![],
             not_before: HashMap::new(),
             hold: None,
+            in_terminal: HashSet::new(),
         }
     }
     fn input(&self) -> SchedInput<'_> {
@@ -146,6 +148,7 @@ impl World {
             elsewhere: &self.elsewhere,
             not_before: &self.not_before,
             hold: self.hold.as_deref(),
+            in_terminal: &self.in_terminal,
         }
     }
     fn run(&self) -> Vec<Action> {
@@ -359,6 +362,22 @@ fn assignee_is_respected_and_waits_when_busy() {
     assert_eq!(starts(&w.run())[0], ("t1".into(), Provider::Codex, AgentPick::Existing("a1".into())));
     w.busy.insert("a1".into());
     assert_eq!(waits(&w.run())[0].1, "waiting: Ada (assigned) is busy");
+}
+
+#[test]
+fn a_task_for_an_agent_in_your_terminal_says_how_to_end_the_wait() {
+    let mut t = task("t1", "p", TaskStatus::Ready, &["a/**"], &[]);
+    t.assignee = Some("a1".into());
+    let mut w = World::new(vec![t]);
+    w.agents = vec![agent("a1", "Ada", Provider::Claude, Role::Worker), agent("a2", "Bo", Provider::Claude, Role::Worker)];
+    w.busy.insert("a1".into());
+    w.in_terminal.insert("a1".into());
+    assert_eq!(waits(&w.run()), [("t1".into(), "waiting: Ada (assigned) is in your terminal: give it back".into())]);
+    assert!(starts(&w.run()).is_empty(), "it does not go to another agent");
+    // Given back, it starts.
+    w.busy.clear();
+    w.in_terminal.clear();
+    assert_eq!(starts(&w.run())[0], ("t1".into(), Provider::Claude, AgentPick::Existing("a1".into())));
 }
 
 #[test]

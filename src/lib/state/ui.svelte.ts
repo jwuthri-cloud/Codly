@@ -135,6 +135,8 @@ class Ui {
   diffTarget = $state<DiffTarget>(null);
   artifactOpen = $state<string | null>(null);
   terminalCwd = $state<string | null>(null);
+  /** The Terminal room is on the tab of this agent, which is in your terminal (an agent id); null: on the place of `terminalCwd`. */
+  terminalTakeover = $state<string | null>(null);
   timelineZoom = $state(this.prefs.timelineZoom ?? 5);
   memoryEntity = $state<string | null>(null);
   /** ⇧⌘⌫ asks this approval card to open its "deny with a note" field. */

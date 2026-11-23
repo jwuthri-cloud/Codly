@@ -36,7 +36,7 @@ const live = (segments: Seg[], o: Partial<AgentLive> = {}): AgentLive => {
 };
 
 const input = (o: Partial<NarrationInput> = {}): NarrationInput => ({
-  agent: agent(), now: T0 + 41_000, approvals: [], live: live([]), streaming: null, task: task(), lastDone: null, rate: null, ...o,
+  agent: agent(), now: T0 + 41_000, approvals: [], live: live([]), streaming: null, task: task(), lastDone: null, rate: null, inTerminal: false, ...o,
 });
 
 describe('narration', () => {
@@ -67,6 +67,15 @@ describe('narration', () => {
     expect(n.tone).toBe('wait');
     // Any other blocked reason stays red.
     expect(narrateFrom(input({ agent: agent({ status: 'idle' }), task: task({ status: 'blocked', status_reason: 'verify failed' }) })).tone).toBe('blocked');
+  });
+
+  it('says an agent is in your terminal, whatever its row says', () => {
+    // After a restart of Codly its row says it stopped; a task of its own may be blocked.
+    for (const a of [agent({ status: 'offline', task_id: null }), agent({ status: 'idle' })]) {
+      const n = narrateFrom(input({ agent: a, task: task({ status: 'blocked', status_reason: 'stopped by you' }), inTerminal: true }));
+      expect([n.text, n.tone]).toEqual(['In your terminal', 'idle']);
+    }
+    expect(narrateFrom(input({ agent: agent({ status: 'offline' }) })).text).toBe('Stopped');
   });
 
   it('reports the diff of the last finished task', () => {

@@ -53,6 +53,7 @@ import { repoMap } from './demo/repomap';
 import { HOME, REPO, Sim } from './demo/sim';
 import { MockControls } from './demo/controls';
 import { demoCatalog } from './demo/models';
+import { DemoTakeovers } from './demo/takeover';
 import { Story } from './demo/story';
 import { saveTriggers, seedTriggers } from './demo/triggers';
 import type { TriggersConfig } from './gen/TriggersConfig';
@@ -170,6 +171,7 @@ export class MockTransport implements Transport {
   private approvalRules: MockApprovalRules;
   private askMe!: MockAskMe;
   private checkpoints = new DemoCheckpoints();
+  private takeovers = new DemoTakeovers();
   private hk: HousekeepingDemo | undefined;
   private worktrees = new WorktreeDemo();
 
@@ -276,6 +278,8 @@ export class MockTransport implements Transport {
       }
       case 'send_chat': {
         if (!sim.workspace) throw new Error('Open a repository first.');
+        const to = sim.agents.get(String(a.thread).replace(/^agent:/, ''));
+        if (to && this.takeovers.has(to.id)) throw new Error(`${to.name} is in your terminal: give it back first`);
         story.userChat(String(a.thread), String(a.text));
         return null;
       }
@@ -387,6 +391,21 @@ export class MockTransport implements Transport {
         return this.ctl.compact(String(a.agentId));
       case 'agent_context_usage':
         return this.ctl.contextUsage(String(a.agentId));
+      case 'agent_takeover':
+        return this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
+      case 'list_takeovers':
+        return this.takeovers.list([...sim.agents.values()], [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
+      case 'take_over_agent':
+        return this.takeovers.take(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO, sim.now());
+      case 'open_takeover_terminal': {
+        const t = this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO).takeover;
+        if (!t) throw new Error('this agent is not in your terminal: open it in your terminal first');
+        const id = `pty-${++this.ptySeq}`;
+        this.ptys.set(id, new FakeShell(t.cwd, sim, t.command));
+        return id;
+      }
+      case 'give_back_agent':
+        return this.takeovers.giveBack(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
       case 'hire_agent':
         return story.hire(a.provider as Provider, (a.model as string | null) ?? null, (a.title as string | null) ?? null);
       case 'list_models':
@@ -715,7 +734,8 @@ class FakeShell {
   private out: ((b: Uint8Array) => void) | null = null;
   private line = '';
   private pending = '';
-  constructor(private cwd: string, private sim: Sim) {}
+  /** `typed`: a line that is at the prompt when the terminal opens, typed and not run. */
+  constructor(private cwd: string, private sim: Sim, private typed = '') {}
 
   private write(s: string) {
     if (this.out) this.out(enc.encode(s));
@@ -737,6 +757,8 @@ class FakeShell {
       this.write(p);
     }
     this.write(this.prompt);
+    this.input(this.typed);
+    this.typed = '';
   }
 
   close() {
@@ -811,6 +833,9 @@ class FakeShell {
         say('logout');
         this.close();
         return;
+      case 'claude':
+        say(`${C.dim}(mock) the demo has no ${bin} to run. In the app, this opens the agent’s session in ${bin}’s own terminal UI.${C.reset}`);
+        break;
       default:
         say(`zsh: command not found: ${bin}`);
     }

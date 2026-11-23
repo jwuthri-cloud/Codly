@@ -898,9 +898,12 @@ impl Inner {
         let worker_provider = task.assignee.as_deref().and_then(|a| agents.iter().find(|x| x.id == a)).map(|a| a.provider);
         let settings = self.settings();
         let tasks = self.store.tasks(ws_id)?;
+        // In your terminal (takeover.rs): Codly starts no process for it, so it reviews nothing.
+        let in_terminal = self.in_terminal_ids();
         let idle = |a: &Agent| {
             a.status != AgentStatus::Offline
                 && !self.is_live(&a.id)
+                && !in_terminal.contains(&a.id)
                 && a.task_id.as_deref().and_then(|t| tasks.iter().find(|x| x.id == t)).is_none_or(|t| !scheduler::is_active(t.status))
         };
         // A reviewer on the team first (another vendor than the author's if possible).
@@ -974,9 +977,12 @@ impl Inner {
         };
         let mut started = self.spawn_run(req(&reviewer)).await;
         // Free when it was picked, running by now (another task's review, a message from you):
-        // that run is not this review. A new reviewer does it; a lost race never skips a review.
-        if started.is_err() && self.is_live(&reviewer.id) {
+        // that run is not this review. Or in your terminal by now. A new reviewer does it; a lost
+        // race never skips a review.
+        let gone = started.is_err() && self.in_terminal(&reviewer.id)?;
+        if started.is_err() && (gone || self.is_live(&reviewer.id)) {
             let taken = reviewer.name;
+            let how = if gone { "went to your terminal" } else { "got busy" };
             reviewer = hire()?;
             self.update_task(&task.id, |t| {
                 t.status_reason = Some(format!("review by {} ({})", reviewer.name, provider.label()));
@@ -986,7 +992,7 @@ impl Inner {
                 Some(ws_id),
                 Some(&task.id),
                 "review",
-                format!("{}: reviewer {} · {} ({taken} got busy meanwhile)", task.key, provider.label(), reviewer.name),
+                format!("{}: reviewer {} · {} ({taken} {how} meanwhile)", task.key, provider.label(), reviewer.name),
                 json!({ "plan_id": task.plan_id, "provider": provider, "agent": reviewer.name }),
             )?;
             started = self.spawn_run(req(&reviewer)).await;

@@ -7,6 +7,7 @@
   import { isTauriApp } from '../lib/api';
   import { diffstats } from '../lib/state/diffstats.svelte';
   import { store } from '../lib/state/store.svelte';
+  import { loadTakeovers } from '../lib/state/takeover.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import Home from '../home/Home.svelte';
   import PlanRoom from '../rooms/plan/PlanRoom.svelte';
@@ -25,6 +26,13 @@
   const SHEET = 404;
   const frameW = $derived(ui.width - (ui.railW + 28) - 14 - (ui.sheetOpen ? SHEET + 14 : 0));
   const narrow = $derived(frameW < 960);
+
+  // The agents that are in your terminal ("Open in my terminal") are marked from the moment
+  // an office opens, also after a restart of Codly: the core keeps them.
+  $effect(() => {
+    void store.epoch;
+    if (store.workspace?.id) void loadTakeovers();
+  });
 
   // Keep diffstats warm for finished work: narration, cards and Changes read the same numbers.
   $effect(() => {

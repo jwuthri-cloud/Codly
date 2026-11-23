@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-takeovers"
+description = "Enables the list_takeovers command without any pre-configured scope."
+commands.allow = ["list_takeovers"]
+
+[[permission]]
+identifier = "deny-list-takeovers"
+description = "Denies the list_takeovers command without any pre-configured scope."
+commands.deny = ["list_takeovers"]
