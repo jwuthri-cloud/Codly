@@ -400,7 +400,10 @@ that are new there are named (the index does not search them).
   turned on: with another text (or no file) nothing runs and nothing passes, the task is
   blocked for the user and a finished plan says that it was not checked. When the user turns
   the checks on again, or off, Codly checks every task that waited for that choice again
-  (the same pass as Re-run checks on its card). The Lead's board names the commands, or says
+  (the same pass as Re-run checks on its card), in the background: `max_parallel` tasks at a
+  time, the tasks in one team member's worktree one after the other, and a `gate` decision
+  at the end says which were checked, which went back to their team member and which still
+  wait for the user. The Lead's board names the commands, or says
   that none runs. "Check the work"
   (an agent's Git tab) runs them in a 1:1 agent's worktree, whose work has no gate: one run
   for an agent at a time, and the result is recorded (a `gate` decision) only when the agent

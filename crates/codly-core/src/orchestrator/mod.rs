@@ -282,6 +282,9 @@ struct Inner {
     merge_looks: Mutex<HashMap<Id, plans::MergeLook>>,
     /// 1:1 agents whose work "Check the work" checks now: one run for an agent at a time.
     checking: Mutex<HashSet<Id>>,
+    /// One choice about the required checks at a time re-checks the tasks that waited for it
+    /// (`required_checks.rs`): a second choice waits for the first one's tasks.
+    rechecks: tokio::sync::Mutex<()>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -457,6 +460,7 @@ impl Core {
             stuck_told: Mutex::new(HashMap::new()),
             merge_looks: Mutex::new(HashMap::new()),
             checking: Mutex::new(HashSet::new()),
+            rechecks: tokio::sync::Mutex::new(()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);

@@ -469,6 +469,12 @@ impl Store {
         })
     }
 
+    /// Delete `key` while it still has `value`, in one statement: a reader that found this
+    /// value out of date does not remove a newer one written since. True = deleted.
+    pub fn kv_delete_if(&self, key: &str, value: &str) -> Result<bool> {
+        Ok(self.conn().execute("DELETE FROM kv WHERE key = ?1 AND value = ?2", params![key, value])? > 0)
+    }
+
     /// Settings (defaults when unset). A corrupt value falls back to defaults rather than
     /// failing startup: defaults are the safe configuration.
     pub fn settings(&self) -> Result<Settings> {
@@ -1896,5 +1902,19 @@ mod tests {
         assert_eq!(store.session_cost("ana", "ses-1").unwrap(), 0.75);
         assert_eq!(store.session_cost("ana", "ses-2").unwrap(), 8.0);
         assert_eq!(store.session_cost("ana", "no-such-session").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_value_is_deleted_only_while_it_is_the_one_that_was_read() {
+        let store = Store::open_in_memory().unwrap();
+        store.kv_set("k", "old").unwrap();
+        let read = store.kv_get("k").unwrap().unwrap();
+        // Another writer stores a newer value before the reader deletes what it read.
+        store.kv_set("k", "new").unwrap();
+        assert!(!store.kv_delete_if("k", &read).unwrap());
+        assert_eq!(store.kv_get("k").unwrap().as_deref(), Some("new"));
+        assert!(store.kv_delete_if("k", "new").unwrap());
+        assert_eq!(store.kv_get("k").unwrap(), None);
+        assert!(!store.kv_delete_if("k", "new").unwrap(), "nothing is left to delete");
     }
 }

@@ -13,20 +13,24 @@
 //! command. When the file is not that text any more, none of its commands runs and nothing
 //! passes in their place: a task waits for you, and a finished plan says that it was not
 //! checked, until you turn the new text on or turn the checks off. That choice is all the
-//! waiting tasks need: Codly checks each of them again by itself.
+//! waiting tasks need: Codly checks each of them again by itself, a few at a time, and the
+//! tasks that share a team member's worktree one after the other.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use ts_rs::TS;
 
 use super::worktree_setup::fingerprint;
-use super::{Core, Inner, approvals, lock, prompts, row};
+use super::{Core, Inner, approvals, lock, prompts, row, scheduler};
 use crate::model::*;
 
 /// The repo's required checks, relative to the repo root.
@@ -220,6 +224,21 @@ impl Drop for Checking<'_> {
     }
 }
 
+/// How often a re-check looks whether the gate is through with a task.
+const SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// What became of a task that waited for your required checks, after your choice.
+enum Rechecked {
+    /// Codly checked it again: the pass ran, and the task went where its checks sent it.
+    Again,
+    /// Its team member (the name) is on other work in the worktree they share, so the pass
+    /// could not run there: the task is back in line for the member, whose next turn on it
+    /// ends with the checks.
+    Back(String),
+    /// It still waits for you: why.
+    Waits(String),
+}
+
 impl Inner {
     // ───────────── the switch ─────────────
 
@@ -269,63 +288,160 @@ impl Inner {
         Ok(())
     }
 
-    /// The tasks that wait for you because your required checks were not the text you turned
-    /// on: the gate parked them with the `required` key, and nothing was decided about them
+    /// Does the task wait for you because your required checks were not the text you turned
+    /// on? Then the gate parked it with the `required` key, and nothing was decided about it
     /// since.
+    fn waits_for_checks(&self, task: &Task) -> Result<bool> {
+        if task.status != TaskStatus::Blocked {
+            return Ok(false);
+        }
+        let last = self.store.task_events(&task.id, "decision")?.pop();
+        Ok(last.is_some_and(|e| matches!(&e.kind, EventKind::Decision { decision_type, detail, .. } if decision_type == "gate" && !detail["required"].is_null())))
+    }
+
+    /// The tasks of an office that wait for you because of your required checks.
     fn parked_for_checks(&self, ws_id: &str) -> Result<Vec<Task>> {
         let mut parked = vec![];
-        for t in self.store.tasks(ws_id)?.into_iter().filter(|t| t.status == TaskStatus::Blocked) {
-            let last = self.store.task_events(&t.id, "decision")?.pop();
-            let waits = last.is_some_and(|e| matches!(&e.kind, EventKind::Decision { decision_type, detail, .. } if decision_type == "gate" && !detail["required"].is_null()));
-            if waits {
+        for t in self.store.tasks(ws_id)? {
+            if self.waits_for_checks(&t)? {
                 parked.push(t);
             }
         }
         Ok(parked)
     }
 
-    /// The gate pass that parked a task ends a moment after it wrote the task's state (it
-    /// still lets the worker go): wait for it, so a choice made in that moment finds the
-    /// task's gate free. A pass that does not end in time is the re-run's to report.
-    async fn gate_ended(&self, task_id: &str) {
-        for _ in 0..100 {
-            if !lock(&self.gating).contains_key(task_id) {
-                return;
+    /// Wait until nothing works on the task: no pass of the gate runs for it, and it is not
+    /// in flight (a fix round, a review, the merge queue). False: Codly is quitting.
+    async fn settled(&self, task_id: &str) -> bool {
+        loop {
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return false;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            let in_gate = lock(&self.gating).contains_key(task_id);
+            // A task that is gone has nothing to wait for.
+            if !in_gate && !self.task(task_id).is_ok_and(|t| scheduler::is_active(t.status)) {
+                return true;
+            }
+            tokio::time::sleep(SETTLE_POLL).await;
         }
     }
 
     /// You turned the required checks on (`on`) or off: every task that waited for that
-    /// choice is checked again now, as Re-run checks on its card does, with no click on each.
-    /// A task that cannot be checked now (its plan does not run, or a check of its own needs
-    /// your OK) stays as it is, and the record says which and why.
-    async fn recheck_parked(self: &Arc<Self>, ws: &Workspace, on: bool) -> Result<()> {
-        let parked = self.parked_for_checks(&ws.id)?;
-        if parked.is_empty() {
-            return Ok(());
+    /// choice is checked again, as Re-run checks on its card does, with no click on each.
+    /// Not all at once: the checks of a few tasks run at a time (as many as workers may:
+    /// `max_parallel`), so N waiting tasks do not start N test runs that push each other
+    /// over the time limit. And the tasks of one team member, which share its worktree, go
+    /// one after the other: a pass that began while the member's other task was checked
+    /// there would send the task back to the member for a new turn. When all of them are
+    /// through, the record says what became of each. One choice at a time: a second one
+    /// (on, then off) waits here for the first one's tasks, then takes what still waits.
+    async fn recheck_parked(self: Arc<Self>, ws: Workspace, on: bool) {
+        let _one = self.rechecks.lock().await;
+        if let Err(e) = self.recheck_lanes(&ws, on).await {
+            tracing::warn!("re-checking the tasks that waited for the required checks: {e:#}");
         }
-        let (mut again, mut waiting) = (vec![], vec![]);
-        for t in &parked {
-            self.gate_ended(&t.id).await;
-            match self.recheck_task(&t.id, vec![]).await {
-                Ok(held) if held.is_empty() => again.push(t.key.clone()),
-                Ok(held) => {
-                    let cmds: Vec<String> = held.iter().map(|h| format!("`{}`", prompts::clip(&h.command, 80))).collect();
-                    waiting.push(format!("{} (needs your OK for {})", t.key, cmds.join(", ")));
-                }
-                Err(e) => waiting.push(format!("{} ({e})", t.key)),
+    }
+
+    async fn recheck_lanes(self: &Arc<Self>, ws: &Workspace, on: bool) -> Result<()> {
+        let parked = self.parked_for_checks(&ws.id)?;
+        let order: Vec<Id> = parked.iter().map(|t| t.id.clone()).collect();
+        // The tasks that share a worktree are one lane.
+        let mut lanes: Vec<Vec<Task>> = vec![];
+        for t in parked {
+            match lanes.iter_mut().find(|l| t.worktree.is_some() && l[0].worktree == t.worktree) {
+                Some(lane) => lane.push(t),
+                None => lanes.push(vec![t]),
             }
         }
-        let mut summary = format!("the required checks are {} now", if on { "on" } else { "off" });
+        let slots = Arc::new(Semaphore::new(self.settings().max_parallel.max(1) as usize));
+        let mut running = JoinSet::new();
+        for lane in lanes {
+            let (me, slots) = (self.clone(), slots.clone());
+            running.spawn(async move {
+                // Held for the whole lane. (Nothing closes the semaphore.)
+                let _slot = slots.acquire().await;
+                let mut done = vec![];
+                for t in lane {
+                    if let Some(what) = me.recheck_waiting(&t).await {
+                        done.push((t, what));
+                    }
+                }
+                done
+            });
+        }
+        let mut done = vec![];
+        while let Some(lane) = running.join_next().await {
+            match lane {
+                Ok(tasks) => done.extend(tasks),
+                Err(e) => tracing::warn!("a re-check of the tasks that waited for the required checks crashed: {e}"),
+            }
+        }
+        // Quitting: the tasks that were not reached still wait, with Re-run checks on their cards.
+        if done.is_empty() || self.shutting_down.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        done.sort_by_key(|(t, _)| order.iter().position(|id| *id == t.id));
+        let (mut again, mut back, mut waiting, mut said) = (vec![], vec![], vec![], vec![]);
+        for (t, what) in done {
+            match what {
+                Rechecked::Again => again.push(t.key),
+                Rechecked::Back(who) => {
+                    said.push(format!("{} goes back to {who} first ({who} is on other work in the same worktree)", t.key));
+                    back.push(json!({ "task": t.key, "member": who }));
+                }
+                Rechecked::Waits(why) => waiting.push(format!("{} ({why})", t.key)),
+            }
+        }
         if !again.is_empty() {
-            summary.push_str(&format!(": Codly checks {} again", again.join(", ")));
+            said.insert(0, format!("Codly checked {} again", again.join(", ")));
         }
         if !waiting.is_empty() {
-            summary.push_str(&format!("; still waiting for you: {}", waiting.join(", ")));
+            said.push(format!("still waiting for you: {}", waiting.join(", ")));
         }
-        self.decide(Some(&ws.id), None, "gate", summary, json!({ "rechecked": again, "still_waiting": waiting }))?;
+        let summary = format!("after you turned the required checks {}: {}", if on { "on" } else { "off" }, said.join("; "));
+        self.decide(Some(&ws.id), None, "gate", summary, json!({ "rechecked": again, "back_to_member": back, "still_waiting": waiting }))?;
         Ok(())
+    }
+
+    /// Check one waiting task again and wait until its pass is through, so the next task of
+    /// its lane finds the worktree free. None: it does not wait for your checks any more (you
+    /// moved it on from its card meanwhile), or Codly is quitting.
+    async fn recheck_waiting(self: &Arc<Self>, task: &Task) -> Option<Rechecked> {
+        // The pass that parked it ends a moment after it wrote the task's state (it still
+        // lets the worker go): the re-run needs the task's gate free.
+        if !self.settled(&task.id).await {
+            return None;
+        }
+        let what = match self.recheck_now(task).await {
+            Ok(what) => what?,
+            Err(e) => Rechecked::Waits(e.to_string()),
+        };
+        if matches!(what, Rechecked::Again) {
+            self.settled(&task.id).await;
+        }
+        Some(what)
+    }
+
+    /// Start the gate pass of a task that waits for your required checks (`recheck_task`, as
+    /// its card does). None: it does not wait for them any more.
+    async fn recheck_now(self: &Arc<Self>, task: &Task) -> Result<Option<Rechecked>> {
+        if !self.waits_for_checks(&self.task(&task.id)?)? {
+            return Ok(None);
+        }
+        let mark = self.store.task_events(&task.id, "decision")?.last().map_or(0, |e| e.id);
+        let held = self.recheck_task(&task.id, vec![]).await?;
+        if !held.is_empty() {
+            let cmds: Vec<String> = held.iter().map(|h| format!("`{}`", prompts::clip(&h.command, 80))).collect();
+            return Ok(Some(Rechecked::Waits(format!("needs your OK for {}", cmds.join(", ")))));
+        }
+        // A pass that could not have the worktree (the task's team member is on other work
+        // there) put the task back in line for the member, and the task's record says so.
+        let mut since = self.store.task_events(&task.id, "decision")?.into_iter().filter(|e| e.id > mark);
+        let back = since.find_map(|e| match e.kind {
+            EventKind::Decision { detail, .. } => detail["waits_for"].as_str().map(String::from),
+            _ => None,
+        });
+        Ok(Some(back.map_or(Rechecked::Again, Rechecked::Back)))
     }
 
     // ───────────── for the gate ─────────────
@@ -464,43 +580,53 @@ impl Inner {
     /// edits all change them, and then the result is dropped. While the agent works nothing
     /// is shown: its files can change at any moment.
     async fn agent_check_state(&self, agent_id: &str) -> Result<AgentCheck> {
-        let agent = self.agent(agent_id)?;
-        if lock(&self.checking).contains(agent_id) {
-            return Ok(AgentCheck { running: true, last: None });
-        }
         let nothing = AgentCheck { running: false, last: None };
         let key = checked_key(agent_id);
-        let Some(saved) = self.store.kv_get(&key)? else { return Ok(nothing) };
-        if self.at_work(&agent) {
-            return Ok(nothing);
-        }
-        let saved: Checked = serde_json::from_str(&saved)?;
-        let same = match agent.worktree.as_deref().map(Path::new).filter(|wt| wt.is_dir()) {
-            Some(_) => {
-                let (_, wt) = self.work_place(&agent).await?;
-                self.git.worktree_tree(&wt).await? == saved.tree
+        loop {
+            let agent = self.agent(agent_id)?;
+            if lock(&self.checking).contains(agent_id) {
+                return Ok(AgentCheck { running: true, last: None });
             }
-            // The worktree is gone, and the checked files with it.
-            None => false,
-        };
-        if !same {
-            self.store.kv_write(&[(key, None)])?;
-            return Ok(nothing);
+            let Some(saved) = self.store.kv_get(&key)? else { return Ok(nothing) };
+            if self.at_work(&agent) {
+                return Ok(nothing);
+            }
+            let checked: Checked = serde_json::from_str(&saved)?;
+            let same = match agent.worktree.as_deref().map(Path::new).filter(|wt| wt.is_dir()) {
+                Some(_) => {
+                    let (_, wt) = self.work_place(&agent).await?;
+                    self.git.worktree_tree(&wt).await? == checked.tree
+                }
+                // The worktree is gone, and the checked files with it.
+                None => false,
+            };
+            if same {
+                return Ok(AgentCheck { running: false, last: Some(checked.work) });
+            }
+            // Reading the files took a while, and a "Check the work" can have started or
+            // ended meanwhile. One that runs now changes files under this look, so nothing
+            // is judged; one that ended left a new result, about the files as they are now.
+            // Only the result that was read here is dropped: in both cases, look again.
+            if !lock(&self.checking).contains(agent_id) && self.store.kv_delete_if(&key, &saved)? {
+                return Ok(nothing);
+            }
         }
-        Ok(AgentCheck { running: false, last: Some(saved.work) })
     }
 }
 
 impl Core {
     /// The open repo's required checks (`.codly/checks`): the text, its commands with what
     /// the approval rules see in each, on or off. `set` turns them on, for the text you read,
-    /// or off; the tasks that waited for that choice are then checked again.
+    /// or off; the tasks that waited for that choice are then checked again, in the
+    /// background (`recheck_parked`): the answer does not wait for their checks.
     pub async fn required_checks(&self, set: Option<ChecksChoice>) -> Result<RequiredChecks> {
         let ws = self.inner.require_ws()?;
         if let Some(choice) = set {
             let on = choice.allow.is_some();
             self.inner.choose_checks(&ws, choice)?;
-            self.inner.recheck_parked(&ws, on).await?;
+            if !self.inner.parked_for_checks(&ws.id)?.is_empty() {
+                tokio::spawn(self.inner.clone().recheck_parked(ws.clone(), on));
+            }
         }
         self.inner.checks_status(&ws)
     }
