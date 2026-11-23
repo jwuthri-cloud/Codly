@@ -575,6 +575,7 @@ impl Core {
         s.team = team::normalize_team(std::mem::take(&mut s.team), &repo_members)?;
         let accounts_changed = self.inner.settings().accounts != s.accounts;
         let team_changed = self.inner.settings().team != s.team;
+        let to_always = self.inner.settings().resume_on_launch != ResumeOnLaunch::Always && s.resume_on_launch == ResumeOnLaunch::Always;
         self.inner.store.save_settings(&s)?;
         *write(&self.inner.settings) = s.clone();
         if accounts_changed {
@@ -582,6 +583,10 @@ impl Core {
         }
         if team_changed && let Some(ws) = self.inner.workspace() {
             self.inner.sync_team(&ws)?;
+        }
+        if to_always {
+            // The work that waits for your Resume since the restart goes on now (`resume.rs`).
+            self.inner.resume_for_always().await;
         }
         self.inner.kick();
         self.inner.permissions_changed().await;

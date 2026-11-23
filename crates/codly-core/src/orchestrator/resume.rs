@@ -6,19 +6,23 @@
 //!   task (`Inner::launch_hold`), no plan runs its integration checks, and a task that was in
 //!   its checks, review or merge is not checked again, until `Core::resume_work`. The app
 //!   shows one question for "ask" and only the Resume work button for "never". With "always"
-//!   the work goes on at once. Nothing is held when nothing would start: no task was in
-//!   work, and every plan waits for you, for its paused office, for a budget or for a repo
-//!   folder that is not there. A hold that is on ends by itself only when nothing could
-//!   start any more: you cancelled every task it held, no plan would go on and no task waits
-//!   (`Inner::held`). A pause or a budget does not end it: they end too, and the work would
-//!   then start with no Resume. The same holds for a hold that Codly closed on: the next
-//!   start keeps it on while work could start.
+//!   the work goes on at once. What "would start" is counted as if nothing were paused and no
+//!   budget were reached: a pause or a budget ends, and the work would then start with no
+//!   Resume. So nothing is held only when no task was in work, every plan waits for you or
+//!   for a repo folder that is not there, and no re-check of your required checks was left
+//!   (`required_checks.rs`: those start when the hold ends). A hold that is on ends by itself
+//!   only when nothing could start any more: you cancelled every task it held, no plan would
+//!   go on and no task waits (`Inner::held`); a line in the office says so. A pause or a
+//!   budget does not end it. The same holds for a hold that Codly closed on: the next start
+//!   keeps it on while work could start. If you set Codly to "always" while a hold is on, the
+//!   hold ends as your Resume would end it (`Inner::resume_for_always`).
 //!   The hold is in the store too (`HOLD`): when Codly closes before your answer, the next
 //!   start waits for the same tasks, whatever they say by then, and a task that only had its
-//!   checks left still gets no worker turn. If you chose "always" meanwhile, they go on at
-//!   that start. The end of a hold writes each task first and takes the hold out of the store
+//!   checks left still gets no worker turn. If the settings say "always" at that start, they
+//!   go on then. The end of a hold writes each task first and takes the hold out of the store
 //!   last (`Inner::end_hold`): a crash or a failed write in between leaves the hold on, and
-//!   the next Resume work ends it.
+//!   the next Resume work ends it. A task whose gate sent it back to its worker meanwhile goes
+//!   to its worker then, not to its gate a second time.
 //! - **"Resumed after restart"**: each task that goes on gets that line in its history.
 //! - **Round counters**: the fix and conflict rounds a task has used are in the store, so a
 //!   restart does not give it new ones (`count_rounds`, `forget_rounds`).
@@ -104,10 +108,10 @@ pub(super) fn stored_rounds(store: &Store) -> HashMap<Id, gate::Rounds> {
     rows.into_iter().filter_map(read).collect()
 }
 
-/// Does a running plan with these tasks go on by itself? It does when one of its tasks can
-/// start (`may_start`: its office is not paused and no budget is used up), and when every
-/// task is done or cancelled, so its integration checks run next.
-fn goes_on(tasks: &[Task], may_start: bool) -> bool {
+/// Does a running plan with these tasks go on by itself, once nothing is paused and no
+/// budget is reached? It does when one of its tasks can start, and when every task is done
+/// or cancelled, so its integration checks run next.
+fn goes_on(tasks: &[Task]) -> bool {
     let done = |id: &Id| tasks.iter().any(|t| &t.id == id && t.status == TaskStatus::Done);
     let starts = |t: &Task| match t.status {
         TaskStatus::Ready => true,
@@ -116,7 +120,7 @@ fn goes_on(tasks: &[Task], may_start: bool) -> bool {
     };
     let over = |t: &Task| matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled);
     let finishes = tasks.iter().any(|t| t.status == TaskStatus::Done) && tasks.iter().all(over);
-    finishes || (may_start && tasks.iter().any(starts))
+    finishes || tasks.iter().any(starts)
 }
 
 impl Inner {
@@ -131,16 +135,16 @@ impl Inner {
     /// whatever reason they show: a paused office writes its own). None: no hold is on.
     /// A hold that waits for nothing any more ends here, by itself: you cancelled every task
     /// it held (or put it back in the backlog) and nothing else could start, so the scheduler
-    /// is free and work you start from here on needs no Resume. "Could start" counts the work
-    /// of a paused office and the work past a budget (`starts_by_itself(true)`): a pause or a
-    /// budget ends, and what starts then still waits for your Resume. None of the hold's
-    /// tasks is resumed here, so this needs no scheduler lock.
+    /// is free and work you start from here on needs no Resume. A line in the open office says
+    /// why. "Could start" counts the work of a paused office and the work past a budget
+    /// (`starts_by_itself`): a pause or a budget ends, and what starts then still waits for
+    /// your Resume. None of the hold's tasks is resumed here, so this needs no scheduler lock.
     fn held(&self) -> Option<u32> {
         let hold = lock(&self.held_work).clone()?;
         let looked = (|| -> Result<Option<u32>> {
             let ready = self.store.tasks_with_status(&[TaskStatus::Ready])?;
             let tasks = ready.iter().filter(|t| hold.tasks.contains(&t.id)).count() as u32;
-            if tasks > 0 || self.starts_by_itself(true)? {
+            if tasks > 0 || self.starts_by_itself()? {
                 return Ok(Some(tasks));
             }
             // No task of the hold is among `ready`: the ones that only showed its reason
@@ -150,7 +154,14 @@ impl Inner {
                 tracing::warn!("the hold that waits for nothing any more could not be ended: {e}");
                 return Ok(Some(0));
             }
-            *lock(&self.held_work) = None;
+            // Of two looks at once, one says that the hold ended.
+            if lock(&self.held_work).take().is_some() {
+                let why = match hold.tasks.is_empty() {
+                    true => "the work that was about to start does not start by itself any more",
+                    false => "you cancelled every task it held or put it back in the backlog",
+                };
+                self.hold_line(format!("Nothing was left to resume: {why}, so the hold ended"));
+            }
             Ok(None)
         })();
         looked.unwrap_or_else(|e| {
@@ -199,15 +210,12 @@ impl Inner {
 
     /// The end of a recovery that asks first. `in_work` tasks were in work (`regate`: those
     /// that only had their gate left). They, the tasks an earlier start held, and whatever
-    /// else would start by itself now, wait for your Resume. A hold that Codly closed on
-    /// (`was_on`) is kept as `held` keeps one: also for work that a pause or a budget stops
-    /// for now.
+    /// else would start by itself, wait for your Resume: also work that a pause or a budget
+    /// stops for now, as `held` keeps a hold on for it.
     pub(super) fn hold_at_launch(&self, in_work: Vec<Id>, regate: Vec<Id>) {
         let mut hold = Hold { tasks: in_work, regate };
-        let mut was_on = false;
         match self.still_held() {
             Ok(Some(before)) => {
-                was_on = true;
                 // What this start found about a task counts, not what an earlier one wrote.
                 for id in before.tasks {
                     if !hold.tasks.contains(&id) {
@@ -222,7 +230,7 @@ impl Inner {
             Err(e) => tracing::warn!("could not read the tasks an earlier start held: {e}"),
         }
         let waits = !hold.tasks.is_empty()
-            || self.starts_by_itself(was_on).unwrap_or_else(|e| {
+            || self.starts_by_itself().unwrap_or_else(|e| {
                 // Not known: nothing starts before you say so.
                 tracing::warn!("could not tell whether work would start by itself, so it waits for Resume: {e}");
                 true
@@ -280,38 +288,34 @@ impl Inner {
         })
     }
 
-    /// Would work start by itself? A running plan that goes on (`goes_on`; one that was in
-    /// its integration checks runs them again), or a ready task of no plan. As things stand
-    /// now, nothing starts in a paused office or past a budget: the test of a launch with no
-    /// hold before it. `once_free` counts as if nothing were paused and no budget were
-    /// reached: the test of a hold that is on (or was, when Codly closed), which a pause or a
-    /// budget must not end. Either way nothing at all starts in an office the scheduler
-    /// passes over because its repo folder is not there (`scheduled`).
-    fn starts_by_itself(&self, once_free: bool) -> Result<bool> {
-        let settings = self.settings();
-        let over_budget = !once_free && self.budget_hold().is_some();
-        let may_start = |ws: &str| once_free || !(over_budget || settings.paused || settings.paused_offices.iter().any(|id| id == ws));
+    /// Would work start by itself, once nothing is paused and no budget is reached? A pause
+    /// or a budget ends, so it is never a reason to hold nothing, nor to end a hold. Work is a
+    /// running plan that goes on (`goes_on`; one that was in its integration checks runs them
+    /// again), a ready task of no plan, or a re-check of your required checks that a quit cut
+    /// short and still has a task that waits for your checks (`rechecks_left`). Nothing at all
+    /// starts in an office the scheduler passes over because its repo folder is not there
+    /// (`scheduled`).
+    fn starts_by_itself(&self) -> Result<bool> {
         let mut offices = HashMap::new();
         for plan in self.store.plans_with_status(&[PlanStatus::Running, PlanStatus::Integrating])? {
-            if self.scheduled(&mut offices, &plan.workspace_id)? && goes_on(&self.store.plan_tasks(&plan.id)?, may_start(&plan.workspace_id)) {
+            if self.scheduled(&mut offices, &plan.workspace_id)? && goes_on(&self.store.plan_tasks(&plan.id)?) {
                 return Ok(true);
             }
         }
         for t in self.store.tasks_with_status(&[TaskStatus::Ready])?.iter().filter(|t| t.plan_id.is_none()) {
             if let Some(ws) = self.store.task_workspace(&t.id)?
-                && may_start(&ws)
                 && self.scheduled(&mut offices, &ws)?
             {
                 return Ok(true);
             }
         }
-        Ok(false)
+        self.rechecks_left(&mut offices)
     }
 
     /// Does the scheduler work in this office? The test of `schedule_pass`: the open office
     /// always, another one only while its repo folder is there (not on a disk that is not
     /// mounted, say). `seen` keeps the answer for one look at every office.
-    fn scheduled(&self, seen: &mut HashMap<Id, bool>, ws_id: &str) -> Result<bool> {
+    pub(super) fn scheduled(&self, seen: &mut HashMap<Id, bool>, ws_id: &str) -> Result<bool> {
         if let Some(known) = seen.get(ws_id) {
             return Ok(*known);
         }
@@ -321,15 +325,33 @@ impl Inner {
         Ok(there)
     }
 
-    /// Your Resume: the hold ends (`end_hold`), and the gates of the tasks that only had
-    /// their checks left start. Err: a write failed, so the hold is still on and nothing new
-    /// starts; your next Resume work ends it.
+    /// Your Resume: the hold ends (`end_held_work`). Err: a write failed, so the hold is still
+    /// on and nothing new starts; your next Resume work ends it.
     async fn resume_work(self: &Arc<Self>) -> Result<()> {
+        self.end_held_work().await.map(drop).map_err(|e| anyhow!("not all of the work could be resumed ({e}); press 'Resume work' again"))
+    }
+
+    /// You set Codly to always resume: a hold that is on ends now, as your Resume ends it, and
+    /// a line in the open office says why. When a write fails the hold stays on, with its
+    /// Resume work button.
+    pub(super) async fn resume_for_always(self: &Arc<Self>) {
+        match self.end_held_work().await {
+            Ok(true) => self.hold_line("Resumed after restart: you set Codly to always resume".into()),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("you set Codly to always resume, and the work that waits is not all resumed, so the hold stays on: {e}"),
+        }
+    }
+
+    /// The end of the hold that is on (`end_hold`): the gates of the tasks that only had their
+    /// checks left start, and so do the re-checks of your required checks that a quit cut
+    /// short. Ok(false): no hold was on. Err: a write failed, so the hold is still on and
+    /// nothing new starts.
+    async fn end_held_work(self: &Arc<Self>) -> Result<bool> {
         // Under the scheduler's lock: no pass starts a task between the writes below and the
         // end of the hold.
         let sched = self.sched_lock.lock().await;
         let waiting = self.store.tasks_with_status(&[TaskStatus::Ready])?;
-        let Some(hold) = lock(&self.held_work).clone() else { return Ok(()) };
+        let Some(hold) = lock(&self.held_work).clone() else { return Ok(false) };
         let (regate, ended) = self.end_hold(&hold, &waiting);
         if ended.is_ok() {
             *lock(&self.held_work) = None;
@@ -340,8 +362,28 @@ impl Inner {
         for task_id in regate {
             tokio::spawn(self.clone().gate(task_id));
         }
+        if ended.is_ok() {
+            self.restart_rechecks();
+        }
         self.kick();
-        ended.map_err(|e| anyhow!("not all of the work could be resumed ({e}); press 'Resume work' again"))
+        ended.map(|()| true)
+    }
+
+    /// The end of a start of Codly: the re-checks of your required checks that a quit cut
+    /// short go on now, unless the work of the last run waits for your Resume (then they
+    /// start when the hold ends).
+    pub(super) fn rechecks_at_launch(self: &Arc<Self>) {
+        if lock(&self.held_work).is_none() {
+            self.restart_rechecks();
+        }
+    }
+
+    /// A line in the open office about the hold as a whole, not about one of its tasks.
+    fn hold_line(&self, summary: String) {
+        let ws = self.workspace().map(|ws| ws.id);
+        if let Err(e) = self.decide(ws.as_deref(), None, "retry", summary, json!({})) {
+            tracing::warn!("the record does not say how the hold ended: {e}");
+        }
     }
 
     /// The end of a hold, in the order that a crash or a failed write leaves safe: each task
@@ -357,10 +399,15 @@ impl Inner {
         let mut failed = None;
         for t in waiting {
             let was_in_work = hold.tasks.contains(&t.id);
-            // Only its checks were left when the hold began, and its worktree is still there.
-            // One whose worktree is gone by now (a hold can be days old) has nothing to check:
-            // its worker goes on, in a new worktree on the task's branch.
-            let gate_only = was_in_work && hold.regate.contains(&t.id) && t.worktree.as_deref().is_some_and(|wt| Path::new(wt).is_dir());
+            // Only its checks were left when the hold began, its worktree is still there, and
+            // nothing waits for its worker. One whose worktree is gone by now (a hold can be
+            // days old) has nothing to check: its worker goes on, in a new worktree on the
+            // task's branch. So does one that its gate sent back with feedback since (an end
+            // of this hold that was not written had started that gate): it was checked once.
+            let gate_only = was_in_work
+                && hold.regate.contains(&t.id)
+                && t.worktree.as_deref().is_some_and(|wt| Path::new(wt).is_dir())
+                && self.feedback(&t.id).is_ok_and(|waits| waits.is_none());
             let res = if was_in_work {
                 // Whatever it says by now (a paused office writes its own reason).
                 self.resume_task(t, gate_only)
@@ -509,18 +556,16 @@ mod tests {
     #[test]
     fn a_running_plan_goes_on_when_a_task_can_start_or_only_its_checks_are_left() {
         // A task that is ready, or that waits only for work that is merged.
-        assert!(goes_on(&[task("a", "done", &[]), task("b", "ready", &[])], true));
-        assert!(goes_on(&[task("a", "done", &[]), task("b", "pending", &["a"])], true));
-        assert!(goes_on(&[task("a", "pending", &[])], true));
-        // No task starts in a paused office or past a budget.
-        assert!(!goes_on(&[task("a", "done", &[]), task("b", "ready", &[])], false));
-        // Every task done or cancelled: the plan's integration checks run next, paused or not.
-        assert!(goes_on(&[task("a", "done", &[]), task("b", "cancelled", &[])], false));
+        assert!(goes_on(&[task("a", "done", &[]), task("b", "ready", &[])]));
+        assert!(goes_on(&[task("a", "done", &[]), task("b", "pending", &["a"])]));
+        assert!(goes_on(&[task("a", "pending", &[])]));
+        // Every task done or cancelled: the plan's integration checks run next.
+        assert!(goes_on(&[task("a", "done", &[]), task("b", "cancelled", &[])]));
         // What is left waits for you: nothing would start.
         let stopped = [task("a", "done", &[]), task("b", "blocked", &[]), task("c", "failed", &[]), task("d", "pending", &["b"])];
-        assert!(!goes_on(&stopped, true));
-        assert!(!goes_on(&[task("a", "cancelled", &[])], true), "you cancelled every task: the plan ends cancelled");
-        assert!(!goes_on(&[], true));
+        assert!(!goes_on(&stopped));
+        assert!(!goes_on(&[task("a", "cancelled", &[])]), "you cancelled every task: the plan ends cancelled");
+        assert!(!goes_on(&[]));
     }
 
     /// A settings file written before the choice existed loads, and asks.
@@ -646,33 +691,62 @@ mod tests {
     const HOLD_STAYS: &str =
         "CREATE TRIGGER hold_stays BEFORE DELETE ON kv WHEN OLD.key = 'resume_hold' BEGIN SELECT RAISE(ABORT, 'no room to end the hold'); END";
 
-    /// Your Resume writes each task first and takes the hold out of the store last. That last
-    /// write fails (as a crash before it would leave things): the hold is still on, here and
-    /// in the store, and counts the task that still waits. The task that got its checks back
-    /// is not left without its gate. A second Resume ends the hold.
+    /// The lines that say a hold ended by itself, in the open office.
+    async fn ended_lines(core: &Core) -> Vec<String> {
+        let said = |e: EventRow| match e.kind {
+            EventKind::Decision { summary, .. } if summary.starts_with("Nothing was left to resume") => Some(summary),
+            _ => None,
+        };
+        core.events(None, None, 2000).await.unwrap().into_iter().filter_map(said).collect()
+    }
+
+    /// Every task of the hold is cancelled and nothing else would start, but the hold's own
+    /// row cannot be taken out of the store. The hold stays on with nothing to count: the
+    /// offer is 0, the store still has the hold, and no line says that it ended. Once the
+    /// store takes the write, the next look ends the hold, and one line in the office says why.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_hold_whose_end_is_not_written_stays_on_until_the_next_resume() {
+    async fn a_hold_whose_own_end_cannot_be_written_stays_on_with_nothing_to_count() {
         let dir = tempfile::tempdir().unwrap();
-        let (core, ws) = start(dir.path()).await;
+        let (core, _) = start(dir.path()).await;
         let inner = &core.inner;
-        core.update_settings(Settings { lead_followups: false, ..core.settings() }).await.unwrap();
-        let checks = held_task(&core, "Add sign-in", Path::new(&ws.repo_path)).await;
-        let worker = held_task(&core, "Add sign-out", &dir.path().join("removed")).await;
-        hold_on(inner, Hold { tasks: vec![checks.id.clone(), worker.id.clone()], regate: vec![checks.id.clone()] });
-        assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 2 }));
+        let pass = inner.sched_lock.lock().await; // the scheduler does not look meanwhile
+        let task = held_task(&core, "Add sign-in", &dir.path().join("removed")).await;
+        hold_on(inner, Hold { tasks: vec![task.id.clone()], regate: vec![] });
+        let cancel = |t: &mut Task| {
+            t.status = TaskStatus::Cancelled;
+            Ok(())
+        };
+        inner.update_task_as(&task.id, true, cancel).unwrap();
         inner.store.with(|db| Ok(db.execute_batch(HOLD_STAYS)?)).unwrap();
 
-        let refused = core.resume_work().await.unwrap_err().to_string();
-        assert!(refused.starts_with("not all of the work could be resumed") && refused.ends_with("press 'Resume work' again"), "{refused}");
-        assert_ne!(inner.task(&checks.id).unwrap().status, TaskStatus::Ready, "the task that only had its checks left went to them");
-        assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }), "the hold is on, for the task that still waits");
+        assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "the hold is on, with no task left to count");
+        assert!(lock(&inner.held_work).is_some());
         assert!(inner.store.kv_get(HOLD).unwrap().is_some(), "the next start would find the hold");
-        assert_eq!(inner.task(&worker.id).unwrap().status, TaskStatus::Ready, "nothing starts behind a hold that is on");
+        assert_eq!(ended_lines(&core).await, Vec::<String>::new(), "the hold did not end");
 
         inner.store.with(|db| Ok(db.execute_batch("DROP TRIGGER hold_stays")?)).unwrap();
-        core.resume_work().await.unwrap();
-        assert_eq!(core.resume_offer(), None, "the second Resume ended the hold");
+        assert_eq!(core.resume_offer(), None);
         assert_eq!(inner.store.kv_get(HOLD).unwrap(), None);
+        assert_eq!(core.resume_offer(), None, "a second look writes no second line");
+        let why = "Nothing was left to resume: you cancelled every task it held or put it back in the backlog, so the hold ended";
+        assert_eq!(ended_lines(&core).await, [why]);
+        drop(pass);
+        core.shutdown().await;
+    }
+
+    /// A hold of work that was only about to start (no task was in work) ends by itself once
+    /// that work does not start by itself any more, and its line says so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hold_of_work_about_to_start_says_why_it_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _) = start(dir.path()).await;
+        let inner = &core.inner;
+        let pass = inner.sched_lock.lock().await; // the scheduler does not look meanwhile
+        hold_on(inner, Hold::default());
+        assert_eq!(core.resume_offer(), None, "nothing would start");
+        let why = "Nothing was left to resume: the work that was about to start does not start by itself any more, so the hold ended";
+        assert_eq!(ended_lines(&core).await, [why]);
+        drop(pass);
         core.shutdown().await;
     }
 
@@ -684,9 +758,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (core, _) = start(dir.path()).await;
         let inner = &core.inner;
+        // No scheduling pass writes another reason on the tasks before the hold is on.
+        let pass = inner.sched_lock.lock().await;
         let first = held_task(&core, "Add sign-in", &dir.path().join("removed")).await;
         let second = held_task(&core, "Add sign-out", &dir.path().join("removed")).await;
         hold_on(inner, Hold { tasks: vec![first.id.clone(), second.id.clone()], regate: vec![] });
+        drop(pass);
         let no_change = format!(
             "CREATE TRIGGER no_change BEFORE INSERT ON event WHEN NEW.type = 'task_changed' AND NEW.task_id = '{}' \
              BEGIN SELECT RAISE(ABORT, 'no room for this task'); END",

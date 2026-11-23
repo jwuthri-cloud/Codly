@@ -1147,6 +1147,7 @@ impl Inner {
             }
             Err(e) => tracing::warn!("crash recovery incomplete: {e}"),
         }
+        self.rechecks_at_launch();
     }
 
     /// Had the task's worker ended its last turn, completed, with no turn started after it?
@@ -1285,6 +1286,17 @@ impl Inner {
                 let res = self.decide(Some(&p.workspace_id), None, "merge", "aborted a merge left half-done by a crash", json!({ "plan_id": p.id }));
                 each("plan", &p.id, res.map(drop));
             }
+        }
+        // A resolution whose start Codly closed in the middle of: its merge is taken back now,
+        // so the plan is where it was at once, not at its next merge, finish or resolution.
+        match self.starts_cut_short() {
+            Ok(plans) => {
+                let _g = self.repo_lock.lock().await;
+                for p in plans {
+                    each("plan", &p.id, self.settle_resolution(&p).await.map(drop));
+                }
+            }
+            Err(e) => tracing::warn!("crash recovery: the starts of conflict resolutions cannot be read: {e}"),
         }
         Ok(regate)
     }

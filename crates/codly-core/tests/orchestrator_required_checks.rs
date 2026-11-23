@@ -7,7 +7,9 @@
 //!   task waits until you turn the new text on, or the checks off, and then goes on by itself;
 //! - the tasks that waited are checked a few at a time, and those of one team member one
 //!   after the other; the record says which were checked, which went back to their team
-//!   member and which still wait for you;
+//!   member and which still wait for you; the tasks still to check are in the store until
+//!   each is through, and the next start checks those a quit left (after Resume work, when
+//!   the restart asks first);
 //! - a required check that fails on the merged work fails the plan;
 //! - "Check the work" runs them in the worktree of an agent you chat with: one run for an
 //!   agent at a time, no result when the agent worked while the commands ran, and a result
@@ -25,6 +27,7 @@ use std::time::Duration;
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::model::*;
 use codly_core::orchestrator::required_checks::{AgentCheck, CheckResult, CheckedWork, ChecksChoice, RequiredChecks};
+use codly_core::orchestrator::resume::ResumeOffer;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -688,6 +691,152 @@ async fn a_required_check_that_fails_on_the_merged_work_fails_the_plan() {
     let snap = core.snapshot().await.unwrap();
     let said = snap.chats.iter().find(|c| c.author == "codly" && c.text.contains("finished")).map(|c| c.text.clone()).expect("Codly reports the plan");
     assert!(said.contains(&format!("integration checks failed: `{required}`")) && said.contains("merge it anyway"), "{said}");
+    core.shutdown().await;
+}
+
+/// Where the store keeps the tasks still to check again after your choice, one row an office.
+const RECHECKS: &str = "required_rechecks:";
+
+/// Codly's store, through a connection of the test's own.
+fn db(root: &Path) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(root.join("data/codly.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db
+}
+
+/// The rows of the tasks still to check again: (key, value).
+fn recheck_rows(root: &Path) -> Vec<(String, Value)> {
+    let db = db(root);
+    let mut st = db.prepare("SELECT key, value FROM kv WHERE key LIKE ?1 ORDER BY key").unwrap();
+    let rows = st.query_map([format!("{RECHECKS}%")], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap();
+    rows.map(|row| row.unwrap()).map(|(key, value)| (key, serde_json::from_str(&value).unwrap())).collect()
+}
+
+/// A Lead that plans t1, t2 and t3, each with a worker and a worktree of its own.
+fn three_tasks() -> Behavior {
+    lead_with_plan(json!({ "summary": "Add files", "tasks": [file_task("t1"), file_task("t2"), file_task("t3")] }))
+}
+
+/// The tasks still to check again are in the store until each is through: the queue writes
+/// them when it is built, takes each one out when it is through, and is gone at its end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_tasks_still_to_check_again_stay_in_the_store_until_each_is_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let marks = dir.path().join("marks");
+    std::fs::create_dir_all(&marks).unwrap();
+    let (first, waiting, go) = (marks.join("first"), marks.join("waiting"), marks.join("go"));
+    // The first run of it passes; every later one waits until `go` is there.
+    let required = format!(
+        "mkdir '{}' 2>/dev/null || {{ touch '{}'; while [ ! -f '{}' ]; do sleep 0.1; done; }}",
+        first.display(),
+        waiting.display(),
+        go.display()
+    );
+    let repo = temp_repo(dir.path(), "true\n");
+    let one = Settings { max_parallel: 1, ..auto() };
+    let core = start_with(dir.path(), &repo, FakeSpawner { lead: three_tasks(), worker: file_worker(None), turns: Turns::default() }, one).await;
+    turn_on(&core).await;
+    std::fs::write(repo.join(CHECKS_FILE), format!("{required}\n")).unwrap();
+    core.send_chat("lead", "Please do it").await.unwrap();
+    let mut ids = vec![];
+    for key in ["t1", "t2", "t3"] {
+        ids.push(wait_task(&core, key, TaskStatus::Blocked).await.id);
+    }
+    assert_eq!(recheck_rows(dir.path()), vec![], "nothing to check again before your choice");
+
+    // Your choice. The first task is through; the second one's check runs, and waits.
+    turn_on(&core).await;
+    wait_for("the second check to run", 40, async || waiting.exists().then_some(())).await;
+    let rows = recheck_rows(dir.path());
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].1["on"], true);
+    let left: Vec<String> = serde_json::from_value(rows[0].1["tasks"].clone()).unwrap();
+    let through: Vec<&String> = ids.iter().filter(|id| !left.contains(id)).collect();
+    assert!(left.len() == 2 && left.iter().all(|id| ids.contains(id)) && through.len() == 1, "{left:?}");
+    let snap = core.snapshot().await.unwrap();
+    assert_ne!(snap.tasks.iter().find(|t| &t.id == through[0]).unwrap().status, TaskStatus::Blocked, "the task out of the queue was checked again");
+
+    std::fs::write(&go, "").unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(rechecked(&core, 1).await["rechecked"], json!(["t1", "t2", "t3"]));
+    assert_eq!(recheck_rows(dir.path()), vec![], "the queue is over");
+    core.shutdown().await;
+}
+
+/// Three tasks wait for your required checks. You turned the new text on, and Codly closed
+/// after the queue was through with t1 (it still waits for you: that was the end of its
+/// re-check) and before t2 and t3: the store has them as the queue leaves them (the test
+/// above shows that form), and the text you turned on. Returns the repo and the three tasks.
+async fn three_waiting_then_quit(root: &Path, settings: Settings) -> (PathBuf, Vec<Task>) {
+    let repo = temp_repo(root, "true\n");
+    let core = start_with(root, &repo, FakeSpawner { lead: three_tasks(), worker: file_worker(None), turns: Turns::default() }, settings).await;
+    turn_on(&core).await;
+    std::fs::write(repo.join(CHECKS_FILE), "test -f README.md\n").unwrap();
+    core.send_chat("lead", "Please do it").await.unwrap();
+    let mut tasks = vec![];
+    for key in ["t1", "t2", "t3"] {
+        tasks.push(wait_task(&core, key, TaskStatus::Blocked).await);
+    }
+    let sha = core.required_checks(None).await.unwrap().sha.expect("the new text");
+    core.shutdown().await;
+    drop(core);
+    let db = db(root);
+    let key: String = db.query_row("SELECT key FROM kv WHERE key LIKE 'required_checks:%'", [], |r| r.get(0)).unwrap();
+    db.execute("UPDATE kv SET value = ?2 WHERE key = ?1", [&key, &sha]).unwrap();
+    let left = json!({ "on": true, "tasks": [tasks[1].id, tasks[2].id] });
+    db.execute("INSERT INTO kv (key, value) VALUES (?1, ?2)", [format!("{RECHECKS}{}", &key["required_checks:".len()..]), left.to_string()]).unwrap();
+    (repo, tasks)
+}
+
+/// The checks of each task, for that task: how many times its own check ran.
+fn own_checks(events: &[EventRow], key: &str) -> usize {
+    let own = format!("test -f {key}.txt");
+    verified(events).iter().filter(|v| v.2 && v.0 == own).count()
+}
+
+/// With "always", the next start checks the tasks that the queue had not reached, once each,
+/// and the queue is gone. The task it was through with is not checked again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_next_start_checks_the_tasks_a_quit_left_in_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let always = Settings { resume_on_launch: ResumeOnLaunch::Always, ..auto() };
+    let (repo, tasks) = three_waiting_then_quit(dir.path(), always.clone()).await;
+
+    let core = start_with(dir.path(), &repo, FakeSpawner { lead: three_tasks(), worker: file_worker(None), turns: Turns::default() }, always).await;
+    assert_eq!(core.resume_offer(), None);
+    assert_eq!(rechecked(&core, 1).await, json!({ "rechecked": ["t2", "t3"], "back_to_member": [], "still_waiting": [] }));
+    let all = events(&core).await;
+    assert_eq!([own_checks(&all, "t1"), own_checks(&all, "t2"), own_checks(&all, "t3")], [0, 1, 1]);
+    assert!(said(&all).contains(&"after you turned the required checks on: Codly checked t2, t3 again"), "{:?}", said(&all));
+    assert_eq!(recheck_rows(dir.path()), vec![], "the queue is over");
+    let t1 = core.snapshot().await.unwrap().tasks.into_iter().find(|t| t.id == tasks[0].id).unwrap();
+    assert_eq!(t1.status, TaskStatus::Blocked);
+    core.shutdown().await;
+}
+
+/// With "ask", the queue a quit left is work like the rest: nothing of it runs while the
+/// restart waits for your Resume, and it starts when you press Resume work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_queue_a_quit_left_waits_for_resume_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (repo, _) = three_waiting_then_quit(dir.path(), auto()).await;
+
+    let core = start_with(dir.path(), &repo, FakeSpawner { lead: three_tasks(), worker: file_worker(None), turns: Turns::default() }, auto()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "the queue holds the start");
+    for _ in 0..3 {
+        core.update_settings(core.settings()).await.unwrap(); // starts a scheduling pass
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let all = events(&core).await;
+    assert!(verified(&all).is_empty(), "nothing was checked before your Resume: {:?}", verified(&all));
+    assert!(!decisions(&all).iter().any(|d| !d["rechecked"].is_null()));
+    assert_eq!(recheck_rows(dir.path()).len(), 1, "the queue is still in the store");
+
+    core.resume_work().await.unwrap();
+    assert_eq!(rechecked(&core, 1).await["rechecked"], json!(["t2", "t3"]));
+    let all = events(&core).await;
+    assert_eq!([own_checks(&all, "t1"), own_checks(&all, "t2"), own_checks(&all, "t3")], [0, 1, 1]);
+    assert_eq!(recheck_rows(dir.path()), vec![]);
     core.shutdown().await;
 }
 

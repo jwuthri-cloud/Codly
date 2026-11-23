@@ -197,6 +197,9 @@ async fn past_the_budget_no_task_starts_also_after_a_restart() {
     drop(core);
     let core = start(dir.path(), &repo, &runs).await;
     assert_eq!(core.breaker_status().await.unwrap().used, before.used, "a restart does not give the budget back");
+    // The waiting task would start once the budget has room, so the restart waits for your
+    // Resume first (a budget is no reason not to ask). After it, the budget still holds.
+    core.resume_work().await.unwrap();
     let third = ready_task(&core, "Write the thanks").await;
     held(&core, &third.id).await;
     held(&core, &second.id).await;

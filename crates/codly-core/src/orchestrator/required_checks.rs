@@ -14,12 +14,14 @@
 //! passes in their place: a task waits for you, and a finished plan says that it was not
 //! checked, until you turn the new text on or turn the checks off. That choice is all the
 //! waiting tasks need: Codly checks each of them again by itself, a few at a time, and the
-//! tasks that share a team member's worktree one after the other.
+//! tasks that share a team member's worktree one after the other. The tasks still to check
+//! are in the store until each is through (`Rechecks`): when Codly closes in the middle, the
+//! next start checks the rest, or the end of its restart hold does (`resume.rs`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -229,6 +231,22 @@ impl Drop for Checking<'_> {
 /// How often a re-check looks whether the gate is through with a task.
 const SETTLE_POLL: Duration = Duration::from_millis(50);
 
+/// The tasks of an office that Codly still checks again after your choice, as the store keeps
+/// them (kv `required_rechecks:<office>`): written when the queue is built, shortened as each
+/// task is through, gone at its end. A row that is there at a start was cut short by a quit.
+#[derive(Serialize, Deserialize)]
+struct Rechecks {
+    /// You turned the checks on (or off), for the record of what became of the tasks.
+    on: bool,
+    tasks: Vec<Id>,
+}
+
+const RECHECKS: &str = "required_rechecks:";
+
+fn rechecks_key(ws_id: &str) -> String {
+    format!("{RECHECKS}{ws_id}")
+}
+
 /// What became of a task that waited for your required checks, after your choice.
 enum Rechecked {
     /// Codly checked it again: the pass ran, and the task went where its checks sent it.
@@ -337,16 +355,23 @@ impl Inner {
     /// there would send the task back to the member for a new turn. When all of them are
     /// through, the record says what became of each. One choice at a time: a second one
     /// (on, then off) waits here for the first one's tasks, then takes what still waits.
-    async fn recheck_parked(self: Arc<Self>, ws: Workspace, on: bool) {
+    /// `only`: the tasks a quit left in the queue (`Rechecks`), of those that still wait.
+    async fn recheck_parked(self: Arc<Self>, ws: Workspace, on: bool, only: Option<Vec<Id>>) {
         let _one = self.rechecks.lock().await;
-        if let Err(e) = self.recheck_lanes(&ws, on).await {
+        if let Err(e) = self.recheck_lanes(&ws, on, only).await {
             tracing::warn!("re-checking the tasks that waited for the required checks: {e:#}");
         }
     }
 
-    async fn recheck_lanes(self: &Arc<Self>, ws: &Workspace, on: bool) -> Result<()> {
-        let parked = self.parked_for_checks(&ws.id)?;
+    async fn recheck_lanes(self: &Arc<Self>, ws: &Workspace, on: bool, only: Option<Vec<Id>>) -> Result<()> {
+        let mut parked = self.parked_for_checks(&ws.id)?;
+        if let Some(only) = &only {
+            parked.retain(|t| only.contains(&t.id));
+        }
         let order: Vec<Id> = parked.iter().map(|t| t.id.clone()).collect();
+        // In the store until each task is through: a quit leaves the rest for the next start.
+        self.keep_rechecks(&ws.id, on, &order);
+        let left = Arc::new(Mutex::new(order.clone()));
         // The tasks that share a worktree are one lane.
         let mut lanes: Vec<Vec<Task>> = vec![];
         for t in parked {
@@ -358,13 +383,21 @@ impl Inner {
         let slots = Arc::new(Semaphore::new(self.settings().max_parallel.max(1) as usize));
         let mut running = JoinSet::new();
         for lane in lanes {
-            let (me, slots) = (self.clone(), slots.clone());
+            let (me, slots, left, ws_id) = (self.clone(), slots.clone(), left.clone(), ws.id.clone());
             running.spawn(async move {
                 // Held for the whole lane. (Nothing closes the semaphore.)
                 let _slot = slots.acquire().await;
                 let mut done = vec![];
                 for t in lane {
-                    if let Some(what) = me.recheck_waiting(&t).await {
+                    let what = me.recheck_waiting(&t).await;
+                    // Quitting: the task may not be through, so it stays in the queue. The next
+                    // start passes over it if it waits no more.
+                    if !me.shutting_down.load(Ordering::SeqCst) {
+                        let mut still = lock(&left);
+                        still.retain(|id| *id != t.id);
+                        me.keep_rechecks(&ws_id, on, &still);
+                    }
+                    if let Some(what) = what {
                         done.push((t, what));
                     }
                 }
@@ -378,7 +411,8 @@ impl Inner {
                 Err(e) => tracing::warn!("a re-check of the tasks that waited for the required checks crashed: {e}"),
             }
         }
-        // Quitting: the tasks that were not reached still wait, with Re-run checks on their cards.
+        // Quitting: the tasks that were not reached still wait, with Re-run checks on their
+        // cards, and the next start checks them (`Rechecks`).
         if done.is_empty() || self.shutting_down.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -444,6 +478,83 @@ impl Inner {
             _ => None,
         });
         Ok(Some(back.map_or(Rechecked::Again, Rechecked::Back)))
+    }
+
+    /// Keep the tasks of an office that are still to check again in the store, or take the
+    /// row out when none is left. A row that cannot be written is not a reason to stop the
+    /// re-checks: only a quit before their end would lose the rest.
+    fn keep_rechecks(&self, ws_id: &str, on: bool, tasks: &[Id]) {
+        let row = (!tasks.is_empty()).then(|| serde_json::to_string(&Rechecks { on, tasks: tasks.to_vec() })).transpose();
+        let kept = row.map_err(anyhow::Error::from).and_then(|row| self.store.kv_write(&[(rechecks_key(ws_id), row)]));
+        if let Err(e) = kept {
+            tracing::warn!("the tasks still to check again are not in the store as they are now, so a quit may leave some waiting: {e:#}");
+        }
+    }
+
+    /// Is a re-check that a quit cut short still to do? That is work that starts by itself
+    /// (`resume.rs` holds it for your Resume): a queue of an office the scheduler works in
+    /// (`scheduled`, with `offices` as the caller's look at them) in which a task still waits
+    /// for your required checks. A queue that cannot be read, or whose office is gone, is taken
+    /// out (`left_queue`).
+    pub(super) fn rechecks_left(&self, offices: &mut HashMap<Id, bool>) -> Result<bool> {
+        for (key, row) in self.store.kv_prefixed(RECHECKS)? {
+            let Some((queue, ws)) = self.left_queue(&key, &row) else { continue };
+            if !self.scheduled(offices, &ws.id)? {
+                continue;
+            }
+            for id in &queue.tasks {
+                if let Some(t) = self.store.task(id)?
+                    && self.waits_for_checks(&t)?
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// The re-checks that a quit cut short go on: each office's queue starts again, with the
+    /// tasks that were not through and still wait for your required checks. The queue of an
+    /// office the scheduler passes over (its repo folder is not there) waits for a later start.
+    pub(super) fn restart_rechecks(self: &Arc<Self>) {
+        let rows = match self.store.kv_prefixed(RECHECKS) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("the re-checks a quit cut short cannot be read, so they do not go on now: {e:#}");
+                return;
+            }
+        };
+        let mut offices = HashMap::new();
+        for (key, row) in rows {
+            let Some((queue, ws)) = self.left_queue(&key, &row) else { continue };
+            match self.scheduled(&mut offices, &ws.id) {
+                Ok(true) => {
+                    tokio::spawn(self.clone().recheck_parked(ws, queue.on, Some(queue.tasks)));
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("the re-checks a quit cut short in office {} do not go on now: {e:#}", ws.id),
+            }
+        }
+    }
+
+    /// The queue of store row `key` = `row`, with its office. None: the row cannot be read, or
+    /// its office is gone. Such a row is taken out: it would hold the work of every later start
+    /// for nothing.
+    fn left_queue(&self, key: &str, row: &str) -> Option<(Rechecks, Workspace)> {
+        let ws_id = &key[RECHECKS.len()..];
+        let queue = serde_json::from_str::<Rechecks>(row)
+            .map_err(anyhow::Error::from)
+            .and_then(|queue| Ok((queue, self.store.workspace(ws_id)?.ok_or_else(|| anyhow!("its office is not there any more"))?)));
+        match queue {
+            Ok(queue) => Some(queue),
+            Err(e) => {
+                tracing::warn!("the re-checks a quit cut short in office {ws_id} are dropped: {e:#}");
+                if let Err(e) = self.store.kv_write(&[(key.to_string(), None)]) {
+                    tracing::warn!("they stay in the store: {e:#}");
+                }
+                None
+            }
+        }
     }
 
     // ───────────── for the gate ─────────────
@@ -638,7 +749,7 @@ impl Core {
             let on = choice.allow.is_some();
             self.inner.choose_checks(&ws, choice)?;
             if !self.inner.parked_for_checks(&ws.id)?.is_empty() {
-                tokio::spawn(self.inner.clone().recheck_parked(ws.clone(), on));
+                tokio::spawn(self.inner.clone().recheck_parked(ws.clone(), on, None));
             }
         }
         self.inner.checks_status(&ws)
