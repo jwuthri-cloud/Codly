@@ -1,8 +1,9 @@
 <!--
   Work was under way when Codly last closed, and nothing of it starts before you say so
   (Settings → Long runs → "Resume work when Codly opens"). With Ask this is the question:
-  Resume, or Not now. After Not now, and with Never, it is one line with the Resume work
-  button. It stays until you press it: the waiting tasks name this button.
+  Resume work, or Not now. After Not now, and with Never, it is one line with the Resume work
+  button. It stays until you press it: the waiting tasks name this button by its label, so
+  the label is the same in both states (orchestrator/resume.rs, HELD).
   The bar is part of the page under the top bar: it lies on no sheet and not on the Ask me
   panel. While one of them is open the bar ends left of it: its text gets shorter (the whole
   text is in the tooltip), its buttons stay.
@@ -44,7 +45,7 @@
     </div>
     {#if asking}
       <button class="btn sm" disabled={resumeWork.busy} onclick={() => resumeWork.notNow()}>Not now</button>
-      <button class="btn sm primary" disabled={resumeWork.busy} onclick={() => resumeWork.resume()}>Resume</button>
+      <button class="btn sm primary" disabled={resumeWork.busy} onclick={() => resumeWork.resume()}>Resume work</button>
     {:else}
       <button class="btn sm primary" disabled={resumeWork.busy} onclick={() => resumeWork.resume()}>Resume work</button>
     {/if}

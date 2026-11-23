@@ -93,7 +93,9 @@ go on by itself (`orchestrator/resume.rs`, Settings → Long runs → "Resume wo
 opens": ask, always or never; ask is the default). Until your Resume the scheduler starts no
 task, no plan runs its integration checks and no task is checked again; the app shows one
 question (ask) or only the Resume work button (never). The tasks that wait are in the store:
-a start you leave without an answer asks again for the same ones. Each task that goes on gets a
+a start you leave without an answer asks again for the same ones. The question counts the
+tasks that still wait; once you cancelled them all and nothing else would start, the hold ends
+by itself. Each task that goes on gets a
 "Resumed after restart" line in its history. A restart also keeps the fix and conflict rounds a
 task has used (in the store), the files of a task that waits for your answer (while its
 question is open), and what you were already told: the shell's notifier starts from the tasks

@@ -118,6 +118,7 @@ impl Inner {
             }
         }
         self.store.close_workspace(ws_id)?;
+        self.forget_office_tasks(ws_id); // rows the store kept for its tasks (`resume.rs`)
         super::lots::vacate(&self.store, ws_id)?;
         {
             let mut s = write(&self.settings);

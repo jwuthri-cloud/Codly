@@ -3,7 +3,10 @@
 //! and so does work that was about to start, and a finished plan's integration checks; a
 //! question you left open is asked again at the next start, for the same tasks; each resumed
 //! task says so in its history; the fix rounds a task used are not handed out again; and a
-//! task that waits for your answer keeps its files.
+//! task that waits for your answer keeps its files. The question counts what still waits: a
+//! hold whose tasks you cancelled ends by itself, an office whose folder is not there holds
+//! nothing, a task whose worktree is gone goes on through its worker, and a review that was
+//! under way is done again by a new reviewer.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +16,7 @@ use std::time::Duration;
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
 use codly_core::blockers::{Blocker, BlockerSeverity, BlockerStatus};
 use codly_core::model::*;
-use codly_core::orchestrator::resume::ResumeOffer;
+use codly_core::orchestrator::resume::{HELD, ResumeOffer};
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use codly_core::store::{RunRow, Store};
 use serde_json::{Value, json};
@@ -21,8 +24,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
-/// What a task shows while it waits for your Resume.
-const HELD: &str = "paused: Codly restarted. Nothing starts until you press Resume";
 /// Where the store keeps the tasks that wait for your Resume.
 const HOLD_ROW: &str = "resume_hold";
 
@@ -80,6 +81,8 @@ struct Seen {
     runs: Vec<(String, SessionMode)>,
     /// Every prompt a worker got.
     prompts: Vec<String>,
+    /// (run id, session) of every reviewer run that gave its verdict.
+    reviews: Vec<(String, SessionMode)>,
 }
 
 struct Fake {
@@ -132,6 +135,14 @@ impl Spawner for Fake {
                         _ => continue,
                     };
                     send(EventKind::TurnStarted { input: Some(text.clone()) });
+                    // A reviewer approves the work, whatever the script says about workers.
+                    if spec.role == Role::Reviewer {
+                        let reply = tool(&spec, "codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": [], "issues": [] })).await;
+                        assert_eq!(reply["ok"], true, "{reply}");
+                        seen.lock().unwrap().reviews.push((spec.run_id.clone(), spec.session.clone()));
+                        send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
+                        continue;
+                    }
                     let n = {
                         let mut s = seen.lock().unwrap();
                         s.prompts.push(text);
@@ -297,6 +308,47 @@ fn fail_task(store: &Store, ws: &Workspace, task_id: &str) {
     store.append_event(Some(&ws.id), &ev).unwrap();
 }
 
+/// What a quit leaves behind for one ad-hoc task whose review was under way: the task of
+/// `seed_task_in_checks` with its worker's turn over and the work there, in its review, and
+/// the reviewer's run that was live. Returns (task id, that run's id).
+fn seed_task_in_review(store: &Store, ws: &Workspace, data: &Path, key: &str) -> (Id, Id) {
+    let (task_id, _) = seed_task_in_checks(store, ws, data, key, Left::Checked);
+    let (reviewer_id, run_id) = (new_id(), new_id());
+    let ev = |agent_id: Option<&Id>, kind| EventRow { id: 0, ts: now_ms(), agent_id: agent_id.cloned(), task_id: Some(task_id.clone()), run_id: None, workspace_id: None, kind };
+    let mut task = store.task(&task_id).unwrap().expect("the seeded task");
+    task.status = TaskStatus::Reviewing;
+    task.status_reason = Some("review by Rev (Claude Code)".into());
+    let cwd = task.worktree.clone().expect("the seeded task has a worktree");
+    store.append_event(Some(&ws.id), &ev(None, EventKind::TaskChanged { task })).unwrap();
+    let reviewer: Agent = serde_json::from_value(json!({
+        "id": reviewer_id, "name": "Rev", "provider": "claude", "model": null, "role": "reviewer", "status": "working",
+        "activity": null, "activity_label": null, "task_id": task_id, "run_id": run_id, "session_id": "sess-review",
+        "worktree": null, "billing": "subscription", "account": null, "color": 1, "look_seed": reviewer_id, "thread": null,
+        "usage": Usage::default(), "created_at": now_ms(), "updated_at": now_ms(),
+    }))
+    .unwrap();
+    store.append_event(Some(&ws.id), &ev(Some(&reviewer_id), EventKind::AgentChanged { agent: reviewer })).unwrap();
+    store
+        .insert_run(&RunRow {
+            id: run_id.clone(),
+            agent_id: reviewer_id,
+            task_id: Some(task_id.clone()),
+            role: Role::Reviewer,
+            provider: Provider::Claude,
+            model: None,
+            cwd,
+            session_id: Some("sess-review".into()),
+            account: None,
+            status: "running".into(),
+            raw_log: "/dev/null".into(),
+            report: None,
+            started_at: now_ms(),
+            ended_at: None,
+        })
+        .unwrap();
+    (task_id, run_id)
+}
+
 /// The check of the seeded plan.
 const PLAN_CHECK: &str = "test -f README.md";
 
@@ -379,6 +431,19 @@ async fn checks_run(core: &Core) -> Vec<(String, bool)> {
         .into_iter()
         .filter_map(|e| match e.kind {
             EventKind::Verified { command, ok, .. } => Some((command, ok)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The verdicts on record, oldest first: (the reviewer's run, its verdict).
+async fn verdicts(core: &Core) -> Vec<(Option<Id>, String)> {
+    let mut events = core.events(None, None, 2000).await.unwrap();
+    events.sort_by_key(|e| e.id);
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Reviewed { verdict, .. } => Some((e.run_id, verdict)),
             _ => None,
         })
         .collect()
@@ -588,7 +653,7 @@ async fn a_question_you_left_open_is_asked_again_at_the_next_start() {
         assert_eq!(seen.runs.len(), 2, "{:?}", seen.runs);
         assert!(seen.runs.iter().any(|r| r.0 == mid.1 && matches!(&r.1, SessionMode::Resume { session_id } if session_id == "sess-b1")), "{:?}", seen.runs);
         assert!(seen.prompts.iter().any(|p| p.contains("resuming after Codly restarted")), "{:?}", seen.prompts);
-        assert!(!seen.prompts.iter().any(|p| p.contains("Nothing starts until you press Resume")), "{:?}", seen.prompts);
+        assert!(!seen.prompts.iter().any(|p| p.contains(HELD)), "{:?}", seen.prompts);
     }
     let lines = ["Resumed after restart: Codly checks its work again", "Resumed after restart: its worker goes on where it stopped"];
     assert_eq!(resumed(&core).await, lines, "the retried task started over: it was not resumed");
@@ -789,4 +854,153 @@ async fn a_task_that_waits_for_your_answer_keeps_its_files_after_a_restart() {
     let answered = seen.lock().unwrap().prompts[1].clone();
     assert!(answered.starts_with("[User] Answer to your question \"Which greeting?\": casual please"), "{answered}");
     core.shutdown().await;
+}
+
+/// You cancel the tasks that were in work instead of resuming them. The question counts only
+/// the ones that still wait. When none is left and nothing else would start, the hold ends
+/// by itself: the store forgets it, and work you start then runs with no Resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hold_ends_by_itself_once_you_cancelled_the_tasks_it_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let (first, second) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings::default());
+        (seed_task_in_checks(&store, &ws, &data, "a1", Left::Checked), seed_task_in_checks(&store, &ws, &data, "b1", Left::MidTurn))
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 2 }));
+
+    core.move_task(&first.0, TaskStatus::Cancelled).await.unwrap();
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }), "one task still waits");
+    core.move_task(&second.0, TaskStatus::Cancelled).await.unwrap();
+    assert_eq!(core.resume_offer(), None, "nothing waits any more");
+
+    // Work you start now runs: nobody has to press Resume for it.
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let task = core.create_task("Write the greeting", "Create a text file").await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(seen.lock().unwrap().runs.len(), 1, "only the new task's worker ran");
+    assert!(resumed(&core).await.is_empty(), "nothing was resumed");
+    core.shutdown().await;
+    drop(core);
+    assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "the hold is over in the store too");
+}
+
+/// An office whose repo folder is not there (a disk that is not mounted) gets no work from
+/// the scheduler. Its waiting task is no reason to ask, and holds nothing: work in another
+/// office starts with no Resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_office_whose_folder_is_not_there_holds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let waiting = new_id();
+    {
+        let store = store_of(dir.path());
+        let here = seed_office(&store, &repo, Settings::default());
+        let folder = dir.path().join("unmounted").join("repo").to_string_lossy().into_owned();
+        let away = Workspace { id: new_id(), repo_path: folder, name: "away".into(), ..here };
+        store.upsert_workspace(&away).unwrap();
+        let task: Task = serde_json::from_value(adhoc_task(&waiting, "a1", "ready")).unwrap();
+        let kind = EventKind::TaskChanged { task };
+        let ev = EventRow { id: 0, ts: now_ms(), agent_id: None, task_id: Some(waiting.clone()), run_id: None, workspace_id: None, kind };
+        store.append_event(Some(&away.id), &ev).unwrap();
+    }
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), None, "nothing would start: there is nothing to ask");
+
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let task = core.create_task("Write the greeting", "Create a text file").await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(seen.lock().unwrap().runs.len(), 1, "only the new task's worker ran");
+    core.shutdown().await;
+    drop(core);
+    let left = store_of(dir.path()).task(&waiting).unwrap().expect("the other office's task");
+    assert_eq!((left.status, left.status_reason), (TaskStatus::Ready, None), "it waits for its folder, and shows no hold");
+}
+
+/// Codly asked, and you closed it without an answer. Before the next start, the worktree of
+/// the task that only had its checks left is removed. Your Resume does not send that task to
+/// checks that have nothing to run on: its worker goes on, in a new worktree on the task's
+/// branch, and the task is done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_task_whose_worktree_was_removed_goes_on_through_its_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let (task_id, worker) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings::default());
+        seed_task_in_checks(&store, &ws, &data, "a1", Left::Checked)
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }));
+    let worktree = PathBuf::from(task_now(&core, &task_id).await.worktree.expect("the task has a worktree"));
+    core.shutdown().await;
+    drop(core);
+    std::fs::remove_dir_all(&worktree).unwrap();
+
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }), "the task still waits for your Resume");
+    core.resume_work().await.unwrap();
+    let task = task_ended(&core, &task_id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.runs.len(), 1, "{:?}", seen.runs);
+        assert!(seen.runs[0].0 == worker && matches!(&seen.runs[0].1, SessionMode::Resume { session_id } if session_id == "sess-a1"), "{:?}", seen.runs);
+        assert!(seen.prompts[0].contains("resuming after Codly restarted"), "{}", seen.prompts[0]);
+    }
+    assert_eq!(resumed(&core).await, ["Resumed after restart: its worker goes on where it stopped"]);
+    core.shutdown().await;
+}
+
+/// Codly closed while a task was in its review. No run outlives Codly: the reviewer's is
+/// gone, and Codly keeps no note of it. When the task goes on (after your Resume, or at once
+/// with "always") it is checked again and reviewed by a new reviewer run, and that run's
+/// verdict is the one Codly reads: the task is done, with one review on record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_review_that_was_under_way_is_done_again_by_a_new_reviewer() {
+    for choice in [ResumeOnLaunch::Ask, ResumeOnLaunch::Always] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = temp_repo(dir.path());
+        let data = dir.path().join("data");
+        let (task_id, lost_run) = {
+            let store = store_of(dir.path());
+            let ws = seed_office(&store, &repo, Settings { review_gate: true, resume_on_launch: choice, ..Default::default() });
+            seed_task_in_review(&store, &ws, &data, "a1")
+        };
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let core = start_core(dir.path(), &seen, works()).await;
+        if choice == ResumeOnLaunch::Ask {
+            assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }));
+            passes(&core).await;
+            assert!(seen.lock().unwrap().runs.is_empty(), "no reviewer started before your answer");
+            assert!(verdicts(&core).await.is_empty(), "no review before your answer");
+            core.resume_work().await.unwrap();
+        }
+        let task = task_ended(&core, &task_id).await;
+        assert_eq!(task.status, TaskStatus::Done, "{choice:?}: {:?}", task.status_reason);
+        let checks = checks_run(&core).await;
+        assert!(!checks.is_empty() && checks.iter().all(|check| check == &("test -f a1.txt".to_string(), true)), "{choice:?}: it was checked again: {checks:?}");
+        let (runs, given) = {
+            let seen = seen.lock().unwrap();
+            assert!(seen.prompts.is_empty(), "{choice:?}: the worker got no turn: {:?}", seen.prompts);
+            (seen.runs.len(), seen.reviews.clone())
+        };
+        assert_eq!((runs, given.len()), (1, 1), "{choice:?}: one run, the reviewer's: {given:?}");
+        let (run, session) = &given[0];
+        assert!(run != &lost_run && matches!(session, SessionMode::New { .. }), "{choice:?}: a new run, not the one that was lost: {given:?}");
+        assert_eq!(verdicts(&core).await, [(Some(run.clone()), "approve".to_string())], "{choice:?}: its verdict is the one on record");
+        assert_eq!(resumed(&core).await, ["Resumed after restart: Codly checks its work again"], "{choice:?}");
+        core.shutdown().await;
+    }
 }

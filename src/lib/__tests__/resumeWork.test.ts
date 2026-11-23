@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import resumeRs from '../../../crates/codly-core/src/orchestrator/resume.rs?raw';
 import { api } from '../api';
 import type { ResumeOffer } from '../gen/ResumeOffer';
 import { REREAD_MS, resumeWork } from '../state/resumeWork.svelte';
@@ -20,6 +21,21 @@ describe('the launch question, in words', () => {
     expect(asksNow('ask', true)).toBe(false);
     // Never: no question, only the Resume work button. (Always holds nothing.)
     expect(asksNow('never', false)).toBe(false);
+  });
+});
+
+const bar = import.meta.glob<string>('/src/components/ResumeWork.svelte', { query: '?raw', import: 'default', eager: true });
+
+describe('the button a waiting task names', () => {
+  it('is on the bar under that label, with the question and without it', () => {
+    // Each held task shows the core's reason, and the reason names the button by its label.
+    const reason = /pub const HELD: &str = "([^"]+)";/.exec(resumeRs)?.[1];
+    const named = /press '([^']+)'/.exec(reason ?? '')?.[1];
+    expect(named).toBe('Resume work');
+    const [barSvelte] = Object.values(bar);
+    const labels = [...barSvelte.matchAll(/onclick=\{\(\) => resumeWork\.resume\(\)\}>([^<]+)<\/button>/g)].map((m) => m[1]);
+    // One button with the question (Ask), one without it (after Not now, and with Never).
+    expect(labels).toEqual([named, named]);
   });
 });
 
