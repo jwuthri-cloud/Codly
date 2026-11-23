@@ -3,6 +3,7 @@ import type { AccountConfig } from "./AccountConfig";
 import type { AccountStrategy } from "./AccountStrategy";
 import type { ApprovalMode } from "./ApprovalMode";
 import type { ByokSettings } from "./ByokSettings";
+import type { NotificationSettings } from "./NotificationSettings";
 import type { Provider } from "./Provider";
 import type { TeamMember } from "./TeamMember";
 import type { WatchdogSettings } from "./WatchdogSettings";
@@ -103,6 +104,19 @@ verify_timeout_secs: number,
  * a worker that sits idle on a running task.
  */
 watchdog: WatchdogSettings, 
+/**
+ * Which events raise a notification of your system, and when (Settings → Notifications).
+ */
+notifications: NotificationSettings, 
+/**
+ * Keep the Mac from going to sleep by itself while agents work or a plan runs, so a long
+ * run is not cut off when you walk away. Closing the lid still puts it to sleep.
+ */
+keep_awake: boolean, 
+/**
+ * Ask before Codly quits while agents work: they stop, and resume at the next start.
+ */
+confirm_quit: boolean, 
 /**
  * Claude agents that have a shell (workers and 1:1 agents) run its commands inside Claude
  * Code's own OS sandbox (`adapters::claude::settings_json`): a command can write only in

@@ -73,7 +73,7 @@ tool_uses: number | null, tokens: number | null,
 /**
  * What it reported when it was done.
  */
-report: string | null, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
+report: string | null, } | { "type": "compacting", pre_tokens: number | null, post_tokens: number | null, } | { "type": "turn_completed", status: TurnStatus, result_text: string | null, duration_ms: number | null, } | { "type": "error", message: string, fatal: boolean, } | { "type": "exited", code: number | null, } | { "type": "unknown", raw_type: string, } | { "type": "notice", text: string, } | { "type": "agent_changed", agent: Agent, } | { "type": "plan_changed", plan: Plan, } | { "type": "task_changed", task: Task, } | { "type": "chat", message: ChatMessage, } | { "type": "decision", id: string, decision_type: string, 
 /**
  * "rule" | "model" | "human"
  */

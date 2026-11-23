@@ -40,7 +40,7 @@
       const wt = p.integration_worktree;
       if (!wt || seen.has(wt) || (wt !== ui.terminalCwd && !openKeys.includes(wt))) continue;
       seen.add(wt);
-      list.push({ key: wt, cwd: wt, label: `Plan: ${p.summary}`, agentId: null });
+      list.push({ key: wt, cwd: wt, label: `Plan: ${p.summary}`, agentId: null, takeover: false });
     }
     return list;
   });
