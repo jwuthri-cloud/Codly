@@ -27,6 +27,8 @@
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px; --s8: 32px; --s10: 40px; --s12: 48px;
   --rail-w: 52px;
   --top-h: 64px;
+  /* the height of the toast stack under the top bar, 0 with no toast (set by components/Toasts.svelte) */
+  --toast-room: 0px;
   --col-w: 720px;
   --sheet-w: 404px;
   --gutter: 14px;

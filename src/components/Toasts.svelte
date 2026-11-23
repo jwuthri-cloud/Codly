@@ -2,9 +2,8 @@
   The toast stack: top right, under the top bar, so it never sits on the composer's Send or a
   sheet's footer. While the agent or task sheet is open the stack moves left of it, off the
   sheet's own controls. Dialogs are drawn above it.
-  The corner is not empty: while a toast shows, it lies on the top right of the stage (the
-  last buttons of a conversation's header; a room's header buttons, which start about 70px
-  under the top bar, when the stack is taller than that).
+  A toast never lies on a control: what is under the top bar (the stage, the onboarding map,
+  the Welcome page) moves down by the stack's height (`--toast-room`) for as long as it shows.
 -->
 <script lang="ts">
   import { fade } from 'svelte/transition';
@@ -14,9 +13,15 @@
   import Kbd from './Kbd.svelte';
 
   const ICON: Record<string, string> = { success: 'check-circle', error: 'x-circle', info: 'info', progress: 'refresh', attention: 'flag' };
+
+  /** The stack's height in px, its gaps included; 0 with no toast. */
+  let height = $state(0);
+  $effect(() => {
+    document.documentElement.style.setProperty('--toast-room', `${height}px`);
+  });
 </script>
 
-<div class="stack" class:beside-sheet={ui.sheetOpen} aria-live="polite" aria-relevant="additions text">
+<div class="stack" class:beside-sheet={ui.sheetOpen} bind:clientHeight={height} aria-live="polite" aria-relevant="additions text">
   {#each toasts.list as t (t.id)}
     <div
       class="toast k-{t.kind}"
@@ -43,7 +48,9 @@
 
 <style>
   /* column-reverse: the newest toast is the one next to the top bar */
-  .stack { position: fixed; right: var(--gutter); top: calc(var(--top-h) + 4px); z-index: var(--z-toast); display: flex; flex-direction: column-reverse; gap: 8px; width: min(360px, calc(100vw - 2 * var(--gutter))); pointer-events: none; transition: right var(--d-4) var(--spring); }
+  .stack { position: fixed; right: var(--gutter); top: var(--top-h); z-index: var(--z-toast); display: flex; flex-direction: column-reverse; gap: 8px; width: min(360px, calc(100vw - 2 * var(--gutter))); pointer-events: none; transition: right var(--d-4) var(--spring); }
+  /* The gaps over and under the toasts are part of the room the stack takes; an empty stack takes none. */
+  .stack:has(.toast) { padding: 4px 0 8px; }
   .stack.beside-sheet { right: calc(var(--sheet-w) + var(--gutter) * 2); }
   .toast { pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 12px 10px 12px 14px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); animation: pop-in var(--d-3) var(--spring); }
   .ic { margin-top: 2px; color: var(--ink-2); }

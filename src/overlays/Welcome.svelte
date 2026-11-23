@@ -131,7 +131,8 @@
   .welcome { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--night); overflow: hidden; }
   .sky { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(120% 80% at 50% 125%, var(--night-glow), transparent 70%); }
   .drag { position: relative; height: 40px; flex-shrink: 0; }
-  .scroll { position: relative; flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+  /* The page gives way to the toast stack, which sits 64px under the window's top. */
+  .scroll { position: relative; flex: 1; overflow-y: auto; display: flex; flex-direction: column; padding-top: var(--toast-room); }
   .page { flex: 1; width: min(1180px, calc(100vw - 64px)); margin: 0 auto; padding: 5vh 0 32px; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 64px; align-items: start; }
   .hero { display: flex; flex-direction: column; gap: 22px; animation: rise-in var(--d-5) var(--spring) both; }
   .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: var(--w-semi); font-size: 15px; letter-spacing: 0.01em; }
