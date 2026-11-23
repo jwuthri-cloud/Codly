@@ -137,14 +137,20 @@ def after_request(name, subtype, nth=0):
 
 
 ALL = sorted(f[:-len(".ndjson")] for f in os.listdir(os.environ.get("FIXTURES_DIR") or os.path.join(OUT, "fixtures")) if f.startswith("r5-"))
-# The CLI's total for a session goes on after --resume (section 14): the four budget runs are one session.
-BUDGET = ["r5-budget-resume-" + x for x in "abcd"]
-TOTAL = cost([n for n in ALL if n not in BUDGET]) + max(r.get("total_cost_usd") or 0.0 for n in BUDGET for r in results(n))
+# The CLI's total for a session goes on after --resume (section 14): the four budget runs are one session, and so
+# are the two restart runs of section 6.
+RESUMED = [["r5-budget-resume-" + x for x in "abcd"], ["r5-sandbox-network-once-restart-" + x for x in "ab"]]
+TOTAL = (cost([n for n in ALL if not any(n in g for g in RESUMED)])
+         + sum(max(r.get("total_cost_usd") or 0.0 for n in g for r in results(n)) for g in RESUMED))
+# Section 6 got three more recordings a day after the others.
+LATER = ["r5-sandbox-network-once-later", "r5-sandbox-network-once-restart-a", "r5-sandbox-network-once-restart-b"]
+for n in ALL:
+    check(("recorded 2026-11-23." if n in LATER else "recorded 2026-11-22.") in fx(n)[0]["_note"], "the day of recording of " + n)
 
 w("""# Claude Code CLI stream-json: recorded protocol shapes, part 3
 
 - CLI: `claude` 2.1.311 (the same version as parts 1 and 2; checked with `claude --version` before the runs).
-- Recorded: 2026-11-22, macOS, `--model haiku` (`claude-haiku-5-5`), subscription login (`"apiKeySource":"none"`).
+- Recorded: 2026-11-22 (three recordings of section 6: 2026-11-23), macOS, `--model haiku` (`claude-haiku-5-5`), subscription login (`"apiKeySource":"none"`).
 - Method, base command, fixture line format and sanitizing: as in part 1 ("Base command", "Files", "Sanitizing") with
   the additions of part 2. Fixtures of this part are `fixtures/claude-2.1.311/r5-*.ndjson`; the scripts are
   `drivers/claude-stream-json/r5_*.py` (README there says how to record again).
@@ -422,37 +428,81 @@ w(block(tl(N5[1], lambda l: kind(l) in ("control_request", "sent") and "settings
 # ================================================================= 6
 w("## 6. Sandbox network: a second command to the same host\n")
 w("Question: after the first request for a host was allowed, does a second command to the same host in the same session ask again? What do `network_allowed_domains` and `updatedPermissions` show?\n")
-N6 = ["r5-sandbox-network-once", "r5-sandbox-network-rule-local", "r5-sandbox-network-rule-session"]
-w("Fixtures: `r5-sandbox-network-once` (the request is answered with a plain allow: what \"allow once\" sends), `r5-sandbox-network-rule-local` "
+N6 = ["r5-sandbox-network-once", "r5-sandbox-network-once-later", "r5-sandbox-network-rule-local", "r5-sandbox-network-rule-session"]
+N6R = ["r5-sandbox-network-once-restart-a", "r5-sandbox-network-once-restart-b"]
+w("Fixtures: `r5-sandbox-network-once` (the request is answered with a plain allow: what \"allow once\" sends), `r5-sandbox-network-once-later` "
+  "(a plain allow again, and more time before the host is used again), `r5-sandbox-network-once-restart-a` and `-b` (a plain allow in process a; "
+  "process b is `--resume` of that session in the same folder), `r5-sandbox-network-rule-local` "
   "(allow + `updatedPermissions` = the request's own suggestion), `r5-sandbox-network-rule-session` (the same with `\"destination\":\"session\"`). "
-  "Flags: %s. Turn 1 and turn 2 run `curl -sI https://example.com`, turn 3 `curl -sI https://example.org`.\n" % flags(N6[0]))
+  "Flags: %s; process b of the restart: %s.\n" % (flags(N6[0]), flags(N6R[1])))
+w("`once` and the two `rule` runs: turn 1 and turn 2 run `curl -sI https://example.com`, turn 3 `curl -sI https://example.org`. "
+  "`once-later`: after turn 1 the session runs another turn (`echo between`), the host then waits 300 s, and turns 3 and 4 are the second "
+  "`curl` to example.com and the one to example.org. `once-restart`: each of the two processes runs `curl -sI https://example.com` once.\n")
+
+
+def asks(l):
+    return kind(l) == "control_request" or (kind(l) == "sent" and l["_sent"].get("type") == "control_response") or (kind(l) == "meta" and "turn" in l["_meta"])
+
+
+def after_the_allow(name):
+    """Seconds from the host's answer to the request for example.com to the start of each later `curl` to that host
+    (times are the fixture's `_t` marks, so they are right to about 0.25 s)."""
+    out, t, allowed = [], 0.0, None
+    for l in fx(name):
+        t = l.get("_t", t)
+        if kind(l) == "sent" and (l["_sent"].get("response", {}).get("response") or {}).get("updatedInput") == {"host": "example.com"}:
+            allowed = t
+        elif allowed is not None and has_tool_use(l) and any("example.com" in b.get("input", {}).get("command", "") for b in l["message"]["content"]):
+            out.append(t - allowed)
+    return out
+
+
 w("`once`: every `can_use_tool` request with its answer, and the driver's note per turn:\n")
-w(block(tl(N6[0], lambda l: kind(l) == "control_request" or (kind(l) == "sent" and l["_sent"].get("type") == "control_response") or (kind(l) == "meta" and "turn" in l["_meta"]), maxlist=9)))
-for n in N6:
+w(block(tl(N6[0], asks, maxlist=9)))
+w("`once-later`, the same lines:\n")
+w(block(tl(N6[1], asks, maxlist=9)))
+w("`once-restart`, the same lines of process b (the resumed session):\n")
+w(block(tl(N6R[1], asks, maxlist=9)))
+REQUESTS6 = {N6[0]: [1, 0, 1], N6[1]: [1, 0, 0, 1], N6[2]: [1, 0, 1], N6[3]: [1, 0, 1], N6R[0]: [1], N6R[1]: [1]}
+for n, want in REQUESTS6.items():
     per_turn = [len(m["can_use_tool_requests"]) for m in meta(n, "can_use_tool_requests")]
-    check(per_turn == [1, 0, 1], "requests per turn of " + n)
+    check(per_turn == want, "requests per turn of " + n)
+    saved = any("_sent" in l and "updatedPermissions" in json.dumps(l) for l in fx(n))
+    check(saved == ("-rule-" in n), "which runs answer with updatedPermissions: " + n)
     for l in fx(n):
         r = (l.get("response", {}).get("response") or {}) if l.get("type") == "control_response" else {}
         if "restrictions" in r:
             check(r["restrictions"]["network_allowed_domains"] == [], "network_allowed_domains stays empty in " + n)
+check(meta(N6R[1], "can_use_tool_requests")[0]["can_use_tool_requests"] == [["SandboxNetworkAccess", "example.com", None]]
+      and "--resume" in fx(N6R[1])[0]["_argv"], "the resumed process is asked for example.com again")
+GAP = [after_the_allow(n) for n in N6[:2]]
+check(all(len(g) == 1 for g in GAP) and GAP[0][0] < 5 and GAP[1][0] >= 300, "the time between the allow and the second curl")
+GAP = [round(g[0]) for g in GAP]
 w("The answers with `updatedPermissions`, and what `list_permission_rules` and the local settings file show after turn 1:\n")
-for n in N6[1:]:
+for n in N6[2:]:
     ans = [l for l in fx(n) if "_sent" in l and l["_sent"].get("type") == "control_response" and "updatedPermissions" in json.dumps(l)][0]
     rules = [l for l in fx(n) if l.get("type") == "control_response" and "state" in (l["response"].get("response") or {})][0]
     w(block([j(ans["_sent"]), j(rules, keep=("rules",)), metas(n, "settings_local_json", maxlist=9)[0]]))
-w("""What the adapter can rely on (n=3 for the first point: the three runs agree):
-- A host that was allowed is not asked about again in the same session (process): turn 2 ran the same `curl` with NO
-  request in all three runs, also after a plain allow with no `updatedPermissions`. So "allow once" on a network
-  request lasts until the session's process ends, not for one command. Another host still asks (turn 3).
-- `get_sandbox_dialog.restrictions.network_allowed_domains` stayed `[]` in every reading, after a plain allow and
-  after a saved rule: it does not show what was allowed by answering requests.
+w("""What the adapter can rely on (each run is n=1; two runs test a plain allow inside one process):
+- After a PLAIN allow (no `updatedPermissions`) a later command to the same host did not ask again in the same
+  process. `once`: the second `curl` started %d s after the allow. `once-later`: it started %d s after the allow, with
+  another turn in between. Another host still asked (the last turn of both runs). So "allow once" on a network request
+  is not for one command only.
+- How long a plain allow lasts inside one process is recorded up to these %d s and no further. "Until the process
+  ends" fits both runs, but no recording shows it.
+- A plain allow does not outlive the process (`once-restart`, n=1): the `--resume` of the same session in the same
+  folder got the `SandboxNetworkAccess` request for `example.com` again.
+- After an allow that saved a rule (`rule-local`, `rule-session`: n=1 each) the second `curl` had no request either.
+  With a `WebFetch(domain:example.com)` rule in place, these two runs say nothing about a plain allow.
+- `get_sandbox_dialog.restrictions.network_allowed_domains` stayed `[]` in every reading of the six recordings, after
+  a plain allow and after a saved rule: it does not show what was allowed by answering requests.
 - `updatedPermissions` with the request's suggestion as sent (`destination:"localSettings"`) writes
   `{"permissions":{"allow":["WebFetch(domain:example.com)"]}}` to the work folder's `.claude/settings.local.json`, and
   `list_permission_rules` shows `{"behavior":"allow","source":"localSettings","rule":"WebFetch(domain:example.com)"}`.
   With `destination:"session"` the rule's source is `session` and no file is written.
-- Not recorded: whether a NEW process in the same folder asks again after the plain allow (expected: yes) and after
-  the saved rule (the rule is in the file the next process reads with `--setting-sources …local`).
-""")
+- Not recorded: whether a NEW process asks again after a saved rule (the `localSettings` rule is in the file the next
+  process reads with `--setting-sources …local`; a `session` rule after `--resume` is open).
+""" % (GAP[0], GAP[1], GAP[1]))
 
 # ================================================================= 7
 w("## 7. Effort: `apply_flag_settings` on a process started with `--effort high`\n")
@@ -755,7 +805,7 @@ w("""## What this means for the code that waited (as of the day of recording)
 | 3 | The watchdog's life sign (`tool_progress` arm) | yes: every recorded line has the running call's id in `parent_tool_use_id`; the arm that needs it drops nothing that was seen. A Bash call inside a helper has no heartbeat of its own: the helper's `Agent` call has |
 | 4 | Shutdown: interrupt + cancel, stop tasks, close | yes for commands (recorded as one run). partly for helpers: the turn that follows a helper's stop is not in the one-run recording |
 | 5 | "Workers' commands ask as before" with the sandbox | yes: the same commands ask with and without the sandbox when auto-allow is off; `curl` asks a second time for the host |
-| 6 | The sentence about how long a network allow lasts | yes: "for this session": a plain allow is not asked again until the process ends |
+| 6 | The sentence about how long a network allow lasts | yes, as far as recorded: after a plain allow the host was not asked about again in the same process (%d s and %d s later, n=1 each), and it was asked about again after a restart with `--resume` (n=1). Not recorded: longer than %d s inside one process |
 | 7 | Dropping the restart for an effort-only switch | partly: the setting changes and `null` falls to `medium`, not to the start flag (so the host must always send a level). That the model request uses it is not visible in any line |
 | 8 | The model notice | yes: compare model names with the date suffix removed; a mid-turn switch shows on the next assistant line of the same turn |
 | 9 | Keeping or dropping the session id after a start that "succeeded" | yes: with `initialize` awaited, a missing session never answers it (5 of 5) |
@@ -765,7 +815,7 @@ w("""## What this means for the code that waited (as of the day of recording)
 | 13 | The approval rules text for workers | yes |
 | 14 | The spending limit across a restart | yes: the limit is per process, the reported total is per session |
 | 15 | The worker rule about background commands | partly: the wording worked 3 of 3 against 0 of 3, on one tiny task |
-""")
+""" % (GAP[0], GAP[1], GAP[1]))
 
 # ================================================================= table
 w("""## Table: question -> answer -> fixture
@@ -777,7 +827,7 @@ w("""## Table: question -> answer -> fixture
 | 3 | `tool_progress` for other tools | Same heartbeat line: `tool_use_id` `<call id>-heartbeat-N`, `parent_tool_use_id` = the call id (never null), `tool_name` = the tool, at 30, 60, 90 s. MCP tool and `Agent` recorded; a Bash call inside a helper has none; WebFetch not recorded | 1 each | `r5-tool-progress-mcp`, `-subagent`, `-webfetch` |
 | 4 | Stop sequence; three waiting; folded | Sequence works: 0.2 s to the stopped turn's `result` and the task's stop, exit about 1 s after stdin close, exit code 1, nothing left running. Three waiting: `still_queued` in written order; plain = ONE turn with all three; `cancel_queued` = three `cancelled` lines before the answer. Folded: not in the answer, `cancelled` with the turn, not run again | 1 each | `r5-stop-sequence`, `r5-stop-three-plain`, `-cancel`, `r5-stop-folded-plain`, `-cancel` |
 | 5 | Sandbox + no auto-allow: `git push`, `curl` | Both ask, in `acceptEdits` and in `manual`, exactly as with the sandbox off; `curl` then also gets the network request | 1 per mode | `r5-commands-noauto`, `r5-commands-manual-noauto` (against `r5-commands-off`, `r5-commands-manual-off`) |
-| 6 | Second command to an allowed host | Not asked again in the same process, also after a plain allow. `network_allowed_domains` stays `[]`. `updatedPermissions` saves `WebFetch(domain:…)` (local file or session) | 3 | `r5-sandbox-network-once`, `-rule-local`, `-rule-session` |
+| 6 | Second command to an allowed host | After a plain allow: not asked again in the same process (%d s later; %d s later with another turn in between), asked again in a new process that resumes the session. After a saved rule: not asked again. `network_allowed_domains` stays `[]`. `updatedPermissions` saves `WebFetch(domain:…)` (local file or session) | 1 per run (plain allow in one process: 2) | `r5-sandbox-network-once`, `-once-later`, `-once-restart-a`, `-b`, `-rule-local`, `-rule-session` |
 | 7 | Effort on a `--effort high` process | `get_settings` shows the new level at once; `null` gives `medium`, not the start flag's `high`. The turn's use of it: not visible | 1 | `r5-effort-started-high`, `-none` |
 | 8 | Model after `set_model`; init vs message | Mid-turn switch: next assistant line of the same turn is on the new model; next `init.model` too. `default` -> opus. `init.model` = `message.model` except for an undated name of a dated model (`claude-haiku-4-5` vs `claude-haiku-4-5-20251001`) | 1 each | `r5-model-midturn`, `r5-model-start-alias`, `-full`, `-dated`, `-undated` |
 | 9 | `--resume` unknown id + `initialize` | No `initialize` answer in 5 of 5: one error `result`, the stderr sentence, exit 1 | 5 | `r5-resume-missing-1` … `-5` |
@@ -806,7 +856,8 @@ Open after these recordings:
 - 4: the sequence when the interrupt arrives between two tool calls; `interrupt` with `send_now`; a folded message
   when the interrupt comes within the bundle's `requeue_if_interrupted_within_ms`.
 - 5: commands other than the eight; a `git push` to a real remote (the network request then names the host).
-- 6: a new process in the same folder after a plain allow; a host denied once (is it asked again?).
+- 6: how long a plain allow lasts inside one process beyond the %d s recorded (hours later, after a compaction);
+  a new process after a saved rule; a host denied once (is it asked again?).
 - 7: whether a model request really carries the level that `get_settings` shows (no line says it; a proxy that sees
   the request would).
 - 8: a turn that falls back to another model by itself (`--fallback-model`); the names for sonnet and opus aliases
@@ -821,7 +872,7 @@ Open after these recordings:
 - 14: a budget that runs out in the middle of a long turn of a resumed process (part 1 has it for a new one); what
   exactly the CLI tells the model about the budget.
 - 15: everything beyond six tiny haiku runs.
-""")
+""" % (GAP[0], GAP[1], GAP[1]))
 
 out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(OUT, "NOTES-part3.md")
 with open(out, "w") as f:

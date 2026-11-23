@@ -12,7 +12,7 @@ Python 3.11 or newer, standard library only. They start the real `claude` CLI wi
 - Every run spends tokens of the logged-in account. All scripts pass `--model haiku` and use tiny prompts. At list
   price (sum of `total_cost_usd` of the `result` lines) part 1 cost 0.12 USD and part 2 cost 0.18 USD (0.19 USD with
   the runs that were recorded again); 0.11 USD of part 2 is one plan-mode turn that the CLI ran on sonnet by itself.
-  Part 3 cost 0.17 USD (about 0.22 USD with the runs that were recorded again); 0.08 USD of it is
+  Part 3 cost 0.18 USD (about 0.23 USD with the runs that were recorded again); 0.08 USD of it is
   `r5_c8_model_switch.py midturn`, the one script that leaves haiku on purpose (two model requests on sonnet, one on
   the account's default model), and 0.03 USD are two one-turn starts on `claude-haiku-4-5`.
   `cost.py` sums your recordings (a session that is resumed in several recordings is counted once per recording,
@@ -31,9 +31,12 @@ Python 3.11 or newer, standard library only. They start the real `claude` CLI wi
   `login-flag-disabled`) start the CLI with `HOME` set to a new folder under `$CAPTURE_DIR/work`, so that "user
   settings" are the scenario's own files and never yours. Such a CLI is not logged in: its turns end with "Not
   logged in" and cost nothing. No script copies or reads credentials to get around that.
-- `r4_b7_process_groups.py`, `r4_b6_background_life.py` and the part 3 scripts that start `sleep` or a tick script
-  through the CLI (`r5_a4`, `r5_b1`, `r5_b2`, `r5_f15`) kill what they started. They never touch a process that
-  existed before the run.
+- `r4_b7_process_groups.py`, `r4_b6_background_life.py` and the part 3 scripts that start a long `sleep` or a tick
+  script through the CLI (`r5_a4`, `r5_b1`, `r5_f15`) kill what they started. They find it by its command line
+  (`sleep 113`, `sleep 307`, `sleep 61`, `tick_<run>.sh`: values chosen so that nothing else on the machine has them)
+  and never touch a process that existed before the run. If you add a script, keep to that: a pattern like
+  `sleep 20` would also end another program's `sleep 20` that started during the run. `r5_b2` kills nothing: its
+  commands end by themselves within 20 s.
 - `r4_e18_mcp_needs_auth.py` listens on `127.0.0.1:48731` (`FAKE_MCP_PORT` changes it) for the time of the run.
 - Sandbox scripts (`s09`, `r4_d14` … `r4_d17`, `r5_c13`, `r5_d6`): the CLI's sandbox lets commands write under its
   own temp folder (`/tmp/claude-<uid>/`). If `CAPTURE_DIR` is inside that folder, "outside the work dir" probes prove
@@ -145,7 +148,7 @@ Part 3 scenarios (`r5_*.py` -> fixtures `r5-*`; the number in a script's name is
 | `r5_b3_tool_progress_other.py` | mcp, subagent, webfetch | `r5-tool-progress-*` | 3 |
 | `r5_a4_stop_sequence.py` | sequence, three-plain, three-cancel, folded-plain, folded-cancel | `r5-stop-*` | 4 |
 | `r5_c13_commands_that_ask.py` | off, noauto, manual-off, manual-noauto | `r5-commands-*` | 5, 13 |
-| `r5_d6_sandbox_network_again.py` | once, rule-local, rule-session | `r5-sandbox-network-*` | 6 |
+| `r5_d6_sandbox_network_again.py` | once, once-later (waits 300 s: about 6 minutes), once-restart (two processes: fixtures `-a`, `-b`), rule-local, rule-session | `r5-sandbox-network-*` | 6 |
 | `r5_c7_effort_started_high.py` | high, none | `r5-effort-started-*` | 7 |
 | `r5_c8_model_switch.py` | midturn, start-alias, start-full, start-dated, start-undated | `r5-model-*` | 8 |
 | `r5_f9_resume_missing.py` | (five runs in one call) | `r5-resume-missing-1` … `-5` | 9 |

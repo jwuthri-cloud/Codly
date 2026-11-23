@@ -1,11 +1,11 @@
 # Claude Code CLI stream-json: recorded protocol shapes, part 3
 
 - CLI: `claude` 2.1.311 (the same version as parts 1 and 2; checked with `claude --version` before the runs).
-- Recorded: 2026-11-22, macOS, `--model haiku` (`claude-haiku-5-5`), subscription login (`"apiKeySource":"none"`).
+- Recorded: 2026-11-22 (three recordings of section 6: 2026-11-23), macOS, `--model haiku` (`claude-haiku-5-5`), subscription login (`"apiKeySource":"none"`).
 - Method, base command, fixture line format and sanitizing: as in part 1 ("Base command", "Files", "Sanitizing") with
   the additions of part 2. Fixtures of this part are `fixtures/claude-2.1.311/r5-*.ndjson`; the scripts are
   `drivers/claude-stream-json/r5_*.py` (README there says how to record again).
-- List price of the 50 recordings (sum of `total_cost_usd` of their `result` lines): 0.17 USD. 0.08 USD of it is the one
+- List price of the 53 recordings (sum of `total_cost_usd` of their `result` lines): 0.18 USD. 0.08 USD of it is the one
   recording that leaves haiku on purpose (section 8: two model requests on sonnet and one on the account's default model).
 - Everything below was observed in these recordings. Where a statement comes from reading the CLI bundle and not from a
   recording, it says "bundle, not recorded". Each answer says how many runs it rests on (n). Most are n=1.
@@ -538,7 +538,9 @@ The shell write to the local settings file with the sandbox on (request, answer,
 
 Question: after the first request for a host was allowed, does a second command to the same host in the same session ask again? What do `network_allowed_domains` and `updatedPermissions` show?
 
-Fixtures: `r5-sandbox-network-once` (the request is answered with a plain allow: what "allow once" sends), `r5-sandbox-network-rule-local` (allow + `updatedPermissions` = the request's own suggestion), `r5-sandbox-network-rule-session` (the same with `"destination":"session"`). Flags: `--permission-mode acceptEdits --strict-mcp-config --setting-sources local --tools Bash --settings '{"sandbox": {"enabled": true}}'`. Turn 1 and turn 2 run `curl -sI https://example.com`, turn 3 `curl -sI https://example.org`.
+Fixtures: `r5-sandbox-network-once` (the request is answered with a plain allow: what "allow once" sends), `r5-sandbox-network-once-later` (a plain allow again, and more time before the host is used again), `r5-sandbox-network-once-restart-a` and `-b` (a plain allow in process a; process b is `--resume` of that session in the same folder), `r5-sandbox-network-rule-local` (allow + `updatedPermissions` = the request's own suggestion), `r5-sandbox-network-rule-session` (the same with `"destination":"session"`). Flags: `--permission-mode acceptEdits --strict-mcp-config --setting-sources local --tools Bash --settings '{"sandbox": {"enabled": true}}'`; process b of the restart: `--permission-mode acceptEdits --strict-mcp-config --setting-sources local --tools Bash --settings '{"sandbox": {"enabled": true}}' --resume sess-1`.
+
+`once` and the two `rule` runs: turn 1 and turn 2 run `curl -sI https://example.com`, turn 3 `curl -sI https://example.org`. `once-later`: after turn 1 the session runs another turn (`echo between`), the host then waits 300 s, and turns 3 and 4 are the second `curl` to example.com and the one to example.org. `once-restart`: each of the two processes runs `curl -sI https://example.com` once.
 
 `once`: every `can_use_tool` request with its answer, and the driver's note per turn:
 
@@ -559,6 +561,38 @@ Fixtures: `r5-sandbox-network-once` (the request is answered with a plain allow:
 {"_meta":{"turn":3,"can_use_tool_requests":[["SandboxNetworkAccess","example.org",null]],"settings_local_json":null},"_t":9.458}
 ```
 
+`once-later`, the same lines:
+
+```json
+# t=3.52
+{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"SandboxNetworkAccess","display_name":"SandboxNetworkAccess","input":{"host":"example.com"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"WebFetch","ruleContent":"domain:example.com"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"uuid-19","description":"Allow network connection to example.com?"}}
+# t=3.52
+{"_sent":{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"allow","updatedInput":{"host":"example.com"}}}},"_t":3.519}
+# t=4.59
+{"_meta":{"turn":1,"can_use_tool_requests":[["SandboxNetworkAccess","example.com",null]],"settings_local_json":null},"_t":4.588}
+# t=6.25
+{"_meta":{"turn":2,"can_use_tool_requests":[],"settings_local_json":null},"_t":6.25}
+# t=309.18
+{"_meta":{"turn":3,"can_use_tool_requests":[],"settings_local_json":null},"_t":309.183}
+# t=310.31
+{"type":"control_request","request_id":"req-2","request":{"subtype":"can_use_tool","tool_name":"SandboxNetworkAccess","display_name":"SandboxNetworkAccess","input":{"host":"example.org"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"WebFetch","ruleContent":"domain:example.org"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"uuid-114","description":"Allow network connection to example.org?"}}
+# t=310.31
+{"_sent":{"type":"control_response","response":{"subtype":"success","request_id":"req-2","response":{"behavior":"allow","updatedInput":{"host":"example.org"}}}},"_t":310.314}
+# t=311.04
+{"_meta":{"turn":4,"can_use_tool_requests":[["SandboxNetworkAccess","example.org",null]],"settings_local_json":null},"_t":311.04}
+```
+
+`once-restart`, the same lines of process b (the resumed session):
+
+```json
+# t=2.74
+{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"SandboxNetworkAccess","display_name":"SandboxNetworkAccess","input":{"host":"example.com"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"WebFetch","ruleContent":"domain:example.com"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"uuid-16","description":"Allow network connection to example.com?"}}
+# t=2.74
+{"_sent":{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"allow","updatedInput":{"host":"example.com"}}}},"_t":2.738}
+# t=3.96
+{"_meta":{"turn":1,"can_use_tool_requests":[["SandboxNetworkAccess","example.com",null]],"settings_local_json":null},"_t":3.962}
+```
+
 The answers with `updatedPermissions`, and what `list_permission_rules` and the local settings file show after turn 1:
 
 ```json
@@ -573,18 +607,25 @@ The answers with `updatedPermissions`, and what `list_permission_rules` and the 
 {"_meta":{"turn":1,"can_use_tool_requests":[["SandboxNetworkAccess","example.com",null]],"settings_local_json":null},"_t":4.715}
 ```
 
-What the adapter can rely on (n=3 for the first point: the three runs agree):
-- A host that was allowed is not asked about again in the same session (process): turn 2 ran the same `curl` with NO
-  request in all three runs, also after a plain allow with no `updatedPermissions`. So "allow once" on a network
-  request lasts until the session's process ends, not for one command. Another host still asks (turn 3).
-- `get_sandbox_dialog.restrictions.network_allowed_domains` stayed `[]` in every reading, after a plain allow and
-  after a saved rule: it does not show what was allowed by answering requests.
+What the adapter can rely on (each run is n=1; two runs test a plain allow inside one process):
+- After a PLAIN allow (no `updatedPermissions`) a later command to the same host did not ask again in the same
+  process. `once`: the second `curl` started 2 s after the allow. `once-later`: it started 304 s after the allow, with
+  another turn in between. Another host still asked (the last turn of both runs). So "allow once" on a network request
+  is not for one command only.
+- How long a plain allow lasts inside one process is recorded up to these 304 s and no further. "Until the process
+  ends" fits both runs, but no recording shows it.
+- A plain allow does not outlive the process (`once-restart`, n=1): the `--resume` of the same session in the same
+  folder got the `SandboxNetworkAccess` request for `example.com` again.
+- After an allow that saved a rule (`rule-local`, `rule-session`: n=1 each) the second `curl` had no request either.
+  With a `WebFetch(domain:example.com)` rule in place, these two runs say nothing about a plain allow.
+- `get_sandbox_dialog.restrictions.network_allowed_domains` stayed `[]` in every reading of the six recordings, after
+  a plain allow and after a saved rule: it does not show what was allowed by answering requests.
 - `updatedPermissions` with the request's suggestion as sent (`destination:"localSettings"`) writes
   `{"permissions":{"allow":["WebFetch(domain:example.com)"]}}` to the work folder's `.claude/settings.local.json`, and
   `list_permission_rules` shows `{"behavior":"allow","source":"localSettings","rule":"WebFetch(domain:example.com)"}`.
   With `destination:"session"` the rule's source is `session` and no file is written.
-- Not recorded: whether a NEW process in the same folder asks again after the plain allow (expected: yes) and after
-  the saved rule (the rule is in the file the next process reads with `--setting-sources …local`).
+- Not recorded: whether a NEW process asks again after a saved rule (the `localSettings` rule is in the file the next
+  process reads with `--setting-sources …local`; a `session` rule after `--resume` is open).
 
 ## 7. Effort: `apply_flag_settings` on a process started with `--effort high`
 
@@ -1066,7 +1107,7 @@ What this shows (n=3 with the sentence, n=3 without; WEAK evidence):
 | 3 | The watchdog's life sign (`tool_progress` arm) | yes: every recorded line has the running call's id in `parent_tool_use_id`; the arm that needs it drops nothing that was seen. A Bash call inside a helper has no heartbeat of its own: the helper's `Agent` call has |
 | 4 | Shutdown: interrupt + cancel, stop tasks, close | yes for commands (recorded as one run). partly for helpers: the turn that follows a helper's stop is not in the one-run recording |
 | 5 | "Workers' commands ask as before" with the sandbox | yes: the same commands ask with and without the sandbox when auto-allow is off; `curl` asks a second time for the host |
-| 6 | The sentence about how long a network allow lasts | yes: "for this session": a plain allow is not asked again until the process ends |
+| 6 | The sentence about how long a network allow lasts | yes, as far as recorded: after a plain allow the host was not asked about again in the same process (2 s and 304 s later, n=1 each), and it was asked about again after a restart with `--resume` (n=1). Not recorded: longer than 304 s inside one process |
 | 7 | Dropping the restart for an effort-only switch | partly: the setting changes and `null` falls to `medium`, not to the start flag (so the host must always send a level). That the model request uses it is not visible in any line |
 | 8 | The model notice | yes: compare model names with the date suffix removed; a mid-turn switch shows on the next assistant line of the same turn |
 | 9 | Keeping or dropping the session id after a start that "succeeded" | yes: with `initialize` awaited, a missing session never answers it (5 of 5) |
@@ -1086,7 +1127,7 @@ What this shows (n=3 with the sentence, n=3 without; WEAK evidence):
 | 3 | `tool_progress` for other tools | Same heartbeat line: `tool_use_id` `<call id>-heartbeat-N`, `parent_tool_use_id` = the call id (never null), `tool_name` = the tool, at 30, 60, 90 s. MCP tool and `Agent` recorded; a Bash call inside a helper has none; WebFetch not recorded | 1 each | `r5-tool-progress-mcp`, `-subagent`, `-webfetch` |
 | 4 | Stop sequence; three waiting; folded | Sequence works: 0.2 s to the stopped turn's `result` and the task's stop, exit about 1 s after stdin close, exit code 1, nothing left running. Three waiting: `still_queued` in written order; plain = ONE turn with all three; `cancel_queued` = three `cancelled` lines before the answer. Folded: not in the answer, `cancelled` with the turn, not run again | 1 each | `r5-stop-sequence`, `r5-stop-three-plain`, `-cancel`, `r5-stop-folded-plain`, `-cancel` |
 | 5 | Sandbox + no auto-allow: `git push`, `curl` | Both ask, in `acceptEdits` and in `manual`, exactly as with the sandbox off; `curl` then also gets the network request | 1 per mode | `r5-commands-noauto`, `r5-commands-manual-noauto` (against `r5-commands-off`, `r5-commands-manual-off`) |
-| 6 | Second command to an allowed host | Not asked again in the same process, also after a plain allow. `network_allowed_domains` stays `[]`. `updatedPermissions` saves `WebFetch(domain:…)` (local file or session) | 3 | `r5-sandbox-network-once`, `-rule-local`, `-rule-session` |
+| 6 | Second command to an allowed host | After a plain allow: not asked again in the same process (2 s later; 304 s later with another turn in between), asked again in a new process that resumes the session. After a saved rule: not asked again. `network_allowed_domains` stays `[]`. `updatedPermissions` saves `WebFetch(domain:…)` (local file or session) | 1 per run (plain allow in one process: 2) | `r5-sandbox-network-once`, `-once-later`, `-once-restart-a`, `-b`, `-rule-local`, `-rule-session` |
 | 7 | Effort on a `--effort high` process | `get_settings` shows the new level at once; `null` gives `medium`, not the start flag's `high`. The turn's use of it: not visible | 1 | `r5-effort-started-high`, `-none` |
 | 8 | Model after `set_model`; init vs message | Mid-turn switch: next assistant line of the same turn is on the new model; next `init.model` too. `default` -> opus. `init.model` = `message.model` except for an undated name of a dated model (`claude-haiku-4-5` vs `claude-haiku-4-5-20251001`) | 1 each | `r5-model-midturn`, `r5-model-start-alias`, `-full`, `-dated`, `-undated` |
 | 9 | `--resume` unknown id + `initialize` | No `initialize` answer in 5 of 5: one error `result`, the stderr sentence, exit 1 | 5 | `r5-resume-missing-1` … `-5` |
@@ -1115,7 +1156,8 @@ Open after these recordings:
 - 4: the sequence when the interrupt arrives between two tool calls; `interrupt` with `send_now`; a folded message
   when the interrupt comes within the bundle's `requeue_if_interrupted_within_ms`.
 - 5: commands other than the eight; a `git push` to a real remote (the network request then names the host).
-- 6: a new process in the same folder after a plain allow; a host denied once (is it asked again?).
+- 6: how long a plain allow lasts inside one process beyond the 304 s recorded (hours later, after a compaction);
+  a new process after a saved rule; a host denied once (is it asked again?).
 - 7: whether a model request really carries the level that `get_settings` shows (no line says it; a proxy that sees
   the request would).
 - 8: a turn that falls back to another model by itself (`--fallback-model`); the names for sonnet and opus aliases

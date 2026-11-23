@@ -53,7 +53,8 @@ def task_started(s, start=0, timeout=60, task_type=None, background=None):
 
 class Procs:
     """Processes whose command line matches a pattern and that did not exist before the run.
-    Write the pattern so that it cannot match itself (`[s]leep 113`)."""
+    Write the pattern so that it cannot match itself (`[s]leep 113`), and so that only what the scenario starts can
+    match it (an unusual duration, a file name of the run): kill_left() ends every new match, whoever started it."""
 
     def __init__(self, pattern):
         self.pattern = pattern

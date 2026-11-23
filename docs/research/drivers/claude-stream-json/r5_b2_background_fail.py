@@ -7,8 +7,7 @@ Turn 4 runs a foreground Bash call (`echo a; sleep 20; echo b`); 8 s into it the
 """
 import time
 from drv import Session
-from r5_lib import Procs, ask, open_tasks, results, task_started
-sleeps = Procs("[s]leep 20$")
+from r5_lib import ask, open_tasks, results, task_started
 s = Session("r5-background-fail", extra=["--tools", "Bash,Agent"], hard_timeout=240)
 
 def lists(start):
@@ -44,4 +43,3 @@ time.sleep(1.0)
 s.note(lists_of_turn_4_and_after=lists(m), results_seen=results(s))
 print("results:", results(s), "cost:", s.cost())
 print("exit:", s.close(wait=30))
-print("killed leftovers:", sleeps.kill_left())
