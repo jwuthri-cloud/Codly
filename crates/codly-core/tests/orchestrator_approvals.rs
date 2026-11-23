@@ -1005,7 +1005,7 @@ fn the_own_folder_floor_adds_nothing_outside_full_access() {
 mod what_you_said {
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SpawnSpec};
@@ -1070,6 +1070,7 @@ mod what_you_said {
                 let handle = AgentHandle { agent_id: agent_id.clone(), run_id: run_id.clone(), tx };
                 tokio::spawn(async move {
                     while let Some(cmd) = rx.recv().await {
+                        hear(&agent_id, &cmd);
                         match cmd {
                             AgentCmd::Prompt(text) => {
                                 send(EventKind::TurnStarted { input: Some(text.clone()) });
@@ -1083,7 +1084,7 @@ mod what_you_said {
                                         call_id: Some("c1".into()),
                                         subject,
                                         reason: None,
-                                        choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny],
+                                        choices: vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel],
                                         risks: vec![],
                                         status: ApprovalStatus::Pending,
                                         decided_by: None,
@@ -1091,7 +1092,11 @@ mod what_you_said {
                                     };
                                     send(EventKind::ApprovalRequested { approval });
                                     // The answer arrives as the next command; a stop ends the process.
-                                    if let Some(AgentCmd::Shutdown) = rx.recv().await {
+                                    let answer = rx.recv().await;
+                                    if let Some(answer) = &answer {
+                                        hear(&agent_id, answer);
+                                    }
+                                    if let Some(AgentCmd::Shutdown) = answer {
                                         tokio::time::sleep(Duration::from_secs(1)).await;
                                         send(EventKind::Exited { code: Some(0) });
                                         break;
@@ -1125,10 +1130,15 @@ mod what_you_said {
 
     /// A started core with one hired 1:1 Claude agent (balanced mode, the default).
     async fn one_agent(dir: &Path) -> (Arc<Core>, String) {
+        one_agent_on(dir, Provider::Claude).await
+    }
+
+    /// The same, with the agent on `provider`.
+    async fn one_agent_on(dir: &Path, provider: Provider) -> (Arc<Core>, String) {
         let repo = temp_repo(dir);
         let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-        let claude = CliInfo {
-            provider: Provider::Claude,
+        let cli = CliInfo {
+            provider,
             path: Some("/usr/bin/true".into()),
             version: Some("fake".into()),
             logged_in: Some(true),
@@ -1136,14 +1146,37 @@ mod what_you_said {
             plan: None,
             problem: None,
             transport: "fake".into(),
-            install: codly_core::env::install_hint(Provider::Claude),
+            install: codly_core::env::install_hint(provider),
             default_model: None,
         };
-        let opts = StartOptions { spawner: Some(Arc::new(Fake)), env: Some(std::env::vars().collect()), clis: Some(vec![claude]), index: false };
+        let opts = StartOptions { spawner: Some(Arc::new(Fake)), env: Some(std::env::vars().collect()), clis: Some(vec![cli]), index: false };
         let core = Core::start_with(cfg, opts).await.unwrap();
         core.open_workspace(repo.to_str().unwrap()).await.unwrap();
-        let agent = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+        let agent = core.hire_agent(provider, None, None).await.unwrap();
         (core, agent.id)
+    }
+
+    /// What the agent's process was told, in order: "prompt: <text>" or "answer: <choice>".
+    static HEARD: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    fn hear(agent: &str, cmd: &AgentCmd) {
+        let what = match cmd {
+            AgentCmd::Prompt(text) => format!("prompt: {text}"),
+            AgentCmd::Approval { decision, .. } => format!("answer: {:?}", decision.choice),
+            _ => return,
+        };
+        HEARD.lock().unwrap().push((agent.to_string(), what));
+    }
+
+    fn heard(agent: &str) -> Vec<String> {
+        HEARD.lock().unwrap().iter().filter(|(a, _)| a == agent).map(|(_, what)| what.clone()).collect()
+    }
+
+    const NOTE: &str = "About the request I just denied:";
+
+    /// The prompts the agent was sent with the note of a deny.
+    fn notes(agent: &str) -> Vec<String> {
+        heard(agent).into_iter().filter(|h| h.starts_with("prompt: ") && h.contains(NOTE)).collect()
     }
 
     /// Make the agent ask (once its last turn is over), and wait for the request.
@@ -1189,6 +1222,51 @@ mod what_you_said {
         let again = ask(&core, &agent, "command").await;
         core.resolve_approval(&again.id, ApprovalDecision { choice: ApprovalChoice::Deny, message: None, answers: None }).await.unwrap();
         assert_eq!(rows(&core, &again).await, [resolved(&again, "denied")]);
+        // Claude Code took the note with the deny: no message of yours follows it (one would
+        // have come before the second request).
+        assert_eq!(notes(&agent), Vec::<String>::new());
+        core.shutdown().await;
+    }
+
+    /// Codex takes no note with its answer: after the decline, the note goes to the agent as
+    /// your message, and it is on record once it went out. A cancel ("stop the turn") sends
+    /// no message, and nor does a request that expired.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_note_of_a_deny_reaches_an_agent_whose_cli_takes_no_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, agent) = one_agent_on(dir.path(), Provider::Codex).await;
+
+        let command = ask(&core, &agent, "command").await;
+        core.resolve_approval(&command.id, ApprovalDecision { choice: ApprovalChoice::Deny, message: Some("  use pnpm run gen  ".into()), answers: None }).await.unwrap();
+        let text = format!("{NOTE} use pnpm run gen");
+        let sent = wait_for("the note to reach the agent", async || Some(notes(&agent)).filter(|n| !n.is_empty())).await;
+        assert_eq!(sent.len(), 1, "one message: {:?}", heard(&agent));
+        assert!(sent[0].ends_with(&text), "{}", sent[0]);
+        let all = heard(&agent);
+        let (answer, note) = (all.iter().position(|h| h == "answer: Deny").unwrap(), all.iter().position(|h| *h == sent[0]).unwrap());
+        assert!(answer < note, "the decline first, then the note: {all:?}");
+        let said = json!({ "type": "approval_said", "approval_id": command.id, "note": "use pnpm run gen", "answer": null, "plan_changed": false });
+        assert_eq!(rows(&core, &command).await, [resolved(&command, "denied"), said]);
+        // Your message is in the agent's thread, as one you typed there.
+        let thread = core.thread_events(&format!("agent:{agent}"), Some(&agent), None, 2000).await.unwrap();
+        assert!(thread.iter().any(|e| matches!(&e.kind, EventKind::Chat { message } if message.author == "user" && message.text == text)));
+
+        // "Stop the turn" with a note: the note goes nowhere, and is not on record.
+        let stop = ask(&core, &agent, "command").await;
+        core.resolve_approval(&stop.id, ApprovalDecision { choice: ApprovalChoice::Cancel, message: Some("stop here".into()), answers: None }).await.unwrap();
+        assert_eq!(rows(&core, &stop).await, [resolved(&stop, "cancelled")]);
+        // The next request comes after anything sent for that one.
+        let last = ask(&core, &agent, "command").await;
+        assert_eq!(notes(&agent).len(), 1, "{:?}", heard(&agent));
+
+        // A request whose agent was stopped meanwhile expires: nothing is sent, nothing starts.
+        core.stop_agent(&agent).await.unwrap();
+        let no = ApprovalDecision { choice: ApprovalChoice::Deny, message: Some("use pnpm run gen".into()), answers: None };
+        let refused = core.resolve_approval(&last.id, no).await.expect_err("a stopped agent takes no answer").to_string();
+        assert_eq!(refused, "the agent that asked is no longer running; the request expired");
+        assert_eq!(rows(&core, &last).await, [resolved(&last, "expired")]);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(notes(&agent).len(), 1, "{:?}", heard(&agent));
         core.shutdown().await;
     }
 

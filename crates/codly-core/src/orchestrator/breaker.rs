@@ -170,6 +170,11 @@ impl Budget {
         };
         format!("paused: {which} is used up; raise it or press Reset counters in Settings → Autonomy & Budgets")
     }
+
+    /// Why an agent's turn stopped at the budget: the count, and the way out.
+    pub fn reached(&self) -> String {
+        format!("Budget reached: {}. To go on, raise the budget or press Reset counters in Settings → Autonomy & Budgets.", self.reason())
+    }
 }
 
 /// The budget the team is over, tokens first. A limit of 0 is off, and so is every limit of a
@@ -185,6 +190,18 @@ pub fn over_budget(cfg: &BreakerConfig, used: Spent) -> Option<Budget> {
         return Some(Budget::Cost { used: used.cost_usd, limit: cfg.cost_budget_usd });
     }
     None
+}
+
+/// What is left of the cost budget, in dollars rounded up to a cent: the limit a Claude run
+/// gets as its own (`SpawnSpec::max_budget_usd`). None: the breaker is off, no cost budget is
+/// set, or nothing is left.
+pub fn rest_usd(cfg: &BreakerConfig, used: Spent) -> Option<f64> {
+    let rest = cfg.cost_budget_usd - used.cost_usd;
+    if !cfg.enabled || cfg.cost_budget_usd <= 0.0 || rest <= 0.0 {
+        return None;
+    }
+    // A hair under a cent is a rounding error of the subtraction (1.00 - 0.40), not one more cent.
+    Some(((rest * 100.0 - 1e-6).ceil() / 100.0).max(0.01))
 }
 
 // ───────────────────────────── the policy ─────────────────────────────
@@ -856,6 +873,24 @@ mod tests {
         // The reason a waiting task shows does not move with the count.
         assert_eq!(over_budget(&c, used(1_900_000, 0.0)).unwrap().hold(), tokens.hold());
         assert_eq!(over_budget(&BreakerConfig { enabled: false, ..c }, used(i64::MAX, f64::MAX)), None, "a breaker that is off holds nothing");
+        assert_eq!(
+            cost.reached(),
+            "Budget reached: the team has used about $5.01, over the cost budget of $5.00. To go on, raise the budget or press Reset counters in Settings → Autonomy & Budgets."
+        );
+    }
+
+    #[test]
+    fn a_claude_run_gets_what_is_left_of_the_cost_budget_rounded_up_to_a_cent() {
+        let c = BreakerConfig { cost_budget_usd: 1.0, ..cfg() };
+        assert_eq!(rest_usd(&c, used(0, 0.4)), Some(0.6));
+        assert_eq!(rest_usd(&c, used(0, 0.0)), Some(1.0));
+        assert_eq!(rest_usd(&c, used(0, 0.123)), Some(0.88), "up, never down");
+        assert_eq!(rest_usd(&c, used(0, 0.999_999)), Some(0.01), "a last part of a cent is a cent");
+        // Nothing left, no cost budget, or a breaker that is off: no limit of its own.
+        assert_eq!(rest_usd(&c, used(0, 1.0)), None);
+        assert_eq!(rest_usd(&c, used(0, 1.2)), None);
+        assert_eq!(rest_usd(&BreakerConfig { token_budget: 1000, ..cfg() }, used(0, 0.4)), None);
+        assert_eq!(rest_usd(&BreakerConfig { enabled: false, ..c }, used(0, 0.4)), None);
     }
 
     #[test]

@@ -27,13 +27,16 @@ pub(super) enum Failure {
     Exit { code: Option<i64>, error: Option<String> },
     /// Its turn failed with this error, which says the session's context is full.
     ContextFull(String),
+    /// Its run reached the cost limit it started with, so it could do no more work
+    /// (`breaker_run.rs`): why, for the task's reason.
+    Limit(String),
 }
 
 impl Failure {
     /// The CLI's own words, if any.
     fn error(&self) -> Option<&str> {
         match self {
-            Failure::Start(e) | Failure::ContextFull(e) => Some(e),
+            Failure::Start(e) | Failure::ContextFull(e) | Failure::Limit(e) => Some(e),
             Failure::Exit { error, .. } => error.as_deref(),
         }
     }
@@ -41,7 +44,7 @@ impl Failure {
     /// The session is full: the next run starts a new one.
     fn context_full(&self) -> bool {
         match self {
-            Failure::Start(_) => false,
+            Failure::Start(_) | Failure::Limit(_) => false,
             Failure::ContextFull(_) => true,
             Failure::Exit { error, .. } => error.as_deref().is_some_and(context_full),
         }
@@ -56,6 +59,7 @@ impl Failure {
     fn what(&self) -> String {
         match self {
             Failure::Start(e) => format!("could not start the worker: {e}"),
+            Failure::Limit(why) => why.clone(),
             Failure::Exit { code, .. } if !self.context_full() => {
                 format!("the worker exited unexpectedly ({})", code.map_or("a signal".to_string(), |c| format!("exit {c}")))
             }

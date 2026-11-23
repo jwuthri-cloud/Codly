@@ -367,10 +367,20 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
     if let Some(settings) = settings_json(spec) {
         a.extend(["--settings".into(), settings.to_string()]);
     }
+    if let Some(usd) = spec.max_budget_usd {
+        a.extend(["--max-budget-usd".into(), usd.to_string()]);
+    }
     let role = format!("{:?}", spec.role).to_lowercase();
     let short: String = spec.agent_id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
     a.extend(["-n".into(), format!("codly:{role}-{short}")]);
     a
+}
+
+/// Why a turn failed that reached the limit its run started with (`SpawnSpec::max_budget_usd`).
+pub fn run_limit_reached(agent: &str, limit_usd: f64) -> String {
+    format!(
+        "This run of {agent} reached the limit it started with ({limit_usd:.2} USD of your budget were left then). Send your message again: the next run starts with what is left now."
+    )
 }
 
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
@@ -1389,6 +1399,8 @@ pub struct ClaudeNormalizer {
     /// Lines the actor must write: answers to the CLI's requests (e.g. errors for unsupported
     /// ones) and the normalizer's own `mcp_status` request.
     pub outbox: Vec<Value>,
+    /// What a turn that reached the run's own spending limit says (`SpawnSpec::max_budget_usd`).
+    run_limit: Option<String>,
 }
 
 impl ClaudeNormalizer {
@@ -1431,6 +1443,7 @@ impl ClaudeNormalizer {
             last_context: None,
             interrupt_requested: false,
             outbox: Vec::new(),
+            run_limit: spec.max_budget_usd.map(|usd| run_limit_reached(&spec.agent_name, usd)),
         }
     }
 
@@ -1471,8 +1484,12 @@ impl ClaudeNormalizer {
     /// `errors` without its diagnostic lines).
     fn failure_reason(&self, v: &Value, retried: Option<ApiFailure>) -> Option<String> {
         // The spending limit of the process (`--max-budget-usd`, 2.1.311 §6): every later
-        // turn of this run ends the same way, at once.
+        // turn of this run ends the same way, at once. Codly gave it what was left of your
+        // budget, and ends the run on this turn (`breaker_run.rs`, `run_limit_turn_end`).
         if v["subtype"] == "error_max_budget_usd" {
+            if let Some(reached) = &self.run_limit {
+                return Some(reached.clone());
+            }
             let said = cli_errors(v);
             let detail = if said.is_empty() { String::new() } else { format!(": {said}") };
             return Some(format!("Claude Code reached its spending limit, so it does no more work in this run{detail}"));
@@ -2750,6 +2767,7 @@ mod tests {
             raw_log: PathBuf::from("/tmp/x/raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
         }
     }
 
@@ -4356,6 +4374,39 @@ mod tests {
         events.extend(replay(&mut norm, &recorded("limits-max-budget")));
         assert_eq!(turn_ends(&events), [(TurnStatus::Failed, Some(budget)), (TurnStatus::Failed, Some(budget))]);
         assert_eq!(own_errors(&events), [budget], "said once, before the first turn's end");
+    }
+
+    /// Codly gives a run a limit of its own only through `SpawnSpec::max_budget_usd`.
+    #[test]
+    fn a_run_with_a_limit_of_its_own_passes_it_to_claude_code() {
+        let flag = |s: &SpawnSpec| {
+            let a = build_args(s, "s", None, &[]);
+            a.iter().position(|x| x == "--max-budget-usd").map(|i| a[i + 1].clone())
+        };
+        let s = spec(Role::Worker, false);
+        assert_eq!(flag(&s), None);
+        assert_eq!(flag(&SpawnSpec { max_budget_usd: Some(0.6), ..s }), Some("0.6".into()));
+    }
+
+    /// Recordings `r6-budget-midturn-1-c1` (the model answered in text, with no tool call)
+    /// and `r6-budget-midturn-1-c3` (the limit came after one tool call had run; the call the
+    /// last request asked for did not run), on a resumed process with `--max-budget-usd`: the
+    /// turn fails with the run's own reason, and the turn after it fails the same way at once.
+    /// Codly ends the run at the first one (`breaker_run.rs`, `run_limit_turn_end`).
+    #[test]
+    fn a_turn_that_reaches_the_runs_own_limit_says_what_to_do() {
+        let limited = SpawnSpec { max_budget_usd: Some(0.01), session: SessionMode::Resume { session_id: "sess-1".into() }, ..spec(Role::Solo, false) };
+        let reason = "This run of Ada reached the limit it started with (0.01 USD of your budget were left then). Send your message again: the next run starts with what is left now.";
+        for name in ["r6-budget-midturn-1-c1", "r6-budget-midturn-1-c3"] {
+            let mut norm = ClaudeNormalizer::new(&limited, "sess-1".into());
+            let mut events = norm.turn_started("Run the Bash command `echo one`, then `echo two`, then `echo three`");
+            events.extend(replay(&mut norm, &recorded(name)));
+            assert_eq!(turn_ends(&events), [(TurnStatus::Failed, Some(reason)), (TurnStatus::Failed, Some(reason))], "{name}");
+            assert_eq!(errors(&events).iter().filter(|(message, _)| *message == reason).count(), 1, "said once: {name}");
+            // The turn's own cost is counted, not the session's `total_cost_usd`.
+            let cost = events.iter().rev().find_map(|e| if let EventKind::UsageUpdated { usage } = e { usage.cost_usd } else { None }).unwrap();
+            assert!(cost > 0.0 && cost < 0.001, "{name}: {cost}");
+        }
     }
 
     /// Recording `misc-events`: the result's `permission_denials` lists calls Codly itself was
