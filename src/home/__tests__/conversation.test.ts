@@ -170,7 +170,7 @@ describe('the conversation', () => {
     const said = notice('MCP server linear did not start, so this agent works without its tools: connection refused', { ts: 3 });
     apply(begun, said, notice('Goal: ship it', { ts: 4, agent_id: 'w1' }), ended('completed', { ts: 5 }));
     const notices = buildSpine('lead').flatMap((i) => (i.kind === 'notice' ? [i] : []));
-    expect(notices).toMatchObject([{ agentId: 'l1', eventId: said.id, ts: 3, text: 'MCP server linear did not start, so this agent works without its tools: connection refused' }]);
+    expect(notices).toMatchObject([{ agentId: 'l1', ts: 3, notes: [{ eventId: said.id, ts: 3, text: 'MCP server linear did not start, so this agent works without its tools: connection refused' }] }]);
     expect(buildSpine('lead').map((i) => i.kind)).toEqual(['user', 'notice']);
   });
 

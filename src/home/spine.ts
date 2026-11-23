@@ -2,7 +2,8 @@
 // A request thread ("lead" / "lead:<id>") = your messages, its Lead's replies and (folded) work,
 // approvals from the agents on its plan where they happened, questions they asked its Lead,
 // task-done and plan-done cards, and what its agent's CLI told about the run (a hook's word, a
-// goal, an MCP server that did not start). A 1:1 thread = the same for one agent.
+// goal, an MCP server that did not start; one row for all of one turn). A 1:1 thread = the same
+// for one agent.
 // Each request is its own thread: another request's plan, approvals and cards never show here.
 //
 // The list is built again only when something of this thread changed (`buildSpine`), and a row
@@ -21,6 +22,7 @@ import { groupSame } from '../lib/state/approvalGroups';
 import { isSlotNote } from '../lib/state/queue';
 import { stoppedByYou } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
+import { noticeRows, type Note } from './notices';
 import { canRetry, messageOf, troublesOf, type TroubleKind } from './outcomes';
 
 export type Item =
@@ -31,7 +33,13 @@ export type Item =
       key: string;
       ts: number;
       agentId: string;
-      /** The agent's own message this row shows (null: a chat row whose message is not held any more). */
+      /**
+       * The message of the agent this row shows: its key, and the words it reads while they are
+       * written. Null for a chat row with no held message behind it: the message is not held
+       * (any more), the row's author is not the thread's agent (another Lead served the request
+       * then, or the thread has no agent now), or the core posted the row for a turn result
+       * that no message carried.
+       */
       itemId: string | null;
       text: string;
       phase: MessagePhase;
@@ -61,8 +69,9 @@ export type Item =
       /** Your message to send again (null: sending again cannot help, or no message of yours started that turn). */
       retry: string | null;
     }
-  // What the agent's CLI told about the run, in its own words (`eventId`: the event behind it).
-  | { kind: 'notice'; key: string; ts: number; agentId: string; eventId: number; text: string };
+  // What the agent's CLI told about the run, in its own words: all of one turn, or the same
+  // words told again outside a turn (`noticeRows`). `notes`: oldest first; `ts`: the newest one's.
+  | { kind: 'notice'; key: string; ts: number; agentId: string; notes: Note[] };
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
 /** `norm` of a message's text, worked out once (a message object is never changed). */
@@ -77,24 +86,48 @@ const SAY = 'say:';
 
 /**
  * Which message of the agent each of its chat rows shows (chat id -> item id). The core posts
- * a reply to the thread right after the agent said it, with the same words and without the
- * message's id, so the two are matched here: a chat row shows the newest message with its
- * words that was said before it and that no later chat row shows. A message is in one chat
- * row at most: a reply the agent repeats is a row of its own, also before its chat row has
- * come. `chats`: oldest first, as the store keeps them.
+ * a reply to the thread right after the agent said it and writes the message's id on the row
+ * (`ChatMessage.item_id`): the row shows the held message with that id, and their words are
+ * never compared. A CLI may use an id again in a later session, so the message must have been
+ * said before the row, and the newest row with the id takes it.
+ *
+ * A row without an id was stored before rows had one (or shows no message: a turn result). It
+ * is matched as it always was: with the newest message with its words that was said before it
+ * and that no other chat row shows.
+ *
+ * A message is in one chat row at most: a reply the agent repeats is a row of its own, also
+ * before its chat row has come. `chats` and `said`: oldest first, as the store keeps them.
  */
 function chatItems(chats: ChatMessage[], agentId: string, said: AgentMsg[]): Map<string, string> {
-  /** By their words, oldest first: the messages no chat row was matched with yet. */
-  const free = new Map<string, AgentMsg[]>();
-  for (const m of said) {
-    const same = free.get(normOf(m));
-    if (same) same.push(m);
-    else free.set(normOf(m), [m]);
-  }
   const itemOf = new Map<string, string>();
+  /** By id: the held messages no chat row shows yet. */
+  const free = new Map(said.map((m) => [m.itemId, m]));
+  /** The agent's rows without an id, newest first. */
+  const unnamed: ChatMessage[] = [];
   for (let i = chats.length - 1; i >= 0; i--) {
     const c = chats[i];
-    const same = c.author === agentId ? free.get(normOf(c)) : undefined;
+    if (c.author !== agentId) continue;
+    if (!c.item_id) {
+      unnamed.push(c);
+      continue;
+    }
+    const m = free.get(c.item_id);
+    // Said after this row: the message of a later session that uses the id again.
+    if (!m || m.ts > c.ts) continue;
+    itemOf.set(c.id, m.itemId);
+    free.delete(m.itemId);
+  }
+  if (!unnamed.length) return itemOf;
+  /** By their words, oldest first: the messages that are still free. */
+  const byWords = new Map<string, AgentMsg[]>();
+  for (const m of said) {
+    if (free.get(m.itemId) !== m) continue;
+    const same = byWords.get(normOf(m));
+    if (same) same.push(m);
+    else byWords.set(normOf(m), [m]);
+  }
+  for (const c of unnamed) {
+    const same = byWords.get(normOf(c));
     if (!same) continue;
     // Said after this chat row: a later message, which no older chat row can show either.
     let at = same.length - 1;
@@ -245,10 +278,10 @@ export function buildSpine(thread: string): Item[] {
         retry: canRetry(t.what) ? messageOf(t.turn, yours) : null,
       });
 
-    // ── what its CLI told about the run, where it was told ──
-    for (const ev of store.events)
-      if (ev.agent_id === owner.id && ev.kind.type === 'notice')
-        items.push({ kind: 'notice', key: `n:${ev.id}`, ts: ev.ts, agentId: owner.id, eventId: ev.id, text: ev.kind.text });
+    // ── what its CLI told about the run: one row for a turn, where the newest was told (so
+    // after the work it was told in) ──
+    for (const notes of noticeRows(store.events, owner.id))
+      items.push({ kind: 'notice', key: `n:${notes[0].eventId}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes });
   }
 
   // ── approvals, where they happened (a worker's land in its plan's request) ──

@@ -183,11 +183,6 @@ pub async fn set_workspace_team(state: State<'_, AppState>, team: WorkspaceTeam)
 }
 
 #[tauri::command]
-pub async fn list_models(state: State<'_, AppState>, provider: Provider) -> R<Vec<String>> {
-    state.core().await?.list_models(provider).await.map_err(err)
-}
-
-#[tauri::command]
 pub async fn model_catalog(state: State<'_, AppState>, provider: Provider) -> R<ModelCatalog> {
     state.core().await?.model_catalog(provider).await.map_err(err)
 }

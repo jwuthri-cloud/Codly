@@ -1,4 +1,4 @@
-// The browser demo's model catalogs (`model_catalog`, `list_models`): what the core reads from
+// The browser demo's model catalogs (`model_catalog`): what the core reads from
 // each CLI. Codex lists its models with the efforts each one takes; Claude has no list, so
 // its aliases are Codly's own; the other CLIs list nothing here.
 import type { ModelCatalog } from '../gen/ModelCatalog';

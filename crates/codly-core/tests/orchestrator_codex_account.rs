@@ -118,12 +118,10 @@ async fn started(dir: &Path, prompts: &Arc<Mutex<Vec<String>>>) -> Arc<Core> {
     core
 }
 
-/// The hire wizard and the model dialog say where their list comes from, so they may show
-/// Codly's built-in Codex models when the app-server cannot be asked. The pickers that show
-/// names only (the Lead's controls, the team and the settings) get the CLI's own list or the
-/// error: a built-in name there would look like Codex's own.
+/// Every picker reads the catalog, which says where its list comes from: it may show Codly's
+/// built-in Codex models when the app-server cannot be asked, with the reason.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn only_the_catalog_falls_back_to_the_built_in_codex_models() {
+async fn the_catalog_falls_back_to_the_built_in_codex_models_and_says_why() {
     let dir = tempfile::tempdir().unwrap();
     let core = started(dir.path(), &Arc::default()).await;
 
@@ -132,11 +130,9 @@ async fn only_the_catalog_falls_back_to_the_built_in_codex_models() {
     assert_eq!(catalog.problem.as_deref(), Some("the CLI list is fixed, so no CLI is asked"));
     assert!(!catalog.models.is_empty());
 
-    let e = core.list_models(Provider::Codex).await.unwrap_err();
-    assert_eq!(e.to_string(), "the CLI list is fixed, so no CLI is asked");
-    // Claude has no list to ask for: its aliases are the list, in both
-    assert_eq!(core.list_models(Provider::Claude).await.unwrap(), ["opus", "sonnet", "haiku", "fable"]);
-    assert_eq!(core.model_catalog(Provider::Claude).await.unwrap().models.len(), 4);
+    // Claude has no list to ask for: its aliases are the list.
+    let claude = core.model_catalog(Provider::Claude).await.unwrap();
+    assert_eq!(claude.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["opus", "sonnet", "haiku", "fable"]);
     core.shutdown().await;
 }
 

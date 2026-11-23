@@ -552,8 +552,6 @@ export class MockTransport implements Transport {
       }
       case 'give_back_agent':
         return this.takeovers.giveBack(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
-      case 'list_models':
-        return demoCatalog(a.provider as Provider).models.map((m) => m.id);
       case 'model_catalog':
         return demoCatalog(a.provider as Provider);
       case 'hire_review':

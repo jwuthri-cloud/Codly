@@ -494,7 +494,7 @@ mod tests {
     }
 
     fn chat(thread: &str, author: &str, text: &str, ts: i64) -> ChatMessage {
-        ChatMessage { id: format!("c{ts}"), thread: thread.into(), author: author.into(), text: text.into(), attachment: None, ts }
+        ChatMessage { id: format!("c{ts}"), thread: thread.into(), author: author.into(), text: text.into(), attachment: None, ts, item_id: None }
     }
 
     #[test]

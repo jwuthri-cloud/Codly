@@ -254,8 +254,9 @@ export class Sim {
     return this.putPlan({ ...prev, ...patch, updated_at: this.now() });
   }
 
-  chat(thread: string, author: string, text: string, attachment: JsonValue | null = null) {
-    const m: ChatMessage = { id: uid('m-'), thread, author, text, attachment, ts: this.now() };
+  /** `itemId`: the agent's message this row shows (as the core writes it on the row of a message). */
+  chat(thread: string, author: string, text: string, attachment: JsonValue | null = null, itemId?: string) {
+    const m: ChatMessage = { id: uid('m-'), thread, author, text, attachment, ts: this.now(), ...(itemId ? { item_id: itemId } : {}) };
     this.chats.push(m);
     const agent = author !== 'user' && author !== 'codly' ? author : null;
     this.emit({ type: 'chat', message: m }, { agent });
@@ -486,7 +487,7 @@ export class Actor {
       await this.sleep((opts.pace ?? 38) + Math.random() * 34);
     }
     this.emit({ type: 'message', item_id: itemId, text, phase: opts.phase ?? 'final' });
-    if (opts.thread) this.sim.chat(opts.thread, this.id, text, opts.attachment ?? null);
+    if (opts.thread) this.sim.chat(opts.thread, this.id, text, opts.attachment ?? null, itemId);
     this.usage(600 + Math.round(Math.random() * 900), Math.round(text.length / 3.4));
   }
 

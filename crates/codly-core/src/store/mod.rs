@@ -1442,7 +1442,7 @@ mod tests {
         let mut ts = 0;
         let mut say = |thread: &str, author: &str, attachment: Option<Value>| {
             ts += 1;
-            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: format!("m{ts}"), attachment, ts };
+            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: format!("m{ts}"), attachment, ts, item_id: None };
             store.append_event(None, &row(EventKind::Chat { message })).unwrap();
         };
         let since = |thread: &str| -> Vec<String> {
@@ -1528,6 +1528,7 @@ mod tests {
                 text: format!("m{i}"),
                 attachment: None,
                 ts: i as i64,
+                item_id: None,
             };
             store.append_event(None, &row(EventKind::Chat { message })).unwrap();
         }
@@ -1549,7 +1550,7 @@ mod tests {
             (&there, "lead", "elsewhere", 7),
             (&here, "lead", "third", 8),
         ] {
-            let message = ChatMessage { id: new_id(), thread: thread.into(), author: "user".into(), text: text.into(), attachment: None, ts };
+            let message = ChatMessage { id: new_id(), thread: thread.into(), author: "user".into(), text: text.into(), attachment: None, ts, item_id: None };
             store.append_event(Some(&w.id), &row(EventKind::Chat { message })).unwrap();
         }
         let texts: Vec<_> = store.recent_chats(Some(&here.id), 10).unwrap().into_iter().map(|m| m.text).collect();
@@ -1582,7 +1583,7 @@ mod tests {
             (&here, "closed:lead:c:500", "gone", "Nobody asked.", 6),
             (&there, "closed:lead:999", "user", "elsewhere", 7),
         ] {
-            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment: None, ts };
+            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment: None, ts, item_id: None };
             store.append_event(Some(&w.id), &row(EventKind::Chat { message })).unwrap();
         }
 
@@ -1722,7 +1723,7 @@ mod tests {
 
         /// A message, attributed as the core does it: to the agent who wrote it.
         fn say(&self, thread: &str, author: &str) -> i64 {
-            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: "hi".into(), attachment: None, ts: now_ms() };
+            let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: "hi".into(), attachment: None, ts: now_ms(), item_id: None };
             self.add((author != "user").then_some(author), None, EventKind::Chat { message })
         }
 
@@ -1799,7 +1800,7 @@ mod tests {
         // Seen through a row that real data never has: the event of one of the thread's messages,
         // ten minutes older than every message of the thread. The walk ends before that row
         // (and so before every event of the repo's life from before this request).
-        let message = ChatMessage { id: new_id(), thread: "lead:x".into(), author: "user".into(), text: "hi".into(), attachment: None, ts: now_ms() };
+        let message = ChatMessage { id: new_id(), thread: "lead:x".into(), author: "user".into(), text: "hi".into(), attachment: None, ts: now_ms(), item_id: None };
         let stray = EventRow { id: 0, ts: message.ts - 600_000, agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::Chat { message } };
         t.store.append_event(Some(&t.ws), &stray).unwrap();
         let said = t.say("lead:x", "user");

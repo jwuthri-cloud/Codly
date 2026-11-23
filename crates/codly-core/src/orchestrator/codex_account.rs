@@ -233,13 +233,6 @@ impl super::Core {
         self.inner.model_catalog(provider).await
     }
 
-    /// Model names for a picker that shows no source (empty when the CLI takes any name): the
-    /// CLI's own list, or the error. Never Codly's built-in Codex list: only `model_catalog`
-    /// offers it, with the reason.
-    pub async fn list_models(&self, provider: Provider) -> Result<Vec<String>> {
-        self.inner.cli_model_names(provider).await
-    }
-
     /// Switch the usage read of `accounts(refresh)` on or off (on at start). The read starts
     /// each Codex sign-in's app-server, which asks OpenAI with that sign-in: a test that runs
     /// on a machine with a real Codex switches it off.

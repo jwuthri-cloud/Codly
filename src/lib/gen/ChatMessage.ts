@@ -13,4 +13,10 @@ author: string, text: string,
 /**
  * Optional structured attachment, e.g. {"plan_id": "..."} renders a plan card.
  */
-attachment: JsonValue | null, ts: number, };
+attachment: JsonValue | null, ts: number, 
+/**
+ * The agent's message this row shows (`EventKind::Message::item_id`), so the conversation
+ * shows the message and its row as one. None: the row shows no message of an agent
+ * (yours, Codly's, a turn result no message carried), or it was stored before rows had it.
+ */
+item_id?: string, };
