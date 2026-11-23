@@ -1,7 +1,10 @@
 <!--
-  The toast stack: top right, under the top bar, so it never sits on the composer's Send, a
-  card's buttons or a sheet's footer. While the agent or task sheet is open the stack moves
-  left of it, off the sheet's own controls. Dialogs are drawn above it.
+  The toast stack: top right, under the top bar, so it never sits on the composer's Send or a
+  sheet's footer. While the agent or task sheet is open the stack moves left of it, off the
+  sheet's own controls. Dialogs are drawn above it.
+  The corner is not empty: while a toast shows, it lies on the top right of the stage (the
+  last buttons of a conversation's header; a room's header buttons, which start about 70px
+  under the top bar, when the stack is taller than that).
 -->
 <script lang="ts">
   import { fade } from 'svelte/transition';
