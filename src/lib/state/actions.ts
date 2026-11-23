@@ -34,7 +34,7 @@ import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
 import { review, reviewKey } from './review.svelte';
-import { noteStop, stopping } from './stops';
+import { noteKill, noteStop, stopping } from './stops';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
 import { ui, wallNow } from './ui.svelte';
@@ -486,13 +486,25 @@ export async function createTask(title: string, goal = '') {
  *  resumes the conversation on the new model with its next message. The core's refusal says
  *  what to do (stop its turn first, wait for its task, pick a model the CLI knows). */
 export async function setAgentModel(agent: Agent, model: string | null): Promise<boolean> {
-  const label = model ?? 'the default model';
+  const why = await switchAgentModel(agent, model);
+  if (why) toast({ kind: 'error', title: `Couldn’t switch ${agent.name} to ${model ?? 'the default model'}`, body: why });
+  return !why;
+}
+
+/** `setAgentModel` for the model dialog, which says the reason itself: null when the agent
+ *  switched, else why not. An answer with no agent in it is a failure too, never a silent one. */
+export async function switchAgentModel(agent: Agent, model: string | null): Promise<string | null> {
   const ws = store.workspace?.id;
-  const a = await attempt(`switch ${agent.name} to ${label}`, () => api.setAgentModel(agent.id, model));
-  if (!a) return false;
+  let a: Agent | null;
+  try {
+    a = await api.setAgentModel(agent.id, model);
+  } catch (e) {
+    return msg(e);
+  }
+  if (!a) return 'Codly got no answer for the switch. Try again.';
   if (store.isOpen(ws)) store.upsertAgent(a);
-  toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${label}` });
-  return true;
+  toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${model ?? 'the default model'}` });
+  return null;
 }
 
 /** Give an agent another model (a new Legend's bigger context window; you clicked it): a 1:1
@@ -567,13 +579,18 @@ export function stopThreadByEsc(thread: string): boolean {
   return true;
 }
 
+/** Kill: the process ends now. The agent's conversation says that you killed it. */
 export async function stopAgent(agentId: string) {
   const undo = noteStop(agentId);
+  const unkill = noteKill(agentId, wallNow());
   const ok = await attempt('stop the agent', async () => {
     await api.stopAgent(agentId);
     return true;
   });
-  if (!ok) undo();
+  if (!ok) {
+    undo();
+    unkill();
+  }
 }
 
 /** Let go an agent you hired: it joins the ghosts by the memory archive (you can bring it back). */

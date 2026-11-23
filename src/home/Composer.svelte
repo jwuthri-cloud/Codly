@@ -20,7 +20,8 @@
   import { sendChat, setRequestPrefs, stopThread, stopThreadByEsc } from '../lib/state/actions';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { toast } from '../lib/state/toasts.svelte';
-  import { busy, busyHint, waitingHint } from '../lib/state/queue';
+import { cyclesMode, nextPermissionMode, setPermissionMode } from '../lib/state/control.svelte';
+  import { busy, busyHint, stoppedHint, waitingHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { fuzzy } from '../lib/util/fuzzy';
@@ -147,6 +148,7 @@
   const placeholder = $derived(
     waitsForYou ? waitingHint(agent?.name ?? 'The agent', agent?.provider)
     : isBusy ? busyHint(agent?.name ?? 'The agent', agent?.provider)
+    : oneToOne && agent?.status === 'offline' ? stoppedHint(agent.name)
     : oneToOne ? `Message ${agent?.name ?? 'the agent'} directly…`
     : fresh && thread !== 'lead' ? 'Describe the new request — its own Lead plans it in parallel…'
     : 'Ask the Lead to build, fix or explain — @ for a file, / for actions',
@@ -208,7 +210,7 @@
     const model = { name: 'model', label: 'Model', icon: 'sparkle' };
     const a = agent;
     if (!oneToOne) list.push({ ...model, hint: 'The Lead’s CLI, model and thinking', run: () => lead?.showModels() });
-    else if (a?.role === 'solo') list.push({ ...model, hint: `${a.name}’s model`, run: () => (ui.modelDialog = { provider: a.provider, agentId: a.id }) });
+    else if (a?.role === 'solo') list.push({ ...model, hint: `${a.name}’s model`, run: () => { ui.modelDialog = { provider: a.provider, agentId: a.id }; } });
     else list.push({ ...model, off: 'Not for this agent' });
     const diff = { name: 'diff', label: 'View the changes', icon: 'diff' };
     const p = plan;
@@ -371,6 +373,12 @@
       e.preventDefault();
       const now = store.requestPrefs[thread]?.mode ?? (store.settings.auto_run_plans ? 'auto' : 'plan');
       setRequestPrefs(thread, { mode: MODES[(MODES.findIndex((m) => m.id === now) + 1) % MODES.length].id });
+      return;
+    }
+    // In a 1:1 with a Claude agent it cycles the agent's own mode, as its sheet's select does.
+    if (e.key === 'Tab' && e.shiftKey && oneToOne && agent && cyclesMode(agent)) {
+      e.preventDefault();
+      if (!e.repeat) void setPermissionMode(agent.id, nextPermissionMode(agent.permission_mode, store.requestPrefs[thread]?.approval_mode ?? store.settings.approval_mode));
       return;
     }
     // ⌫ alone: with a modifier it is another key (⌘⌫ denies), and it never leaves the conversation.
