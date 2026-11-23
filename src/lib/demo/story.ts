@@ -255,7 +255,7 @@ export class Story {
     const now = sim.now();
     const plan = sim.putPlan({
       id: uid('p-'), workspace_id: sim.workspace!.id, thread: r.thread, request: r.words.join('\n\n'), ...o,
-      status: 'planning', base_commit: null, base_branch: null, integration_branch: null, integration_worktree: null, merged_sha: null, kept: false, created_at: now, updated_at: now,
+      weak_checks: [], status: 'planning', base_commit: null, base_branch: null, integration_branch: null, integration_worktree: null, merged_sha: null, kept: false, created_at: now, updated_at: now,
     });
     r.planId = plan.id;
     this.specOfPlan.set(plan.id, spec);

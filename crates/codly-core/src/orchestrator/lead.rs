@@ -593,6 +593,7 @@ impl Inner {
                 (who, m.text)
             })
             .collect();
+        let required = super::required_checks::board_line(&self.required_checks(&ws.id, std::path::Path::new(&ws.repo_path))?);
         Ok(prompts::board_header(&prompts::Board {
             workspace: &ws,
             thread,
@@ -605,6 +606,7 @@ impl Inner {
             consultant_clis: &self.consultant_clis(),
             mode: self.lead_mode(&ws.id, thread),
             game_rules: self.settings().game_rules,
+            required_checks: required.as_deref(),
         }))
     }
 

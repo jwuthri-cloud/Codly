@@ -101,7 +101,7 @@ export const TASKS: Task[] = [
 ];
 
 function plan(id: string, thread: string, request: string, status: Plan['status']): Plan {
-  return { id, workspace_id: 'w1', thread, request, summary: request, assumptions: [], open_questions: [], status, base_commit: null, base_branch: null, integration_branch: 'codly/atlas/integration', integration_worktree: null, merged_sha: null, kept: false, created_at: 0, updated_at: 0 };
+  return { id, workspace_id: 'w1', thread, request, summary: request, assumptions: [], open_questions: [], weak_checks: [], status, base_commit: null, base_branch: null, integration_branch: 'codly/atlas/integration', integration_worktree: null, merged_sha: null, kept: false, created_at: 0, updated_at: 0 };
 }
 
 let call = 0;

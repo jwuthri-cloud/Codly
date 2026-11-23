@@ -126,6 +126,7 @@ impl Inner {
                     last_text: None,
                     turn_messages: 0,
                     last_prompt: None,
+                    briefed: false,
                     answers: vec![],
                     answer_only: false,
                     failed_turns: 0,

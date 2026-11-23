@@ -517,6 +517,7 @@ mod tests {
             summary: format!("Plan {short}"),
             assumptions: vec![],
             open_questions: vec![],
+            weak_checks: vec![],
             status,
             base_commit: inner.git.head(repo).await.unwrap(),
             base_branch: Some("main".into()),

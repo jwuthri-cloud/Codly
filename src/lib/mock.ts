@@ -702,11 +702,15 @@ export class MockTransport implements Transport {
       case 'required_checks':
         return this.checks.status((a.set as ChecksChoice | null) ?? null);
       case 'check_agent': {
-        // Like the core: the result is also a decision, where the agent's Git tab reads it.
-        const results = this.checks.run();
+        // Like the core: the result is also on record, as a decision.
+        const results = this.checks.run(String(a.agentId), sim.now());
         const name = sim.agents.get(String(a.agentId))?.name ?? 'the agent';
         sim.decision('gate', 'human', `you checked ${name}'s work: ${checksLine(results)}`, { agent_id: String(a.agentId), checks: results });
         return results;
+      }
+      case 'agent_check_state': {
+        const status = sim.agents.get(String(a.agentId))?.status;
+        return this.checks.state(String(a.agentId), status !== undefined && !['idle', 'done', 'failed', 'offline'].includes(status));
       }
       case 'workspace_trust':
         return this.workspaceTrust.trust((a.set as TrustChoice | null) ?? null);

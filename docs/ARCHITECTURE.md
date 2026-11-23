@@ -454,13 +454,23 @@ that are new there are named (the index does not search them).
   shows each command and what the risk rules see in it; after that they run without the risk
   hold. Codly reads the file from the user's checkout and runs only the exact text that was
   turned on: with another text (or no file) nothing runs and nothing passes, the task is
-  blocked for the user and a finished plan says that it was not checked. "Check the work"
+  blocked for the user and a finished plan says that it was not checked. When the user turns
+  the checks on again, or off, Codly checks every task that waited for that choice again
+  (the same pass as Re-run checks on its card), in the background: `max_parallel` tasks at a
+  time, the tasks in one team member's worktree one after the other, and a `gate` decision
+  at the end says which were checked, which went back to their team member and which still
+  wait for the user. The Lead's board names the commands, or says
+  that none runs. "Check the work"
   (an agent's Git tab) runs them in a 1:1 agent's worktree, whose work has no gate: one run
-  for an agent at a time, and the result is recorded (a `gate` decision, which the tab reads)
-  only when the agent got no turn while the commands ran. The
+  for an agent at a time, and the result is recorded (a `gate` decision) only when the agent
+  got no turn while the commands ran. The core keeps the last result with the tree of the
+  worktree it is about (`agent_check_state`): the tab asks the core, so a reloaded window
+  still knows a run that is on its way, and a result is dropped once the worktree has other
+  files (a turn, restored files, a merge, the user's own edits). The
   planner marks a task whose verify commands all prove nothing (`weak_checks.rs`: `true`,
-  `x || true`, `x | tail`, a file-exists test); the plan card shows the mark before the plan
-  runs and after, and the plan's chat line names the task (a plan that runs at once never waits).
+  `x || true`, `x | tail`, a file-exists test); the mark is kept on the plan
+  (`Plan::weak_checks`), the plan card shows it before the plan runs and after, and the
+  plan's chat line names the task (a plan that runs at once never waits).
 - A new worktree (`worktree_setup.rs`) gets, once: copies of the checkout's git-ignored files
   that the built-in list (`node_modules`, `.venv`, `venv`, root `.env` files) or the repo's
   `.worktreeinclude` (gitignore syntax) names, never a tracked file, and only a path that the

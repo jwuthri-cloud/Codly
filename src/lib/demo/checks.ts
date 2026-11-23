@@ -2,6 +2,8 @@
 // demo repo has a small checks file, off until you turn it on for the text shown (as the core
 // does, by its fingerprint).
 
+import type { AgentCheck } from '../gen/AgentCheck';
+import type { CheckedWork } from '../gen/CheckedWork';
 import type { CheckResult } from '../gen/CheckResult';
 import type { ChecksChoice } from '../gen/ChecksChoice';
 import type { RequiredChecks } from '../gen/RequiredChecks';
@@ -25,6 +27,8 @@ export class ChecksDemo {
   text = TEXT;
   /** The fingerprint of the text you turned on. */
   private allowed: string | null = null;
+  /** The last "Check the work" of each agent, until the agent works again. */
+  private checked = new Map<string, CheckedWork>();
 
   /** `required_checks`: the repo's checks; `set` turns them on (for the text shown) or off. */
   status(set: ChecksChoice | null): RequiredChecks {
@@ -37,11 +41,21 @@ export class ChecksDemo {
     return { text: this.text, sha, commands: commands(this.text).map((command) => ({ command, risks: [] })), on, changed: this.allowed !== null && !on, problem: null };
   }
 
-  /** `check_agent`: every command passes in the demo, once the checks are on. */
-  run(): CheckResult[] {
+  /** `check_agent`: every command passes in the demo, once the checks are on. `at`: now (ms). */
+  run(agentId: string, at: number): CheckResult[] {
     const now = this.status(null);
     if (now.changed) throw new Error('Codly did not run your required checks: .codly/checks changed since you turned them on. Read them in Settings → Safety → Required checks and turn them on again, or turn them off.');
     if (!now.on) throw new Error('this repo has no required checks turned on. Write your commands in .codly/checks, one on each line, then turn them on in Settings → Safety → Required checks');
-    return now.commands.map((c) => ({ command: c.command, ok: true, exit_code: 0, timed_out: false, tail: 'ok' }));
+    const results = now.commands.map((c) => ({ command: c.command, ok: true, exit_code: 0, timed_out: false, tail: 'ok' }));
+    this.checked.set(agentId, { results, at });
+    return results;
+  }
+
+  /** `agent_check_state`: the demo's commands end at once, so none runs when the Git tab asks.
+   *  The core drops a result when the agent's files change; in the demo every turn changes
+   *  them, so the result goes when the agent works (`working`). */
+  state(agentId: string, working: boolean): AgentCheck {
+    if (working) this.checked.delete(agentId);
+    return { running: false, last: this.checked.get(agentId) ?? null };
   }
 }

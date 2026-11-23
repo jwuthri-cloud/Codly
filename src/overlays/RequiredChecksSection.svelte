@@ -4,7 +4,8 @@
   from an agent's Git tab (Check the work). The file is text from the repo: off until you turn
   it on here, where each command and what the approval rules see in it are shown. Turning it on
   is for that exact text. When the file is not that text any more, two buttons replace the
-  switch: turn the new text on, or turn the checks off.
+  switch: turn the new text on, or turn the checks off. Either choice lets the tasks that waited
+  for it go on: the core checks them again.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -76,6 +77,7 @@
             {:else}
               The checks file changed since you turned it on. Codly does not run it, and no task passes its checks, until you read it and turn it on again, or turn it off.
             {/if}
+            When you turn the checks on or off here, Codly checks the tasks that waited again by itself.
           </p>
           <div class="choices">
             {#if can.on}<button class="btn sm" onclick={() => turn(can.on)}>Turn on this text</button>{/if}

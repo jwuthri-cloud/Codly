@@ -187,6 +187,8 @@ struct Live {
     turn_messages: u32,
     /// First line of the latest user message (solo commit messages).
     last_prompt: Option<String>,
+    /// A prompt of this run carried the agent's career block (`with_briefing`): once in a run.
+    briefed: bool,
     /// Lead messages (codly_message_member) whose answer goes back to that Lead.
     answers: Vec<Answer>,
     /// Started only to answer the Lead: shut down once every answer went out.
@@ -294,6 +296,9 @@ struct Inner {
     /// Agents that a message from outside Codly reached: which of their turns work for it
     /// (`outside.rs`).
     outside_turns: Mutex<HashMap<Id, outside::Turns>>,
+    /// One choice about the required checks at a time re-checks the tasks that waited for it
+    /// (`required_checks.rs`): a second choice waits for the first one's tasks.
+    rechecks: tokio::sync::Mutex<()>,
 }
 
 // ───────────── poison-tolerant locks: a panic elsewhere must not wedge the core ─────────────
@@ -471,6 +476,7 @@ impl Core {
             merge_looks: Mutex::new(HashMap::new()),
             checking: Mutex::new(HashSet::new()),
             outside_turns: Mutex::new(HashMap::new()),
+            rechecks: tokio::sync::Mutex::new(()),
         });
         let mcp = McpServer::start(cfg.data_dir.join("mcp.sock"), tools::handler(Arc::downgrade(&inner))).await?;
         let _ = inner.mcp.set(mcp);

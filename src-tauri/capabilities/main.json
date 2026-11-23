@@ -195,6 +195,7 @@
     "allow-stop-resolving-merge",
     "allow-required-checks",
     "allow-check-agent",
+    "allow-agent-check-state",
     "allow-start-problem",
     "allow-recover-database",
     "allow-start-from-github"

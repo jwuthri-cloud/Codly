@@ -12,18 +12,25 @@
 //! agent could change it); Settings shows that text and what the approval rules see in each
 //! command. When the file is not that text any more, none of its commands runs and nothing
 //! passes in their place: a task waits for you, and a finished plan says that it was not
-//! checked, until you turn the new text on or turn the checks off.
+//! checked, until you turn the new text on or turn the checks off. That choice is all the
+//! waiting tasks need: Codly checks each of them again by itself, a few at a time, and the
+//! tasks that share a team member's worktree one after the other.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use ts_rs::TS;
 
 use super::worktree_setup::fingerprint;
-use super::{Core, Inner, approvals, lock, prompts, row};
+use super::{Core, Inner, approvals, lock, prompts, row, scheduler};
 use crate::model::*;
 
 /// The repo's required checks, relative to the repo root.
@@ -85,6 +92,36 @@ pub struct CheckResult {
     pub tail: String,
 }
 
+/// The result of one "Check the work".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CheckedWork {
+    pub results: Vec<CheckResult>,
+    /// When the checks ended (Unix ms).
+    pub at: i64,
+}
+
+/// What "Check the work" has for an agent now, as its Git tab shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentCheck {
+    /// Its required checks run now: the result comes when they end.
+    pub running: bool,
+    /// The last result, while it is about the agent's files as they are now. None: Codly did
+    /// not check this work, the agent works, or its files changed since (a turn of the agent,
+    /// files you put back, a merge into its branch, your own edits).
+    pub last: Option<CheckedWork>,
+}
+
+/// The last "Check the work" of an agent, as the store keeps it.
+#[derive(Serialize, Deserialize)]
+struct Checked {
+    work: CheckedWork,
+    /// The agent's files when the checks ended (`Git::worktree_tree`): the result is about
+    /// these files and no others.
+    tree: String,
+}
+
 /// What the gate does about the repo's required checks.
 pub(super) enum Required {
     /// You did not turn them on.
@@ -105,6 +142,10 @@ pub(super) struct PlanChecks {
 
 fn checks_key(ws_id: &str) -> String {
     format!("required_checks:{ws_id}")
+}
+
+fn checked_key(agent_id: &str) -> String {
+    format!("agent_check:{agent_id}")
 }
 
 /// The commands of a checks file: its lines that are not blank and not a comment, once each.
@@ -142,6 +183,34 @@ fn count(n: usize) -> String {
     format!("{n} required check{}", if n == 1 { "" } else { "s" })
 }
 
+/// How many commands the Lead's board names; the rest is a count.
+const BOARD_COMMANDS: usize = 6;
+
+/// The required checks on the Lead's board (`prompts::board_header`): the commands Codly runs
+/// for every task, or why it runs none of them now. None: they are off. The commands are the
+/// text you read and turned on.
+pub(super) fn board_line(required: &Required) -> Option<String> {
+    match required {
+        Required::Off => None,
+        Required::Run(cmds) => {
+            let mut list: Vec<String> = cmds.iter().take(BOARD_COMMANDS).map(|c| format!("`{}`", prompts::clip(c, 60))).collect();
+            if cmds.len() > BOARD_COMMANDS {
+                list.push(format!("{} more", cmds.len() - BOARD_COMMANDS));
+            }
+            Some(format!(
+                "Required by the user ({CHECKS_FILE}; Codly runs these for every task after its verify commands, and for every finished plan): {}",
+                list.join(" · ")
+            ))
+        }
+        // Why (`Stale`'s text) is written for the user; each waiting task's line has it.
+        Required::Stale(_) => Some(format!(
+            "Required by the user ({CHECKS_FILE}): Codly runs none of them now, the file is not the text the user turned on. Each task waits \
+             when its worker finishes, until the user turns the checks on again, or off, in {SETTINGS}; Codly then checks the waiting tasks \
+             again by itself."
+        )),
+    }
+}
+
 /// An agent's place in `Inner::checking` while "Check the work" runs: given back when the
 /// run ends, however it ends.
 struct Checking<'a> {
@@ -153,6 +222,21 @@ impl Drop for Checking<'_> {
     fn drop(&mut self) {
         lock(&self.inner.checking).remove(&self.agent_id);
     }
+}
+
+/// How often a re-check looks whether the gate is through with a task.
+const SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// What became of a task that waited for your required checks, after your choice.
+enum Rechecked {
+    /// Codly checked it again: the pass ran, and the task went where its checks sent it.
+    Again,
+    /// Its team member (the name) is on other work in the worktree they share, so the pass
+    /// could not run there: the task is back in line for the member, whose next turn on it
+    /// ends with the checks.
+    Back(String),
+    /// It still waits for you: why.
+    Waits(String),
 }
 
 impl Inner {
@@ -202,6 +286,162 @@ impl Inner {
         let summary = format!("you turned on the required checks: Codly runs {CHECKS_FILE} for every task and every finished plan");
         self.decide(Some(&ws.id), None, "approval_policy", summary, json!({ "sha": sha, "commands": status.commands }))?;
         Ok(())
+    }
+
+    /// Does the task wait for you because your required checks were not the text you turned
+    /// on? Then the gate parked it with the `required` key, and nothing was decided about it
+    /// since.
+    fn waits_for_checks(&self, task: &Task) -> Result<bool> {
+        if task.status != TaskStatus::Blocked {
+            return Ok(false);
+        }
+        let last = self.store.task_events(&task.id, "decision")?.pop();
+        Ok(last.is_some_and(|e| matches!(&e.kind, EventKind::Decision { decision_type, detail, .. } if decision_type == "gate" && !detail["required"].is_null())))
+    }
+
+    /// The tasks of an office that wait for you because of your required checks.
+    fn parked_for_checks(&self, ws_id: &str) -> Result<Vec<Task>> {
+        let mut parked = vec![];
+        for t in self.store.tasks(ws_id)? {
+            if self.waits_for_checks(&t)? {
+                parked.push(t);
+            }
+        }
+        Ok(parked)
+    }
+
+    /// Wait until nothing works on the task: no pass of the gate runs for it, and it is not
+    /// in flight (a fix round, a review, the merge queue). False: Codly is quitting.
+    async fn settled(&self, task_id: &str) -> bool {
+        loop {
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return false;
+            }
+            let in_gate = lock(&self.gating).contains_key(task_id);
+            // A task that is gone has nothing to wait for.
+            if !in_gate && !self.task(task_id).is_ok_and(|t| scheduler::is_active(t.status)) {
+                return true;
+            }
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
+    }
+
+    /// You turned the required checks on (`on`) or off: every task that waited for that
+    /// choice is checked again, as Re-run checks on its card does, with no click on each.
+    /// Not all at once: the checks of a few tasks run at a time (as many as workers may:
+    /// `max_parallel`), so N waiting tasks do not start N test runs that push each other
+    /// over the time limit. And the tasks of one team member, which share its worktree, go
+    /// one after the other: a pass that began while the member's other task was checked
+    /// there would send the task back to the member for a new turn. When all of them are
+    /// through, the record says what became of each. One choice at a time: a second one
+    /// (on, then off) waits here for the first one's tasks, then takes what still waits.
+    async fn recheck_parked(self: Arc<Self>, ws: Workspace, on: bool) {
+        let _one = self.rechecks.lock().await;
+        if let Err(e) = self.recheck_lanes(&ws, on).await {
+            tracing::warn!("re-checking the tasks that waited for the required checks: {e:#}");
+        }
+    }
+
+    async fn recheck_lanes(self: &Arc<Self>, ws: &Workspace, on: bool) -> Result<()> {
+        let parked = self.parked_for_checks(&ws.id)?;
+        let order: Vec<Id> = parked.iter().map(|t| t.id.clone()).collect();
+        // The tasks that share a worktree are one lane.
+        let mut lanes: Vec<Vec<Task>> = vec![];
+        for t in parked {
+            match lanes.iter_mut().find(|l| t.worktree.is_some() && l[0].worktree == t.worktree) {
+                Some(lane) => lane.push(t),
+                None => lanes.push(vec![t]),
+            }
+        }
+        let slots = Arc::new(Semaphore::new(self.settings().max_parallel.max(1) as usize));
+        let mut running = JoinSet::new();
+        for lane in lanes {
+            let (me, slots) = (self.clone(), slots.clone());
+            running.spawn(async move {
+                // Held for the whole lane. (Nothing closes the semaphore.)
+                let _slot = slots.acquire().await;
+                let mut done = vec![];
+                for t in lane {
+                    if let Some(what) = me.recheck_waiting(&t).await {
+                        done.push((t, what));
+                    }
+                }
+                done
+            });
+        }
+        let mut done = vec![];
+        while let Some(lane) = running.join_next().await {
+            match lane {
+                Ok(tasks) => done.extend(tasks),
+                Err(e) => tracing::warn!("a re-check of the tasks that waited for the required checks crashed: {e}"),
+            }
+        }
+        // Quitting: the tasks that were not reached still wait, with Re-run checks on their cards.
+        if done.is_empty() || self.shutting_down.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        done.sort_by_key(|(t, _)| order.iter().position(|id| *id == t.id));
+        let (mut again, mut back, mut waiting, mut said) = (vec![], vec![], vec![], vec![]);
+        for (t, what) in done {
+            match what {
+                Rechecked::Again => again.push(t.key),
+                Rechecked::Back(who) => {
+                    said.push(format!("{} goes back to {who} first ({who} is on other work in the same worktree)", t.key));
+                    back.push(json!({ "task": t.key, "member": who }));
+                }
+                Rechecked::Waits(why) => waiting.push(format!("{} ({why})", t.key)),
+            }
+        }
+        if !again.is_empty() {
+            said.insert(0, format!("Codly checked {} again", again.join(", ")));
+        }
+        if !waiting.is_empty() {
+            said.push(format!("still waiting for you: {}", waiting.join(", ")));
+        }
+        let summary = format!("after you turned the required checks {}: {}", if on { "on" } else { "off" }, said.join("; "));
+        self.decide(Some(&ws.id), None, "gate", summary, json!({ "rechecked": again, "back_to_member": back, "still_waiting": waiting }))?;
+        Ok(())
+    }
+
+    /// Check one waiting task again and wait until its pass is through, so the next task of
+    /// its lane finds the worktree free. None: it does not wait for your checks any more (you
+    /// moved it on from its card meanwhile), or Codly is quitting.
+    async fn recheck_waiting(self: &Arc<Self>, task: &Task) -> Option<Rechecked> {
+        // The pass that parked it ends a moment after it wrote the task's state (it still
+        // lets the worker go): the re-run needs the task's gate free.
+        if !self.settled(&task.id).await {
+            return None;
+        }
+        let what = match self.recheck_now(task).await {
+            Ok(what) => what?,
+            Err(e) => Rechecked::Waits(e.to_string()),
+        };
+        if matches!(what, Rechecked::Again) {
+            self.settled(&task.id).await;
+        }
+        Some(what)
+    }
+
+    /// Start the gate pass of a task that waits for your required checks (`recheck_task`, as
+    /// its card does). None: it does not wait for them any more.
+    async fn recheck_now(self: &Arc<Self>, task: &Task) -> Result<Option<Rechecked>> {
+        if !self.waits_for_checks(&self.task(&task.id)?)? {
+            return Ok(None);
+        }
+        let mark = self.store.task_events(&task.id, "decision")?.last().map_or(0, |e| e.id);
+        let held = self.recheck_task(&task.id, vec![]).await?;
+        if !held.is_empty() {
+            let cmds: Vec<String> = held.iter().map(|h| format!("`{}`", prompts::clip(&h.command, 80))).collect();
+            return Ok(Some(Rechecked::Waits(format!("needs your OK for {}", cmds.join(", ")))));
+        }
+        // A pass that could not have the worktree (the task's team member is on other work
+        // there) put the task back in line for the member, and the task's record says so.
+        let mut since = self.store.task_events(&task.id, "decision")?.into_iter().filter(|e| e.id > mark);
+        let back = since.find_map(|e| match e.kind {
+            EventKind::Decision { detail, .. } => detail["waits_for"].as_str().map(String::from),
+            _ => None,
+        });
+        Ok(Some(back.map_or(Rechecked::Again, Rechecked::Back)))
     }
 
     // ───────────── for the gate ─────────────
@@ -263,6 +503,21 @@ impl Inner {
         Ok(since.len() == page || since.iter().any(|e| matches!(e.kind, EventKind::TurnStarted { .. })))
     }
 
+    /// Where a 1:1 agent works: its workspace and its worktree, which is checked to be one of
+    /// the repo's before a command or git runs in it (an agent can rewrite its `.git` pointer).
+    async fn work_place(&self, agent: &Agent) -> Result<(Workspace, PathBuf)> {
+        let wt = PathBuf::from(agent.worktree.clone().ok_or_else(|| anyhow!("{} has no worktree yet, so there is nothing to check", agent.name))?);
+        let ws = match self.store.agent_workspace(&agent.id)? {
+            Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
+            None => self.require_ws()?,
+        };
+        let repo = Path::new(&ws.repo_path);
+        if wt != repo {
+            self.git.check_worktree(repo, &wt).await?;
+        }
+        Ok((ws, wt))
+    }
+
     /// "Check the work": run the required checks in the worktree of a 1:1 agent, as it is
     /// now. Its work has no gate, so nothing else checks it before you merge its branch. The
     /// result is yours to read: it stops no merge. One run for an agent at a time (the
@@ -282,21 +537,16 @@ impl Inner {
         let _checking = Checking { inner: self, agent_id: agent.id.clone() };
         // The agent's newest event: a turn of it that starts later changes the files under the checks.
         let mark = self.store.events(None, Some(agent_id), None, 1)?.first().map_or(0, |e| e.id);
-        let wt = PathBuf::from(agent.worktree.clone().ok_or_else(|| anyhow!("{} has no worktree yet, so there is nothing to check", agent.name))?);
-        let ws = match self.store.agent_workspace(agent_id)? {
-            Some(id) => self.store.workspace(&id)?.ok_or_else(|| anyhow!("unknown workspace"))?,
-            None => self.require_ws()?,
-        };
-        let repo = Path::new(&ws.repo_path);
-        if wt != repo {
-            self.git.check_worktree(repo, &wt).await?;
-        }
-        let cmds = match self.required_checks(&ws.id, repo)? {
+        let (ws, wt) = self.work_place(&agent).await?;
+        let cmds = match self.required_checks(&ws.id, Path::new(&ws.repo_path))? {
             Required::Run(cmds) => cmds,
             Required::Off => bail!("this repo has no required checks turned on. Write your commands in {CHECKS_FILE}, one on each line, then turn them on in {SETTINGS}"),
             Required::Stale(why) => bail!("{}", not_run(&why)),
         };
         let results = self.run_checks(&ws.id, &wt, Some(agent_id), &cmds).await?;
+        // What the result is about: the files as the commands left them. Read before the look
+        // for a turn, so a turn that starts later changes files this tree does not have.
+        let tree = self.git.worktree_tree(&wt).await?;
         if self.at_work(&self.agent(agent_id)?) || self.turn_since(agent_id, mark, results.len())? {
             bail!("{} worked while the checks ran, so their result is not about its files as they are now. Check its work again when its turn ends", agent.name);
         }
@@ -313,22 +563,70 @@ impl Inner {
             0 => format!("{} passed", count(results.len())),
             n => format!("{n} of {} failed: {}", count(results.len()), failed.join(", ")),
         };
-        // The whole result: the agent's Git tab shows the last one from this decision
-        // (src/lib/util/checks.ts), also after you left the tab.
+        // The whole result is on record, output too.
         self.decide_by(Some(&ws.id), None, "gate", "human", format!("you checked {}'s work: {outcome}", agent.name), json!({ "agent_id": agent_id, "checks": results }))?;
         self.chat(Some(&ws.id), &format!("agent:{agent_id}"), "codly", &format!("Checked {}'s work: {outcome}.", agent.name), None)?;
+        // And kept with the files it is about: the agent's Git tab shows it for as long as
+        // the worktree has these files (`agent_check_state`).
+        let checked = Checked { work: CheckedWork { results: results.clone(), at: now_ms() }, tree };
+        self.store.kv_set(&checked_key(agent_id), &serde_json::to_string(&checked)?)?;
         Ok(results)
+    }
+
+    /// What "Check the work" has for an agent now. A run that is on its way is known here and
+    /// not in the window, so a reloaded window still says that it runs. The last result
+    /// counts only while the agent's worktree has the files the commands ran on: a turn of
+    /// the agent, files you put back from a checkpoint, a merge into its branch and your own
+    /// edits all change them, and then the result is dropped. While the agent works nothing
+    /// is shown: its files can change at any moment.
+    async fn agent_check_state(&self, agent_id: &str) -> Result<AgentCheck> {
+        let nothing = AgentCheck { running: false, last: None };
+        let key = checked_key(agent_id);
+        loop {
+            let agent = self.agent(agent_id)?;
+            if lock(&self.checking).contains(agent_id) {
+                return Ok(AgentCheck { running: true, last: None });
+            }
+            let Some(saved) = self.store.kv_get(&key)? else { return Ok(nothing) };
+            if self.at_work(&agent) {
+                return Ok(nothing);
+            }
+            let checked: Checked = serde_json::from_str(&saved)?;
+            let same = match agent.worktree.as_deref().map(Path::new).filter(|wt| wt.is_dir()) {
+                Some(_) => {
+                    let (_, wt) = self.work_place(&agent).await?;
+                    self.git.worktree_tree(&wt).await? == checked.tree
+                }
+                // The worktree is gone, and the checked files with it.
+                None => false,
+            };
+            if same {
+                return Ok(AgentCheck { running: false, last: Some(checked.work) });
+            }
+            // Reading the files took a while, and a "Check the work" can have started or
+            // ended meanwhile. One that runs now changes files under this look, so nothing
+            // is judged; one that ended left a new result, about the files as they are now.
+            // Only the result that was read here is dropped: in both cases, look again.
+            if !lock(&self.checking).contains(agent_id) && self.store.kv_delete_if(&key, &saved)? {
+                return Ok(nothing);
+            }
+        }
     }
 }
 
 impl Core {
     /// The open repo's required checks (`.codly/checks`): the text, its commands with what
     /// the approval rules see in each, on or off. `set` turns them on, for the text you read,
-    /// or off.
+    /// or off; the tasks that waited for that choice are then checked again, in the
+    /// background (`recheck_parked`): the answer does not wait for their checks.
     pub async fn required_checks(&self, set: Option<ChecksChoice>) -> Result<RequiredChecks> {
         let ws = self.inner.require_ws()?;
         if let Some(choice) = set {
+            let on = choice.allow.is_some();
             self.inner.choose_checks(&ws, choice)?;
+            if !self.inner.parked_for_checks(&ws.id)?.is_empty() {
+                tokio::spawn(self.inner.clone().recheck_parked(ws.clone(), on));
+            }
         }
         self.inner.checks_status(&ws)
     }
@@ -338,12 +636,16 @@ impl Core {
     pub async fn check_agent(&self, agent_id: &str) -> Result<Vec<CheckResult>> {
         self.inner.check_agent(agent_id).await
     }
+
+    /// What "Check the work" has for an agent now: whether its checks run, and the last
+    /// result while the agent's files are still the ones that were checked.
+    pub async fn agent_check_state(&self, agent_id: &str) -> Result<AgentCheck> {
+        self.inner.agent_check_state(agent_id).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::orchestrator::{CoreConfig, StartOptions};
 
@@ -381,6 +683,25 @@ mod tests {
         let text = "# the owner's checks\n\n  pnpm check  \npnpm test -- --run\n#cargo test\npnpm check\n";
         assert_eq!(commands(text), ["pnpm check", "pnpm test -- --run"]);
         assert!(commands("# nothing yet\n\n").is_empty());
+    }
+
+    #[test]
+    fn the_leads_board_names_your_required_checks_or_says_that_none_runs() {
+        assert_eq!(board_line(&Required::Off), None, "off: the board says nothing");
+        let on = board_line(&Required::Run(vec!["pnpm check".into(), "pnpm test".into()])).unwrap();
+        assert_eq!(
+            on,
+            "Required by the user (.codly/checks; Codly runs these for every task after its verify commands, and for every finished plan): \
+             `pnpm check` · `pnpm test`"
+        );
+        // A long file does not fill the board.
+        let many: Vec<String> = (0..9).map(|i| format!("make check-{i}")).collect();
+        let long = board_line(&Required::Run(many)).unwrap();
+        assert!(long.ends_with("`make check-5` · 3 more") && !long.contains("check-6"), "{long}");
+        // Not the text you turned on: the Lead knows why its tasks wait, in words for the Lead.
+        let stale = board_line(&Required::Stale(".codly/checks changed since you turned them on".into())).unwrap();
+        assert!(stale.contains("Codly runs none of them now") && stale.contains(SETTINGS), "{stale}");
+        assert!(!stale.contains("you turned"), "\"you\" is the Lead on its board: {stale}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

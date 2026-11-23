@@ -328,7 +328,8 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   them. Codly then runs them for every task, after the checks the Lead wrote, and again on every
   finished plan; **Check the work**, in the Git tab of an agent you chat with, runs them on that
   agent's work. Codly runs only the text you turned on: if the file changes, tasks wait until you read
-  it again. A plan card also marks a task whose own checks cannot fail (`true`, `test -f …`).
+  it again, and go on by themselves once you turn it on again or off. A plan card also marks a task
+  whose own checks cannot fail (`true`, `test -f …`).
 - Before each turn of an agent, Codly keeps the files of the agent's worktree as a checkpoint (a commit
   under a private ref, on no branch). **Restore files to this point**, in the agent's Git tab, puts the
   files back and can be undone. It changes files only: the agent still remembers its later turns. An agent

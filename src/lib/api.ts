@@ -27,6 +27,7 @@ import type { ConnectionSecret } from './gen/ConnectionSecret';
 import type { SweepReport } from './gen/SweepReport';
 import type { SetupChoice } from './gen/SetupChoice';
 import type { WorktreeSetup } from './gen/WorktreeSetup';
+import type { AgentCheck } from './gen/AgentCheck';
 import type { CheckResult } from './gen/CheckResult';
 import type { ChecksChoice } from './gen/ChecksChoice';
 import type { RequiredChecks } from './gen/RequiredChecks';
@@ -534,6 +535,8 @@ export const api = {
   requiredChecks: (set: ChecksChoice | null = null) => call<RequiredChecks>('required_checks', { set }),
   /** Run the required checks in the worktree of an agent you chat with; each command's result. */
   checkAgent: (agentId: string) => call<CheckResult[]>('check_agent', { agentId }),
+  /** What "Check the work" has for an agent now: whether its checks run, and the last result while its files are still the checked ones. */
+  agentCheckState: (agentId: string) => call<AgentCheck>('agent_check_state', { agentId }),
   /** What the open repo makes the agent CLIs load by themselves, and your choice; pass `set` to trust the files you read or to open the repo without them. */
   workspaceTrust: (set: TrustChoice | null = null) => call<WorkspaceTrust>('workspace_trust', { set }),
   /** Default MCP servers for new agents, with their switches and whether each key is stored. */

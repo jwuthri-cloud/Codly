@@ -1,12 +1,12 @@
 <!--
   The tasks of a plan with no real check: none of their verify commands can fail on the work (the
-  planner's mark, `weak_checks` in the core). Shown with the plan before you run it, and after: a
-  plan that runs at once (an Auto or Direct request) never waited with this on screen.
+  planner's mark, `weak_checks` in the core, kept on the plan itself: it is there after a restart
+  and however long the history is). Shown with the plan before you run it, and after: a plan that
+  runs at once (an Auto or Direct request) never waited with this on screen.
 -->
 <script lang="ts">
   import type { Plan } from '../../lib/gen/Plan';
-  import { store } from '../../lib/state/store.svelte';
-  import { weakAdvice, weakTasks } from '../../lib/util/plan';
+  import { weakAdvice } from '../../lib/util/plan';
   import Icon from '../../components/Icon.svelte';
 
   interface Props {
@@ -16,16 +16,12 @@
   }
   let { plan, room = false }: Props = $props();
 
-  const weak = $derived.by(() => {
-    void store.rev;
-    return weakTasks(store.decisions, plan.id);
-  });
   const advice = $derived(weakAdvice(plan));
 </script>
 
-{#if advice && weak.length}
+{#if advice && plan.weak_checks.length}
   <ul class="weak" class:room aria-label="Tasks with no real check">
-    {#each weak as w (w.task)}
+    {#each plan.weak_checks as w (w.task)}
       <li>
         <Icon name="alert" size={14} />
         <span>

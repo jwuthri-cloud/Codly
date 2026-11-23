@@ -1,6 +1,7 @@
 //! Agents hired through the add-agent wizard (or an imported hire manifest): a 1:1 agent with
 //! its own name, avatar and colour, an optional briefing (role + standing goal) that rides on
-//! every prompt, a choice of working in its own worktree or straight in the project folder, and
+//! every prompt (its career block rides on the first prompt of each run only), a choice of
+//! working in its own worktree or straight in the project folder, and
 //! an optional session to resume. The manifest rules live in `crate::hire`; this is the part
 //! that needs the store, git and the live runs.
 
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 
-use super::{Inner, names, prompts};
+use super::{Inner, lock, names, prompts};
 use crate::hire::{self, Engine, HireManifest};
 use crate::model::*;
 
@@ -50,13 +51,19 @@ impl Inner {
             .flatten()
     }
 
-    /// `text` with the agent's standing briefing in front, if it has one.
+    /// `text` with the agent's standing briefing in front, if it has one, and, on the first
+    /// prompt of a run, with what its career adds.
     pub(super) fn with_briefing(&self, agent_id: &str, text: &str) -> String {
         let text = match self.agent_brief(agent_id) {
             Some(b) => hire::wrap_prompt(&b.description, &b.goal, b.isolate, text),
             None => text.to_string(),
         };
-        // Its traits' work rules and its track record (career.rs), for workers and 1:1 agents.
+        // Its traits' work rules and its track record (career.rs), for workers and 1:1 agents:
+        // once in a run. On every fix round and steer note they only cost tokens.
+        let first = lock(&self.live).get_mut(agent_id).is_some_and(|l| !std::mem::replace(&mut l.briefed, true));
+        if !first {
+            return text;
+        }
         let rules = self.settings().game_rules;
         let career = self.agent(agent_id).ok().filter(|a| matches!(a.role, Role::Worker | Role::Solo)).map(|a| career_briefing(a.role, &a.career, rules));
         match career.filter(|c| !c.is_empty()) {

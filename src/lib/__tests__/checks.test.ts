@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import { ChecksDemo } from '../demo/checks';
+import type { AgentCheck } from '../gen/AgentCheck';
 import type { CheckResult } from '../gen/CheckResult';
-import type { JsonValue } from '../gen/serde_json/JsonValue';
 import { agentChecks } from '../state/agentChecks.svelte';
-import type { Decision, Seg, TaskMark } from '../state/store.svelte';
-import { checkLine, checksLine, checksPassed, lastAgentCheck, taskChecks } from '../util/checks';
+import type { Seg, TaskMark } from '../state/store.svelte';
+import { checkLine, checksLine, checksPassed, doneChecks, requiredLine, taskChecks } from '../util/checks';
 import { setupChoices } from '../util/worktree';
 
 describe('the demo repo’s required checks', () => {
@@ -14,13 +14,25 @@ describe('the demo repo’s required checks', () => {
     const shown = demo.status(null);
     expect(shown).toMatchObject({ on: false, changed: false, problem: null });
     expect(shown.commands.map((c) => c.command)).toEqual(['pnpm check', 'pnpm test']);
-    expect(() => demo.run()).toThrow(/no required checks turned on/);
+    expect(() => demo.run('a1', 1)).toThrow(/no required checks turned on/);
 
     // Another text than the one shown is refused, as the core refuses a changed file.
     expect(() => demo.status({ allow: 'another-text' })).toThrow(/changed since you read it/);
     expect(demo.status({ allow: shown.sha }).on).toBe(true);
-    expect(demo.run().map((r) => [r.command, r.ok])).toEqual([['pnpm check', true], ['pnpm test', true]]);
+    expect(demo.run('a1', 2).map((r) => [r.command, r.ok])).toEqual([['pnpm check', true], ['pnpm test', true]]);
     expect(demo.status({ allow: null }).on).toBe(false);
+  });
+
+  it('keeps an agent’s last result until that agent works again', () => {
+    const demo = new ChecksDemo();
+    demo.status({ allow: demo.status(null).sha });
+    expect(demo.state('a1', false)).toEqual({ running: false, last: null });
+    const results = demo.run('a1', 7);
+    expect(demo.state('a1', false)).toEqual({ running: false, last: { results, at: 7 } });
+    expect(demo.state('a2', false).last).toBeNull();
+    // Its turn changes its files: the result is not about them any more, also when the turn is over.
+    expect(demo.state('a1', true).last).toBeNull();
+    expect(demo.state('a1', false).last).toBeNull();
   });
 
   it('runs nothing of a text that changed, and lets you turn it off without turning the new text on', () => {
@@ -30,7 +42,7 @@ describe('the demo repo’s required checks', () => {
 
     const changed = demo.status(null);
     expect(changed).toMatchObject({ on: false, changed: true });
-    expect(() => demo.run()).toThrow(/changed since you turned them on/);
+    expect(() => demo.run('a1', 1)).toThrow(/changed since you turned them on/);
     // The same choices as for the setup script: each its own button.
     expect(setupChoices(changed)).toEqual({ on: changed.sha, off: true, ask: true });
     expect(demo.status({ allow: null })).toMatchObject({ on: false, changed: false });
@@ -117,70 +129,119 @@ describe('a task’s checks on its sheet', () => {
     expect(taskChecks(['pnpm build'], [], segs, never)[0]).toMatchObject({ state: 'running', since: 5 });
     expect(rows(taskChecks(['pnpm test'], [ran('pnpm test', false)], segs, never))).toEqual([['pnpm test', 'fail', 'failed · Codly']]);
   });
+
+  it('tells your required checks from the task’s own on its Done card', () => {
+    const marks = [ran('pnpm lint', true), ran('pnpm test', true), ran('pnpm check', true), ran('cargo test', true)];
+    const done = doneChecks(['pnpm lint', 'pnpm test'], marks);
+    // The task's own check is the last one the Lead wrote, not the last command Codly ran (yours).
+    expect(done.own).toMatchObject({ cmd: 'pnpm test', state: 'pass', required: false });
+    expect(done.required.map((c) => [c.cmd, c.required])).toEqual([['pnpm check', true], ['cargo test', true]]);
+    expect(requiredLine(done.required)).toBe('Required by you: 2 checks passed');
+    expect(requiredLine(done.required.slice(0, 1))).toBe('Required by you: 1 check passed');
+  });
+
+  it('shows on the Done card a check that failed before you merged the task anyway', () => {
+    const marks = [ran('pnpm lint', false), ran('pnpm test', true), ran('pnpm check', true), ran('cargo test', false)];
+    const done = doneChecks(['pnpm lint', 'pnpm test'], marks);
+    expect(done.own).toMatchObject({ cmd: 'pnpm lint', state: 'fail' });
+    expect(requiredLine(done.required)).toBe('Required by you: 1 of 2 checks failed');
+    // No required check ran (they are off), and none of the task's own: nothing to show.
+    expect(doneChecks(['pnpm test'], [ran('pnpm test', true)]).required).toEqual([]);
+    expect(doneChecks(['pnpm test'], [])).toEqual({ own: null, required: [] });
+  });
 });
 
-describe('the last “Check the work” of an agent', () => {
-  let n = 0;
-  const decision = (type: string, detail: JsonValue, ts: number): Decision => {
-    n += 1;
-    return { id: `d${n}`, type, method: 'human', summary: '', detail, ts, agentId: null, taskId: null, eventId: n };
-  };
+describe('“Check the work” as the core knows it', () => {
   const passed: CheckResult = { command: 'pnpm check', ok: true, exit_code: 0, timed_out: false, tail: 'ok' };
-  const failed: CheckResult = { command: 'pnpm test', ok: false, exit_code: 1, timed_out: false, tail: '1 failed' };
-  const checked = (agent: string, checks: JsonValue, ts: number) => decision('gate', { agent_id: agent, checks }, ts);
+  const last = { results: [passed], at: 30 };
+  const idle: AgentCheck = { running: false, last: null };
 
-  it('reads the newest result of this agent, with its output and when it ran', () => {
-    const decisions = [checked('a1', [failed], 10), checked('a2', [passed], 20), checked('a1', [passed, failed], 30), decision('gate', { plan_id: 'p1', verify: [] }, 40)];
-    expect(lastAgentCheck(decisions, 'a1', null)).toEqual({ results: [passed, failed], ts: 30 });
-    expect(lastAgentCheck(decisions, 'a2', 15)).toEqual({ results: [passed], ts: 20 });
-    expect(lastAgentCheck(decisions, 'a3', null)).toBeNull();
-    // An older page of the history can come in after the newer rows.
-    expect(lastAgentCheck([decisions[2], decisions[0]], 'a1', null)?.ts).toBe(30);
-  });
-
-  it('has no result once the agent got a turn after the checks', () => {
-    const decisions = [checked('a1', [passed], 30)];
-    expect(lastAgentCheck(decisions, 'a1', 29)).not.toBeNull();
-    expect(lastAgentCheck(decisions, 'a1', 31)).toBeNull();
-  });
-
-  it('shows nothing of a result it cannot read in full', () => {
-    expect(lastAgentCheck([checked('a1', [passed, ['pnpm test', false, 1]], 30)], 'a1', null)).toBeNull();
-    expect(lastAgentCheck([checked('a1', [{ ...passed, exit_code: '0' }], 30)], 'a1', null)).toBeNull();
-    expect(lastAgentCheck([decision('merge', { agent_id: 'a1', checks: [passed] }, 30)], 'a1', null)).toBeNull();
-  });
-});
-
-describe('a “Check the work” run that is on its way', () => {
   afterEach(() => {
     vi.restoreAllMocks();
-    agentChecks.running = {};
+    agentChecks.state = {};
     agentChecks.failed = {};
+    agentChecks.unread = {};
   });
 
-  it('is one run for an agent, and is still known when the Git tab is opened again', async () => {
+  it('still says that the checks run after the window was reloaded', async () => {
+    // A new window knows nothing; the core says that a run from before the reload is on its way.
+    const core = vi.spyOn(api, 'agentCheckState').mockResolvedValueOnce({ running: true, last: null });
+    await agentChecks.load('a1');
+    expect(agentChecks.state.a1).toEqual({ running: true, last: null });
+    // A click now starts no second run.
+    const run = vi.spyOn(api, 'checkAgent');
+    await agentChecks.run('a1');
+    expect(run).not.toHaveBeenCalled();
+    // The run ended: the next answer has its result.
+    core.mockResolvedValueOnce({ running: false, last });
+    await agentChecks.load('a1');
+    expect(agentChecks.state.a1).toEqual({ running: false, last });
+  });
+
+  it('shows no result once the core dropped it', async () => {
+    const core = vi.spyOn(api, 'agentCheckState').mockResolvedValueOnce({ running: false, last });
+    await agentChecks.load('a1');
+    expect(agentChecks.state.a1.last).toEqual(last);
+    // The files changed without a turn (restored files, a merge, your own edit): the Git tab
+    // read the worktree again and asks.
+    core.mockResolvedValueOnce(idle);
+    await agentChecks.load('a1');
+    expect(agentChecks.state.a1).toEqual(idle);
+  });
+
+  it('is one run for an agent, and ends with the result the core kept', async () => {
     let answer!: (r: CheckResult[]) => void;
-    const core = vi.spyOn(api, 'checkAgent').mockReturnValue(new Promise<CheckResult[]>((r) => (answer = r)));
+    const run = vi.spyOn(api, 'checkAgent').mockReturnValue(new Promise<CheckResult[]>((r) => (answer = r)));
+    vi.spyOn(api, 'agentCheckState').mockResolvedValue({ running: false, last });
     const first = agentChecks.run('a1');
     // The tab closed and opened again: a new component reads the same state, and a second click does nothing.
-    expect(agentChecks.running.a1).toBe(true);
+    expect(agentChecks.state.a1).toEqual({ running: true, last: null });
     await agentChecks.run('a1');
-    expect(core).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
     // Another agent's checks are its own run.
     void agentChecks.run('a2');
-    expect(core).toHaveBeenCalledTimes(2);
-    answer([]);
+    expect(run).toHaveBeenCalledTimes(2);
+    answer([passed]);
     await first;
-    expect(agentChecks.running.a1).toBe(false);
+    expect(agentChecks.state.a1).toEqual({ running: false, last });
+  });
+
+  it('drops an answer that is older than the run it would hide', async () => {
+    // The Git tab asked just before the click; "nothing runs" comes back after it.
+    let tell!: (s: AgentCheck) => void;
+    let answer!: (r: CheckResult[]) => void;
+    const core = vi.spyOn(api, 'agentCheckState').mockReturnValueOnce(new Promise<AgentCheck>((r) => (tell = r)));
+    vi.spyOn(api, 'checkAgent').mockReturnValue(new Promise<CheckResult[]>((r) => (answer = r)));
+    const asked = agentChecks.load('a1');
+    const run = agentChecks.run('a1');
+    tell(idle);
+    await asked;
+    expect(agentChecks.state.a1.running).toBe(true);
+    core.mockResolvedValueOnce({ running: false, last });
+    answer([passed]);
+    await run;
+    expect(agentChecks.state.a1).toEqual({ running: false, last });
   });
 
   it('keeps why a run gave no result, until the next run', async () => {
-    const core = vi.spyOn(api, 'checkAgent').mockRejectedValueOnce(new Error('Codly is still checking Ada’s work; the result comes when its checks end'));
+    const why = 'Ada worked while the checks ran, so their result is not about its files as they are now. Check its work again when its turn ends';
+    const run = vi.spyOn(api, 'checkAgent').mockRejectedValueOnce(new Error(why));
+    vi.spyOn(api, 'agentCheckState').mockResolvedValue(idle);
     await agentChecks.run('a1');
-    expect(agentChecks.failed.a1).toBe('Codly is still checking Ada’s work; the result comes when its checks end');
-    expect(agentChecks.running.a1).toBe(false);
-    core.mockResolvedValueOnce([]);
+    expect(agentChecks.failed.a1).toBe(why);
+    expect(agentChecks.state.a1).toEqual(idle);
+    run.mockResolvedValueOnce([]);
     await agentChecks.run('a1');
     expect(agentChecks.failed.a1).toBeNull();
+  });
+
+  it('says that the core could not answer, until it can', async () => {
+    const core = vi.spyOn(api, 'agentCheckState').mockRejectedValueOnce(new Error('git status failed'));
+    await agentChecks.load('a1');
+    expect(agentChecks.unread.a1).toBe('git status failed');
+    expect(agentChecks.state.a1).toBeUndefined();
+    core.mockResolvedValueOnce(idle);
+    await agentChecks.load('a1');
+    expect(agentChecks.unread.a1).toBeNull();
   });
 });

@@ -46,30 +46,6 @@ export function waitingOn(tasks: Task[], id: string): Task[] {
   return tasks.filter((t) => t.id !== id && found.has(t.id) && t.status !== 'done' && t.status !== 'cancelled');
 }
 
-/** A task whose verify commands prove nothing about the work: Codly would pass it whatever its worker did. */
-export type WeakTask = {
-  /** The task's key in the plan ("t1"). */
-  task: string;
-  /** Each of its verify commands, and why it proves nothing ("always passes"). */
-  checks: { command: string; why: string }[];
-};
-
-/** The tasks of plan `planId` that the planner marked (the core's `weak_checks`): none of their verify
- *  commands can fail on the work. Read from the plan's `plan_validate` decisions, rule `weak_verify`. */
-export function weakTasks(decisions: Decision[], planId: string): WeakTask[] {
-  const marked: WeakTask[] = [];
-  for (const { type, detail } of decisions) {
-    if (type !== 'plan_validate' || !detail || typeof detail !== 'object' || Array.isArray(detail)) continue;
-    const { plan_id, rule, task, checks } = detail;
-    if (plan_id !== planId || rule !== 'weak_verify' || typeof task !== 'string' || !Array.isArray(checks)) continue;
-    const read = checks.flatMap((c) =>
-      c && typeof c === 'object' && !Array.isArray(c) && typeof c.command === 'string' && typeof c.why === 'string' ? [{ command: c.command, why: c.why }] : [],
-    );
-    if (read.length) marked.push({ task, checks: read });
-  }
-  return marked;
-}
-
 /** Why a plan did not start by itself in a request that runs its plans at once (Auto, Direct): the
  *  words for its card, above Run plan. Read from the plan's `plan_validate` decision that says so
  *  (the core's `submit_plan_inner`): rule `inbound` or `intake`. Null: it waits because the request
@@ -83,7 +59,7 @@ export function waitReason(decisions: Decision[], planId: string): string | null
   return null;
 }
 
-/** What you can do about a task with no real check, by where its plan is. Null: nothing any more
+/** What you can do about a task with no real check (`Plan.weak_checks`), by where its plan is. Null: nothing any more
  *  (the plan is cancelled, or its work is merged into your branch). */
 export function weakAdvice(plan: Pick<Plan, 'status' | 'merged_sha'>): string | null {
   if (plan.status === 'planning' || plan.status === 'awaiting_approval') return 'Ask the Lead for a real test, or run the plan as it is.';
