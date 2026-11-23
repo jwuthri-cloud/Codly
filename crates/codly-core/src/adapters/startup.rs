@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(e.to_string(), "Claude Code already has a conversation with the id Codly gave this new one");
 
         // Claude Code's words only: another CLI's text stands as it is.
-        assert_eq!(advice(Provider::Codex, &gone, None, None, false), None);
+        assert_eq!(advice(Provider::Codex, &gone, None, None, false, None), None);
         assert_eq!(session_trouble("ENOSPC: no space left on device"), None);
     }
 
