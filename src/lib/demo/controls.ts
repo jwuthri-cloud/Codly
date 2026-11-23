@@ -199,8 +199,8 @@ export class MockControls {
   }
 
   /**
-   * "Turn off" and "Turn on" on an MCP server of a Claude agent, for this run of the agent:
-   * the server's state says "switched off", or "connected" again. Codly's own server stays on.
+   * "Turn off" and "Turn on" on an MCP server of a Claude agent's live run: the server's
+   * state says "switched off", or "connected" again. Codly's own server stays on.
    */
   setMcpEnabled(id: string, server: string, enabled: boolean): null {
     const a = this.agent(id);

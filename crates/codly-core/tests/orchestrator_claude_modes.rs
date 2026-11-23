@@ -249,10 +249,12 @@ impl Spawner for Fake {
                                     s.log.push(format!("reconnect:{server}"));
                                     Err("Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}".to_string())
                                 }
-                                // (recorded: a success with no body, off and on)
+                                // (recorded: a success with no body, off and on. Not recorded: a
+                                // switch the CLI refuses; the error here is the connect error that a
+                                // reconnect of a dead stdio server answers with.)
                                 SessionRequest::McpEnabled(server, on) => {
                                     s.log.push(format!("mcp-{}:{server}", if on { "on" } else { "off" }));
-                                    Ok(serde_json::Value::Null)
+                                    if server == "does-not-start" { Err("Connection closed".to_string()) } else { Ok(serde_json::Value::Null) }
                                 }
                                 // (recorded: `{}`, whether or not a task ended)
                                 SessionRequest::StopTask(task_id) => {
@@ -921,8 +923,9 @@ async fn a_background_command_is_stopped_through_the_live_session() {
     core.shutdown().await;
 }
 
-/// "Turn off" and "Turn on" of an MCP server reach the live session, for this run of the
-/// agent, and each is on record as your act. Codly's own server stays on.
+/// "Turn off" and "Turn on" of an MCP server reach the live session, and each is on record
+/// as your act once Claude Code answered. A switch it refused is on record as what you asked,
+/// with its reason. Codly's own server stays on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_mcp_server_is_turned_off_and_on_through_the_live_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -936,13 +939,23 @@ async fn an_mcp_server_is_turned_off_and_on_through_the_live_session() {
     assert_eq!(last_seen(&seen), "mcp-on:docs");
     assert_eq!(your_acts(&core, &id).await, [format!("you turned docs off for {name}'s run"), format!("you turned docs on for {name}'s run")]);
 
+    // Claude Code refuses a switch: its reason is yours, and the record says what you asked
+    // and what came back. It does not say "you turned": the server was not turned on.
+    let e = core.set_agent_mcp_enabled(&id, "does-not-start", true).await.unwrap_err().to_string();
+    assert_eq!(e, "Claude Code answered: Connection closed");
+    assert_eq!(last_seen(&seen), "mcp-on:does-not-start");
+    let acts = your_acts(&core, &id).await;
+    assert_eq!(acts.len(), 3, "{acts:?}");
+    assert_eq!(acts[2], format!("asked {name} to turn does-not-start on: Claude Code answered: Connection closed"));
+    assert!(!acts.iter().any(|a| a.starts_with("you turned does-not-start")), "{acts:?}");
+
     // Codly's own server, and no server named: nothing reaches the CLI, nothing is on record.
     let e = core.set_agent_mcp_enabled(&id, "codly", false).await.unwrap_err().to_string();
     assert_eq!(e, format!("codly is Codly's own server: {name} reports to Codly through it, so it stays on"));
     let e = core.set_agent_mcp_enabled(&id, "  ", true).await.unwrap_err().to_string();
     assert_eq!(e, "which MCP server?");
-    assert_eq!(last_seen(&seen), "mcp-on:docs");
-    assert_eq!(your_acts(&core, &id).await.len(), 2);
+    assert_eq!(last_seen(&seen), "mcp-on:does-not-start");
+    assert_eq!(your_acts(&core, &id).await.len(), 3);
 
     stop(&core, &id).await;
     let e = core.set_agent_mcp_enabled(&id, "docs", false).await.unwrap_err().to_string();

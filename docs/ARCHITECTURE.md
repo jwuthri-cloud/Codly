@@ -667,7 +667,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore
                       takeover.rs                         "Open in my terminal": a session goes to you, and comes back
-                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, turn one off or on for this run, stop a background command; its servers and its last list of background tasks for a snapshot
+                      live_session.rs                     a live Claude session from the agent sheet: reconnect an MCP server, turn one off or on, stop a background command; its servers and its last list of background tasks for a snapshot
                       tools.rs triggers.rs memgraph.rs    MCP tool handler, trigger loop, Knowledge room lenses
                       housekeeping.rs                     glue for housekeeping/ (storage: housekeeping/storage.rs)
                       worktree_setup.rs                   a new worktree made ready: copied files, ports, setup script

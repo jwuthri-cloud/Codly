@@ -114,11 +114,16 @@ export function mcpSwitch(s: McpServer): McpSwitch | null {
   return null;
 }
 
-/** What the switch is for, on its button: nothing is saved, the agent's process holds it. */
-export const mcpSwitchHint = (agent: string): string => `For this run of ${agent}. Its next run starts every server again.`;
+/**
+ * What the switch is for, on its button. Not recorded: whether Claude Code saves the switch
+ * (docs/research has one process that turns a server off and on, and no process started
+ * after an "off"). So the line promises nothing about the agent's next run, and says that
+ * the switch can stay.
+ */
+export const mcpSwitchHint = (agent: string): string => `Switches this server for ${agent}. Claude Code may keep the switch after this run.`;
 
 /**
- * Turn an MCP server off or on for this run of the agent. Returns whether Claude Code took
+ * Turn an MCP server of the agent's live run off or on. Returns whether Claude Code took
  * the request; the server's next `mcp_server` event says where it stands. A refusal (Codly's
  * own server, a server that does not start again) is said in a toast, with the reason.
  */

@@ -100,7 +100,7 @@ describe('the MCP servers of an agent', () => {
     expect(reconnectAnswer(tracker(), { ...late, seen: tracker().ts })).toBeNull();
   });
 
-  it('a connected server can be turned off and a switched-off one on, for this run; Codly\'s own stays on', () => {
+  it('a connected server can be turned off and a switched-off one on; Codly\'s own stays on', () => {
     apply(
       server(10, 'r2', 'codly', 'connected'),
       server(10, 'r2', 'docs', 'connected'),
@@ -121,8 +121,9 @@ describe('the MCP servers of an agent', () => {
     ]);
     expect(mcpSwitch(servers[1])).toEqual({ label: 'Turn off', busy: 'Turning off…', enabled: false });
     expect(mcpSwitch(servers[2])).toEqual({ label: 'Turn on', busy: 'Turning on…', enabled: true });
-    // Nothing is saved: the button says how far the switch goes.
-    expect(mcpSwitchHint('Bo')).toBe('For this run of Bo. Its next run starts every server again.');
+    // No recording says whether Claude Code saves the switch: the hint promises nothing
+    // about the agent's next run.
+    expect(mcpSwitchHint('Bo')).toBe('Switches this server for Bo. Claude Code may keep the switch after this run.');
     expect(MCP_HINT.disabled).toBe('This server is switched off: the agent works without its tools. Turn on starts it again.');
     expect(mcpSummary(servers)).toBe('2 connected · 1 connecting · 1 needs sign-in · 1 did not start · 1 switched off');
   });

@@ -157,9 +157,11 @@ pub enum SessionRequest {
     /// server that still cannot connect the answer is an error with the CLI's reason; for one
     /// that connects it is a success with no body (part 3 §10, n=1).
     McpReconnect(String),
-    /// `mcp_toggle`: turn the MCP server of this name off (false) or on (true) for this
-    /// process. Recorded (part 3 §10, n=1): a success with no body either way; the server is
-    /// then `disabled`, or started again and `connected`. Where it stands is in `mcp_status`.
+    /// `mcp_toggle`: turn the MCP server of this name off (false) or on (true). Recorded
+    /// (part 3 §10, n=1): a success with no body either way; the server is then `disabled`,
+    /// or started again and `connected`. Where it stands is in `mcp_status`. Not recorded:
+    /// whether the CLI saves the switch (no process was started after an "off"), and what it
+    /// answers for a server that does not start or that it does not know.
     McpEnabled(String, bool),
     /// `stop_task`, with the id of a background task (`BackgroundTask::id`): the CLI ends it.
     /// The answer is empty also when nothing was stopped (recorded, part 2 §6): the CLI's next

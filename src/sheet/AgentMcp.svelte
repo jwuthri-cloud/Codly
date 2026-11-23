@@ -5,8 +5,8 @@
   Code to try again (orchestrator/live_session.rs), which can take as long as the server takes
   to start. When the server still does not connect, the answer shows under the server, beside
   the server's reason, until the server reports again. "Turn off" on a connected server and
-  "Turn on" on a switched-off one are for this run of the agent: nothing is saved, and the
-  agent's next run starts every server again.
+  "Turn on" on a switched-off one go to the agent's live run. Not recorded: whether Claude
+  Code saves the switch, so the button's hint promises nothing about the agent's next run.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
