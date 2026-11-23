@@ -13,6 +13,7 @@
 //
 // A row's key is made from the id of what it shows (a chat row, a message of the agent, a
 // call, an event), never from its words: an agent that says the same thing twice has two rows.
+import type { Agent } from '../lib/gen/Agent';
 import type { Approval } from '../lib/gen/Approval';
 import type { ChatMessage } from '../lib/gen/ChatMessage';
 import type { MessagePhase } from '../lib/gen/MessagePhase';
@@ -287,16 +288,6 @@ export function buildSpine(thread: string): Item[] {
     // ── a Kill of yours: what you did, when ──
     for (const at of kills) items.push({ kind: 'system', key: `k:${owner.id}:${at}`, ts: at, text: killLine(owner.name), card: null });
 
-    // ── a turn you stopped while it waited for your answer: the card's closed row says the
-    // CLI stopped it, which is how the CLI tells it; this line says that you did ──
-    const stopped = stoppedTurns(owner.id);
-    for (const turn of live?.turns ?? []) {
-      const end = turn.end;
-      if (end == null || !stopped.includes(turn.start)) continue;
-      const waited = store.approvals.some((ap) => ap.agent_id === owner.id && ap.status === 'cancelled' && ap.created_at >= turn.start && ap.created_at <= end);
-      if (waited) items.push({ kind: 'system', key: `s:${owner.id}:${turn.start}`, ts: end, text: `You stopped ${owner.name} while it waited for your answer`, card: null });
-    }
-
     // ── what its CLI told about the run: one row for a turn, where the newest was told (so
     // after the work it was told in) ──
     for (const notes of noticeRows(store.events, owner.id)) {
@@ -310,6 +301,12 @@ export function buildSpine(thread: string): Item[] {
   // The same waiting request from several agents is one card, where the first one asked.
   const here = store.approvals.filter((ap) => (isLead ? store.approvalThread(ap) === thread : ap.agent_id === owner?.id));
   for (const { approval: ap, twins } of groupSame(here)) items.push({ kind: 'approval', key: `a:${ap.id}`, ts: ap.created_at, approval: ap, twins });
+  // A turn you stopped while one of these cards waited: the agent's whose card it is (a worker's
+  // in its request, the agent's own in a 1:1).
+  for (const agentId of new Set(here.filter((ap) => ap.status === 'cancelled').map((ap) => ap.agent_id))) {
+    const agent = store.agentMap.get(agentId);
+    if (agent) items.push(...stoppedWhileWaiting(agent, here));
+  }
 
   // ── finished tasks (observed in this session) ──
   for (const t of store.tasks) {
@@ -333,6 +330,26 @@ export function buildSpine(thread: string): Item[] {
     before = it;
   }
   return items;
+}
+
+/**
+ * A line for each turn of `agent` that you stopped (Stop, Interrupt, Send now) while one of its
+ * `cards` waited for your answer: the card's closed row says that its CLI stopped, which is how
+ * the CLI tells it; this line says that you did. A turn that a Kill ended has its own line
+ * ("You killed …").
+ */
+function stoppedWhileWaiting(agent: Agent, cards: Approval[]): Item[] {
+  const stopped = stoppedTurns(agent.id);
+  const kills = killedAt(agent.id);
+  const lines: Item[] = [];
+  for (const turn of store.live[agent.id]?.turns ?? []) {
+    const end = turn.end;
+    if (end == null || !stopped.includes(turn.start)) continue;
+    if (endedByKill({ what: 'interrupted', ts: end, turn }, kills)) continue;
+    const waited = cards.some((ap) => ap.agent_id === agent.id && ap.status === 'cancelled' && ap.created_at >= turn.start && ap.created_at <= end);
+    if (waited) lines.push({ kind: 'system', key: `s:${agent.id}:${turn.start}`, ts: end, text: `You stopped ${agent.name} while it waited for your answer`, card: null });
+  }
+  return lines;
 }
 
 /**

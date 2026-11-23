@@ -1,7 +1,7 @@
 // The words of the review chip and of a task that waits on others.
 import { describe, expect, it } from 'vitest';
 import type { ApprovalSubject } from '../../lib/gen/ApprovalSubject';
-import { reviewLabel, waitLine } from '../threadWords';
+import { reviewLabel, taskTone, waitLine } from '../threadWords';
 
 const ask = (kind: ApprovalSubject['kind']) => ({ subject: { kind } as ApprovalSubject });
 
@@ -27,5 +27,18 @@ describe('waitLine', () => {
   });
   it('waits on nothing: no line', () => {
     expect(waitLine([])).toBeNull();
+  });
+});
+
+describe('taskTone', () => {
+  const base = { status: 'pending' as const, held: false, stuck: false, proposing: false, worker: null };
+  it('a task that cannot start because one before it stopped is blocked, pending or ready', () => {
+    expect([taskTone({ ...base, stuck: true }), taskTone({ ...base, status: 'ready', stuck: true })]).toEqual(['blocked', 'blocked']);
+  });
+  it('a cancelled task stays off, also after a cancelled one it waited on', () => {
+    expect(taskTone({ ...base, status: 'cancelled', stuck: true })).toBe('off');
+  });
+  it('a held task is on hold, a worker that waits for you comes first, and a plan you decide on blocks nothing', () => {
+    expect([taskTone({ ...base, status: 'ready', held: true, stuck: true }), taskTone({ ...base, status: 'running', worker: 'wait' }), taskTone({ ...base, stuck: true, proposing: true })]).toEqual(['idle', 'wait', 'idle']);
   });
 });

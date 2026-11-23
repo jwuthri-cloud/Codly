@@ -9,7 +9,7 @@ import { store } from '../../lib/state/store.svelte';
 import { mkAgent } from '../../office/demo/script';
 import { buildSpine, keepRows, streamText, type Item } from '../spine';
 import type { Approval } from '../../lib/gen/Approval';
-import { noteStop } from '../../lib/state/stops';
+import { noteKill, noteStop } from '../../lib/state/stops';
 
 const lead = { ...mkAgent('l1', 'Mira', 'claude', 'lead', 0, 'working', 'lead'), run_id: 'r1' };
 const solo = mkAgent('s1', 'Cleo', 'claude', 'solo', 1, 'working');
@@ -213,6 +213,31 @@ describe('a turn you stopped while a card waited', () => {
     noteStop('s1');
     apply(turnEnd('s1'));
     expect(lines(buildSpine('agent:s1'))).toEqual([]);
+  });
+
+  it('in a request, says it for a worker whose card waited there', () => {
+    const bo = mkAgent('w1', 'Bo', 'codex', 'worker', 2, 'working');
+    const snap = { as_of: 0, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [lead, solo, bo], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [] };
+    (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snap as unknown as Snapshot);
+    apply(turn('w1'));
+    noteStop('w1');
+    // Its task is of the request "lead" (no task on record: the first request's).
+    store.approvals = [{ ...card('cancelled', clock + 1), agent_id: 'w1', task_id: 't9' }];
+    apply(turnEnd('w1'));
+    const rows = buildSpine('lead');
+    expect(lines(rows)).toEqual(['You stopped Bo while it waited for your answer']);
+    expect(rows.map((r) => r.kind)).toEqual(['approval', 'system']);
+  });
+
+  it('a Kill says only that you killed it', () => {
+    clock = 9000;
+    apply(turn('s1'));
+    noteStop('s1');
+    const unkill = noteKill('s1', clock + 5);
+    store.approvals = [card('cancelled', clock + 1)];
+    apply(turnEnd('s1'));
+    expect(lines(buildSpine('agent:s1'))).toEqual(['You killed Cleo']);
+    unkill();
   });
 });
 

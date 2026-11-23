@@ -1,6 +1,7 @@
 // An agent's own todo list (from its CLI: Claude's todo tools, Codex's plan) in one line: how
 // many steps are done, and the step it is on. Pure.
 import type { PlanStep } from '../lib/gen/PlanStep';
+import type { Tone } from '../lib/narrate';
 
 export type TodoLine = {
   done: number;
@@ -28,4 +29,15 @@ export function todoLine(steps: readonly PlanStep[]): TodoLine | null {
 export function todoWords(line: TodoLine): string {
   const count = `${line.done} of ${line.total}`;
   return line.step ? `${count} · ${line.step.text}` : count;
+}
+
+/**
+ * The words of an agent's list while it works (its narration's tone is 'live'): "3 of 7 · …".
+ * Null otherwise, also with a list: what the narration says then (in your terminal, out of
+ * quota, stopped, waiting for you) is the news, not the list.
+ */
+export function workingTodo(tone: Tone | undefined, steps: readonly PlanStep[]): string | null {
+  if (tone !== 'live') return null;
+  const line = todoLine(steps);
+  return line ? todoWords(line) : null;
 }

@@ -125,6 +125,17 @@ describe('headline', () => {
     const [rerouted] = noticeRows([notice('Codex ran this turn on gpt-5 instead of gpt-6.'), notice('Goal cleared')], 'l1');
     expect([headline(blocked).text, headline(rerouted).text]).toEqual(['Codex hook PreToolUse (hooks.json) blocked: no', 'Codex ran this turn on gpt-5 instead of gpt-6.']);
   });
+
+  it('the words of a goal or of what a hook said do not make a failure', () => {
+    const mcp = 'MCP server A did not start, so this agent works without its tools.';
+    for (const plain of ['Goal: fix the failed checkout test', 'Goal: find why the build stopped', 'Codex hook Stop (hooks.json) added context: 2 tests failed', 'Goal: run it on gpt-5 instead of gpt-6']) {
+      const [row] = noticeRows([notice(mcp), notice(plain)], 'l1');
+      expect(headline(row).text).toBe(mcp);
+    }
+    // A goal that is blocked is the core's word, not the goal's.
+    const [goal] = noticeRows([notice('Goal: ship it'), notice('Goal blocked: ship it'), notice('Goal: ship it again')], 'l1');
+    expect(headline(goal).text).toBe('Goal blocked: ship it');
+  });
 });
 
 describe('in the conversation', () => {

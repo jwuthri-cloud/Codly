@@ -1,7 +1,7 @@
 // The agent's own todo list in one line: done, total and the step it is on.
 import { describe, expect, it } from 'vitest';
 import type { PlanStep } from '../../lib/gen/PlanStep';
-import { todoLine, todoWords } from '../todoLine';
+import { todoLine, todoWords, workingTodo } from '../todoLine';
 
 const step = (text: string, status: string): PlanStep => ({ text, status });
 
@@ -26,5 +26,15 @@ describe('todoLine', () => {
     const line = todoLine([step('a', 'completed'), step('b', 'completed')]);
     expect(line).toEqual({ done: 2, total: 2, step: null, at: null });
     expect(todoWords(line!)).toBe('2 of 2');
+  });
+});
+
+describe('workingTodo', () => {
+  const list = [step('Read the code', 'completed'), step('Add the toggle', 'in_progress')];
+  it('while the agent works: the count and the step', () => {
+    expect(workingTodo('live', list)).toBe('1 of 2 · Add the toggle');
+  });
+  it('nothing while it does not work (in your terminal, out of quota, stopped, waiting for you), or with no list', () => {
+    expect([workingTodo('idle', list), workingTodo('blocked', list), workingTodo('off', list), workingTodo('wait', list), workingTodo(undefined, list), workingTodo('live', [])]).toEqual([null, null, null, null, null, null]);
   });
 });

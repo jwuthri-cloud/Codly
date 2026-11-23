@@ -36,8 +36,8 @@
   import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
-  import { newBelow, oldestWaiting, revealTop } from './threadScroll';
-  import { todoLine, todoWords } from './todoLine';
+  import { meets, newBelow, nextMove, oldestWaiting, revealTop } from './threadScroll';
+  import { workingTodo } from './todoLine';
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
   import { busy, queued, queuedHint, sendNowTip, type Sent } from '../lib/state/queue';
   import { isRequestThread } from '../lib/state/ui.svelte';
@@ -117,6 +117,8 @@
   /** The card the thread holds now, and its top in the scroller's box (px from the box's top). */
   let heldKey: string | null = null;
   let heldAt = 0;
+  /** You were at the newest line when the thread began to hold a card: it goes back there after the last one. */
+  let followed = false;
   /** The rows there were when you were last at the newest line: the others below the view are counted. */
   let seen = new Set<string>();
   let below = $state(0);
@@ -131,11 +133,14 @@
     // The bottom padding fades out: a row that begins there is not in view yet.
     below = newBelow(rows, seen, scroller.clientHeight - parseFloat(getComputedStyle(scroller).paddingBottom));
   }
-  /** The held card back where it was, after rows came in or grew above it. */
-  function hold() {
-    const el = heldKey ? rowEl(heldKey) : null;
-    if (!scroller || !el) return;
-    scroller.scrollTop += offsetOf(el) - heldAt;
+  /** The held card showed in the view, where it was last held or scrolled to. */
+  const heldShows = (el: HTMLElement) => !!scroller && meets({ top: 0, bottom: scroller.clientHeight }, { top: heldAt, bottom: heldAt + el.offsetHeight });
+  /** The held card back where it was, after rows came in or grew above it. Only when it moved:
+   *  a write to scrollTop ends a smooth scroll on its way (to a card, to the newest line). */
+  function hold(el: HTMLElement) {
+    if (!scroller) return;
+    const moved = offsetOf(el) - heldAt;
+    if (moved) scroller.scrollTop += moved;
   }
   /** The card that became the oldest waiting one, whole in view: its command and its buttons. */
   function reveal(el: HTMLElement) {
@@ -144,27 +149,25 @@
     const box = { top, bottom: top + el.offsetHeight };
     scroller.scrollTop = revealTop(scroller.scrollTop, { top: 0, bottom: scroller.clientHeight }, box, parseFloat(getComputedStyle(scroller).paddingTop));
   }
-  /** After the rows changed: hold the waiting card, or follow the newest line while you are there. */
+  /** After the rows changed: hold the waiting card, or follow the newest line while you are there (see `nextMove`). */
   function settle(added: boolean) {
     if (!scroller) return;
     const key = waitingCard;
-    const fresh = key !== heldKey;
     const held = heldKey !== null;
-    heldKey = key;
+    if (key && !held) followed = atBottom;
     const el = key ? rowEl(key) : null;
-    if (!el) {
-      if (atBottom) toBottom();
-      else if (added || streamingLast) unseen = true;
-    } else {
-      // A card you were answering (or the end of the thread you were at) hands over to the next
-      // one; while you read further up, a first card does not pull you down.
-      if (!fresh) hold();
-      else if (atBottom || held) reveal(el);
-      else if (added) unseen = true;
-      heldAt = offsetOf(el);
-      // Rows that came in below the held card: you are not at the newest line any more.
-      atBottom = atEnd();
-    }
+    const move = nextMove({ card: !!el, fresh: key !== heldKey, held, inView: !!el && heldShows(el), atBottom, followed, added: added || streamingLast });
+    heldKey = key;
+    if (!key) followed = false;
+    if (el && move === 'hold') hold(el);
+    else if (el && move === 'reveal') reveal(el);
+    else if (move === 'bottom') {
+      atBottom = true;
+      toBottom();
+    } else if (move === 'mark') unseen = true;
+    if (el) heldAt = offsetOf(el);
+    // Rows that came in below the held card: you are not at the newest line any more.
+    if (move === 'hold' || move === 'reveal') atBottom = atEnd();
     if (atBottom) seen = new Set(items.map((it) => it.key));
     countBelow();
   }
@@ -195,8 +198,9 @@
   $effect(() => {
     if (!list || !streams) return;
     const grown = new ResizeObserver(() => {
-      if (heldKey) {
-        hold();
+      const el = heldKey ? rowEl(heldKey) : null;
+      if (el && heldShows(el)) {
+        hold(el);
         countBelow();
       } else if (atBottom) toBottom();
     });
@@ -216,7 +220,13 @@
     atBottom = true;
     unseen = false;
     heldKey = null;
-    tick().then(() => settle(false));
+    followed = false;
+    tick().then(() => {
+      settle(false);
+      // What the thread held when you opened it is not new, wherever the view is.
+      seen = new Set(items.map((it) => it.key));
+      countBelow();
+    });
   });
   // What you just sent is always in view.
   let sentCount = 0;
@@ -233,10 +243,9 @@
   const ownerNow = $derived(owner && !isRequest ? narrate(owner.id) : null);
   /** Its own todo list while it works: "3 of 7 · <the step it is on>". */
   const ownerTodo = $derived.by(() => {
-    if (!owner || ownerNow?.tone !== 'live') return null;
+    if (!owner) return null;
     void store.revBy.get(owner.id);
-    const line = todoLine(store.live[owner.id]?.todo ?? []);
-    return line ? todoWords(line) : null;
+    return workingTodo(ownerNow?.tone, store.live[owner.id]?.todo ?? []);
   });
   const backTo = $derived(ui.request);
   const EXAMPLES = [
@@ -354,7 +363,7 @@
 
   <div class="bottom">
     {#if below}
-      <button class="newer" onclick={() => toBottom(true)}><Icon name="chevron-down" size={13} /><span class="num">{below}</span> new below</button>
+      <button class="newer" onclick={() => toBottom(!streamingLast && !heldKey)}><Icon name="chevron-down" size={13} /><span class="num">{below}</span> new below</button>
     {:else if unseen}
       <button class="newer" onclick={() => toBottom(!streamingLast)}><Icon name="chevron-down" size={13} />New activity</button>
     {/if}

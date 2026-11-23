@@ -66,7 +66,7 @@ export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
   // request with no plan yet: the close stops it mid-way. (With a plan, what becomes of the plan is asked below.)
   const planless = !store.plans.some((p) => (p.thread || 'lead') === r.thread);
   if (busy(r.thread) || (r.phase === 'planning' && planless)) return { ask: 'The Lead is working: close and stop it?', detail: 'Its turn stops where it is. Nothing is deleted.', yes: 'Close' };
-  // Your newest message has no answer yet (the Lead has not begun its turn): the close drops it.
+  // Your newest message has no answer yet and can still get one (the Lead has not begun its turn): the close drops it.
   if (unanswered(r.thread)) return { ask: 'Your message has no answer yet: close anyway?', detail: 'The Lead stops before it answers. Nothing is deleted.', yes: 'Close' };
   const finished = store.plans.filter((p) => (p.thread || 'lead') === r.thread && p.status === 'done');
   const pr = (planId: string) => prKey({ kind: 'plan', id: planId });
@@ -95,12 +95,20 @@ export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
     : { ask: 'Not merged yet: its branch stays. Close?', detail: kept, yes: 'Close' };
 }
 
-/** The newest message of the thread is yours (sent, or still on its way): nothing answered it yet. */
+/**
+ * An answer to your newest message can still come: it is on its way (not "Not sent"), or it is
+ * the thread's newest message and no turn of its Lead began after it or took it in. A turn that
+ * took it and ended with no reply (it failed, or you stopped it) leaves nothing to wait for.
+ */
 function unanswered(thread: string): boolean {
-  if (store.outbox.some((o) => o.thread === thread)) return true;
+  if (store.outbox.some((o) => o.thread === thread && !o.error)) return true;
   let last: { author: string; ts: number } | null = null;
   for (const c of store.chats) if (c.thread === thread && (!last || c.ts >= last.ts)) last = c;
-  return last?.author === 'user';
+  if (last?.author !== 'user') return false;
+  const at = last.ts;
+  const lead = store.threadAgent(thread);
+  const turns = lead ? (store.live[lead.id]?.turns ?? []) : [];
+  return !turns.some((t) => t.start >= at || !!t.steers?.some((s) => s.ts >= at));
 }
 
 /** Close a request's tab, with Undo for a few seconds. You land on the tab beside it (a new request if it was the only one). */
