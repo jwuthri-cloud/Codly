@@ -10,6 +10,7 @@ import type { Approval } from '../lib/gen/Approval';
 import type { EventRow } from '../lib/gen/EventRow';
 import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
+import { permissionsAsked } from '../lib/util/permissionsAsked';
 import { PLAN_ASK, showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
 import { columnOf, emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type ToolCall } from './model';
@@ -229,8 +230,8 @@ export function approvalText(ap: Approval, provider: Provider | null): string {
       return showsPlan(s, provider) ? PLAN_ASK : (sandboxWants(s, provider, 30) ?? `use ${clean(s.name, 30)}`);
     case 'question':
       return 'ask a question';
-    default:
-      return 'get more permissions';
+    case 'permissions':
+      return clean(permissionsAsked(s.detail).wants, 40);
   }
 }
 

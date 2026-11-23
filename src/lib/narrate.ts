@@ -15,6 +15,8 @@ import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
 import { timer } from './util/format';
 import { isPlanCall, PLAN_ASK, planStep, showsPlan } from './util/planRequest';
+import { firstQuestion } from './util/outcome';
+import { permissionsAsked } from './util/permissionsAsked';
 import { sandboxHost } from './util/sandbox';
 import { basename, oneLine, truncate } from './util/sanitize';
 
@@ -147,11 +149,11 @@ function approvalParts(ap: Approval, provider: Provider): Part[] {
       const raw = s.questions as unknown;
       const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? ((raw as { questions?: unknown[] }).questions ?? []) : [];
       const q = list[0] as { question?: string; header?: string } | undefined;
-      const text = q?.question ?? q?.header ?? 'a question';
+      const text = q?.question ?? q?.header ?? firstQuestion(ap) ?? 'a question';
       return [txt(`Asking you: ${oneLine(text, 64)}`)];
     }
-    default:
-      return [txt('Waiting for you: permissions')];
+    case 'permissions':
+      return [txt(`Waiting for you: ${oneLine(permissionsAsked(s.detail).wants, 56)}`)];
   }
 }
 

@@ -26,7 +26,7 @@ import { followUpRequest, reviewMessage, type ReviewDraft } from '../util/review
 import { answerText } from '../util/outcome';
 import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
-import { yourAnswers } from './answers';
+import { yourAnswers, yourChoice } from './answers';
 import { diffstats } from './diffstats.svelte';
 import { fileList, loadMergeState, resolveMergeConflict } from './mergeState.svelte';
 import { flushClosing } from './closing';
@@ -340,6 +340,7 @@ export async function resolveApproval(approvalId: string, choice: ApprovalChoice
   // The core keeps no copy of an answer: the closed card and the history show it from here.
   const said = sent ? answerText(answers) : null;
   if (said) yourAnswers.set(approvalId, said);
+  if (sent) yourChoice.set(approvalId, choice);
 }
 
 /** One answer for the requests that share a card: the same command asked by several agents. */

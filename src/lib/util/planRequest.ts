@@ -8,6 +8,7 @@
 
 import type { ApprovalSubject } from '../gen/ApprovalSubject';
 import type { Provider } from '../gen/Provider';
+import { permissionsAsked } from './permissionsAsked';
 import { sandboxWants } from './sandbox';
 import { basename, oneLine } from './sanitize';
 
@@ -56,7 +57,7 @@ export function wantsTo(s: ApprovalSubject, provider: Cli, max?: number): string
     case 'question':
       return 'ask you a question';
     case 'permissions':
-      return 'get more permissions';
+      return permissionsAsked(s.detail).wants;
   }
 }
 

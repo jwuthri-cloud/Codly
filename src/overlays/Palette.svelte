@@ -135,7 +135,7 @@
     }
     for (const ap of store.pendingApprovals) {
       const a = store.agentMap.get(ap.agent_id);
-      const what = ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : ap.subject.kind;
+      const what = ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : oneLine(wants(ap.subject, a?.provider), 50);
       // The title shows 50 characters: the confirmation shows all of what is asked.
       const full = `${a?.name ?? 'An agent'} wants to ${wants(ap.subject, a?.provider)}`;
       if (ap.choices.includes('allow_once')) rows.push({ id: `ap:ok:${ap.id}`, section: 'Needs you', title: `Approve ${a?.name ?? 'agent'}: ${what}`, icon: 'check', run: () => resolveApproval(ap.id, 'allow_once'), confirm: `Approve once? ${full}` });
@@ -249,7 +249,7 @@
           .map((p) => ({ id: `go:plan:${p.id}`, section: 'Suggested', title: `${p.status === 'done' ? 'Ready to merge' : 'Ready to run'}: ${p.summary}`, icon: 'plan', hits: [], run: () => ui.openPlan(p.id, p.thread) })),
         ...store.pendingApprovals
           .filter((ap) => ap.choices.includes('allow_once'))
-          .map((ap) => ({ id: `go:ap:${ap.id}`, section: 'Suggested', title: `${store.agentMap.get(ap.agent_id)?.name ?? 'An agent'} needs you: ${ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : ap.subject.kind}`, icon: 'check', hits: [], run: () => ui.selectAgent(ap.agent_id) })),
+          .map((ap) => ({ id: `go:ap:${ap.id}`, section: 'Suggested', title: `${store.agentMap.get(ap.agent_id)?.name ?? 'An agent'} needs you: ${ap.subject.kind === 'command' ? oneLine(ap.subject.command, 50) : oneLine(wants(ap.subject, store.agentMap.get(ap.agent_id)?.provider), 50)}`, icon: 'check', hits: [], run: () => ui.selectAgent(ap.agent_id) })),
       ];
       const suggested = agentRows.slice(0, 6).map((r) => ({ ...r, hits: [] }));
       const seen = new Set([...rec, ...needs].map((r) => r.id));

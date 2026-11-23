@@ -77,6 +77,7 @@ describe('what a request asks for, in words', () => {
     expect(wantsTo(host, 'codex')).toBe('use SandboxNetworkAccess');
     expect(wantsTo({ kind: 'question', questions: [] }, 'claude')).toBe('ask you a question');
     expect(wantsTo({ kind: 'permissions', detail: {} }, 'claude')).toBe('get more permissions');
+    expect(wantsTo({ kind: 'permissions' as const, detail: { cwd: '/Users/someone/Code/acme', reason: null, permissions: { network: null, fileSystem: { read: null, write: ['/Users/someone/Code/acme-docs'] } } } }, 'codex')).toBe('write in ../acme-docs');
   });
 
   it('one short line cuts a long command', () => {
