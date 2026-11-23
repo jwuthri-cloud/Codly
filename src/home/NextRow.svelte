@@ -1,7 +1,8 @@
 <!--
   One fixed-height row above the composer (so nothing jumps): while the thread's agent works it
   says what it is doing (and how many of your messages wait for it); otherwise it offers the next
-  sensible actions for this request as small chips. While its turn runs, Stop (Esc) interrupts it.
+  sensible actions for this request as small chips. While its turn runs, Stop interrupts it; so
+  does Esc pressed twice (after the first press the row asks for the second).
   New request (⌘N) always sits on the right.
 -->
 <script lang="ts">
@@ -28,6 +29,8 @@
   /** A turn is running (also while it waits for your approval): Stop interrupts it. */
   const running = $derived(busy(thread));
   const halting = $derived(!!agent && stopping(agent.id));
+  /** The first Esc on this thread's running turn: the row asks for the second one. */
+  const escAsked = $derived(ui.escAsk?.thread === thread && running && !halting);
 
   type Chip = { label: string; icon?: string; kbd?: string; primary?: boolean; run: () => void };
   const chips = $derived.by((): Chip[] => {
@@ -56,7 +59,9 @@
 </script>
 
 <div class="row" aria-live="off">
-  {#if working && agent && n}
+  {#if escAsked && agent}
+    <p class="live esc" role="status">Press Esc again to stop {agent.name}</p>
+  {:else if working && agent && n}
     <p class="live">
       <span class="dot"></span><b>{agent.name}</b><span class="truncate"><Say parts={n.parts} /></span>
       {#if queued}<span class="q num">· {queued} queued</span>{/if}
@@ -73,7 +78,7 @@
     <span class="grow"></span>
   {/if}
   {#if running && agent}
-    <button class="nc stop" disabled={halting} onclick={() => stopThread(thread)} data-tip={isRequest ? `Stop ${agent.name}’s turn. Agents on tasks keep working.` : `Stop ${agent.name}’s turn`} data-tip-kbd="Esc">
+    <button class="nc stop" disabled={halting} onclick={() => stopThread(thread)} data-tip={isRequest ? `Stop ${agent.name}’s turn. Agents on tasks keep working.` : `Stop ${agent.name}’s turn`} data-tip-kbd="Esc Esc">
       <Icon name="stop" size={12} />{halting ? 'Stopping…' : 'Stop'}
     </button>
   {/if}
@@ -88,6 +93,7 @@
   .row { height: 34px; display: flex; align-items: center; gap: 10px; padding: 0 4px; }
   .live { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--t-sm); color: var(--ink-2); animation: fade-in var(--d-3) var(--ease-out); }
   .live b { font-weight: var(--w-semi); color: var(--ink-1); white-space: nowrap; }
+  .live.esc { font-weight: var(--w-med); color: var(--ink-1); white-space: nowrap; }
   .q { white-space: nowrap; color: var(--ink-3); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--aurora); box-shadow: 0 0 0 3px var(--live-soft); flex-shrink: 0; }
   .chips { flex: 1; min-width: 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; animation: fade-in var(--d-3) var(--ease-out); }

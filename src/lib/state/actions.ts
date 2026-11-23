@@ -30,6 +30,7 @@ import { yourAnswers } from './answers';
 import { diffstats } from './diffstats.svelte';
 import { fileList, loadMergeState, resolveMergeConflict } from './mergeState.svelte';
 import { flushClosing } from './closing';
+import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
 import { review, reviewKey } from './review.svelte';
@@ -525,9 +526,9 @@ export async function setAgentLook(agent: Agent, lookSeed: string): Promise<bool
   return true;
 }
 
-/** Whether the core took the interrupt (a button that says "Interrupting…" needs to know). */
-export async function interruptAgent(agentId: string): Promise<boolean> {
-  const undo = noteStop(agentId);
+/** Whether the core took the interrupt (a button that says "Interrupting…" needs to know). `byKey`: asked with Esc. */
+export async function interruptAgent(agentId: string, byKey = false): Promise<boolean> {
+  const undo = noteStop(agentId, byKey);
   const ok = await attempt('interrupt the agent', async () => {
     await api.interruptAgent(agentId);
     return true;
@@ -536,12 +537,33 @@ export async function interruptAgent(agentId: string): Promise<boolean> {
   return !!ok;
 }
 
-/** Stop the running turn of a thread's agent (the Stop button, Esc). False: no turn was running. */
+/** Stop the running turn of a thread's agent (the Stop button, /stop). False: no turn was running. */
 export function stopThread(thread: string): boolean {
   const agent = store.threadAgent(thread);
   if (!agent || !busy(thread)) return false;
   // A second press while the CLI lets go asks nothing new.
   if (!stopping(agent.id)) void interruptAgent(agent.id);
+  return true;
+}
+
+let escAskTimer: ReturnType<typeof setTimeout> | undefined;
+/**
+ * Esc on a thread whose agent is in a turn. The first press only asks, next to that thread's
+ * composer; a second press inside `ESC_STOP_WINDOW` stops the turn, and the conversation says
+ * that it was interrupted. False: no turn was running.
+ */
+export function stopThreadByEsc(thread: string): boolean {
+  const agent = store.threadAgent(thread);
+  if (!agent || !busy(thread)) return false;
+  if (stopping(agent.id)) return true;
+  clearTimeout(escAskTimer);
+  if (escStop(ui.escAsk, thread, Date.now()) === 'stop') {
+    ui.escAsk = null;
+    void interruptAgent(agent.id, true);
+  } else {
+    ui.escAsk = { thread, at: Date.now() };
+    escAskTimer = setTimeout(() => (ui.escAsk = null), ESC_STOP_WINDOW);
+  }
   return true;
 }
 

@@ -7,7 +7,7 @@
   stop, mode, model, clear…) and ↵
   runs one; it is not sent. One that cannot run right now (stop, with nothing running) says why
   and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them.
-  Esc on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
+  Esc twice on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
   draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
   message does not replace it. A new request that holds a draft stays a tab when you leave it.
   The hint in the empty field is an element of its own, not the field's `placeholder`: a hint
@@ -17,10 +17,10 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
   import { api } from '../lib/api';
-  import { sendChat, setRequestPrefs, stopThread } from '../lib/state/actions';
+  import { sendChat, setRequestPrefs, stopThread, stopThreadByEsc } from '../lib/state/actions';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { toast } from '../lib/state/toasts.svelte';
-  import { busy, busyHint } from '../lib/state/queue';
+  import { busy, busyHint, waitingHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { fuzzy } from '../lib/util/fuzzy';
@@ -142,8 +142,11 @@
   });
   const isBusy = $derived(busy(thread));
   const fresh = $derived(!oneToOne && !agent && !store.chats.some((c) => c.thread === thread) && !store.outbox.some((o) => o.thread === thread));
+  /** Its turn stands still on a request of its own, shown in this conversation: it waits for you, it is not at work. */
+  const waitsForYou = $derived(isBusy && !!agent && store.pendingApprovals.some((a) => a.agent_id === agent.id));
   const placeholder = $derived(
-    isBusy ? busyHint(agent?.name ?? 'The agent', agent?.provider)
+    waitsForYou ? waitingHint(agent?.name ?? 'The agent', agent?.provider)
+    : isBusy ? busyHint(agent?.name ?? 'The agent', agent?.provider)
     : oneToOne ? `Message ${agent?.name ?? 'the agent'} directly…`
     : fresh && thread !== 'lead' ? 'Describe the new request — its own Lead plans it in parallel…'
     : 'Ask the Lead to build, fix or explain — @ for a file, / for actions',
@@ -355,10 +358,10 @@
       ui.findOpen = false;
       return;
     }
-    // Esc on an empty line stops the running turn (an Esc that cancelled a dictation did its job
-    // already, and the repeats of a held key stop nothing). With text typed, or nothing running,
-    // Esc leaves the field as before.
-    if (e.key === 'Escape' && !e.repeat && !e.defaultPrevented && !text.trim() && stopThread(thread)) {
+    // Esc on an empty line asks to stop the running turn, and a second Esc stops it (an Esc that
+    // cancelled a dictation did its job already, and the repeats of a held key stop nothing).
+    // With text typed, or nothing running, Esc leaves the field as before.
+    if (e.key === 'Escape' && !e.repeat && !e.defaultPrevented && !text.trim() && stopThreadByEsc(thread)) {
       e.preventDefault();
       return;
     }
@@ -370,7 +373,8 @@
       setRequestPrefs(thread, { mode: MODES[(MODES.findIndex((m) => m.id === now) + 1) % MODES.length].id });
       return;
     }
-    if (e.key === 'Backspace' && !text && oneToOne && !e.repeat) {
+    // ⌫ alone: with a modifier it is another key (⌘⌫ denies), and it never leaves the conversation.
+    if (e.key === 'Backspace' && !text && oneToOne && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
       e.preventDefault();
       ui.openRequest(ui.request);
       return;

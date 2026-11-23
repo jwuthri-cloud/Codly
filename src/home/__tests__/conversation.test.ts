@@ -3,7 +3,8 @@ import { api } from '../../lib/api';
 import type { ChatMessage } from '../../lib/gen/ChatMessage';
 import type { EventKind } from '../../lib/gen/EventKind';
 import type { EventRow } from '../../lib/gen/EventRow';
-import { interruptAgent, stopThread } from '../../lib/state/actions';
+import { interruptAgent, stopThread, stopThreadByEsc } from '../../lib/state/actions';
+import { ESC_STOP_WINDOW } from '../../lib/state/esc';
 import { installNotifications } from '../../lib/state/notify';
 import { stopping } from '../../lib/state/stops';
 import { store } from '../../lib/state/store.svelte';
@@ -90,12 +91,14 @@ describe('the conversation', () => {
   const troubles = () => buildSpine('lead').flatMap((i) => (i.kind === 'trouble' ? [i] : []));
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     for (const t of toasts.list) toasts.dismiss(t.id);
     store.agents = [];
     store.chats = [];
     store.events = [];
     store.live = {};
+    ui.escAsk = null;
   });
 
   it('a failed turn shows where it happened, with its reason and your message to send again', () => {
@@ -120,6 +123,33 @@ describe('the conversation', () => {
     expect(stopping('l1')).toBe(false);
     expect(troubles()).toEqual([]);
     expect(stopThread('lead')).toBe(false);
+  });
+
+  it('Esc asks first, stops on the second press inside the window, and the thread then says the turn was interrupted', () => {
+    vi.useFakeTimers();
+    const core = vi.spyOn(api, 'interruptAgent').mockResolvedValue();
+    store.agents = [lead];
+    expect(stopThreadByEsc('lead')).toBe(false); // nothing runs: Esc keeps its old meaning
+    apply(started('do it'));
+    // One press stops nothing: the composer row asks.
+    expect(stopThreadByEsc('lead')).toBe(true);
+    expect(core).not.toHaveBeenCalled();
+    expect(ui.escAsk?.thread).toBe('lead');
+    // The question goes by itself, and the next press asks again.
+    vi.advanceTimersByTime(ESC_STOP_WINDOW);
+    expect(ui.escAsk).toBeNull();
+    expect(stopThreadByEsc('lead')).toBe(true);
+    expect(core).not.toHaveBeenCalled();
+    // The second press inside the window stops the turn.
+    vi.advanceTimersByTime(ESC_STOP_WINDOW / 2);
+    expect(stopThreadByEsc('lead')).toBe(true);
+    expect(core).toHaveBeenCalledTimes(1);
+    expect(ui.escAsk).toBeNull();
+    expect(stopping('l1')).toBe(true);
+    expect(stopThreadByEsc('lead')).toBe(true); // while the CLI lets go: nothing new is asked
+    expect(core).toHaveBeenCalledTimes(1);
+    apply(ended('interrupted'));
+    expect(troubles().map((t) => t.what)).toEqual(['interrupted']);
   });
 
   it('an interrupt the core refused is taken back: a later interruption is reported', async () => {
