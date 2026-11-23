@@ -313,8 +313,13 @@ describe('`?approval=…`: a 1:1 agent asks that kind of request once', () => {
     const sandbox = all(sim).find((a) => a.agent_id === claude.id)!;
     const tool = all(sim).find((a) => a.agent_id === gemini.id)!;
     const subject = { kind: 'tool', name: 'SandboxNetworkAccess', input: { host: 'registry.npmjs.org' } };
-    // The sandbox's request is not for a call it names; the command it holds up is the agent's Bash call.
-    expect(sandbox).toMatchObject({ subject, call_id: null, risks: ['network (registry.npmjs.org)'], choices: ['allow_once', 'deny', 'cancel'], status: 'pending' });
+    // The sandbox's request asks in the CLI's words and has an id of its own as its call: no
+    // call of the agent has that id. The command it holds up is the agent's Bash call.
+    expect(sandbox).toMatchObject({
+      subject, reason: 'Allow network connection to registry.npmjs.org?', risks: ['network (registry.npmjs.org)'], choices: ['allow_once', 'deny', 'cancel'], status: 'pending',
+    });
+    expect(sandbox.call_id).toEqual(expect.any(String));
+    expect(events(sim, 'tool_started', claude.id).map((e) => e.call_id)).not.toContain(sandbox.call_id);
     expect(call(sim, claude.id).started).toMatchObject({ name: 'Bash', input: { command: 'npm view react version' } });
     expect(tool).toMatchObject({ subject, call_id: call(sim, gemini.id).started.call_id, risks: [], choices: ['allow_once', 'deny'], status: 'pending' });
     expect(call(sim, gemini.id).started.name).toBe('SandboxNetworkAccess');

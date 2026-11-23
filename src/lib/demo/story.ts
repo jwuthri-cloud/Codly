@@ -1035,8 +1035,9 @@ export class Story {
 
   /**
    * Claude Code's shell sandbox: a command wants a host that the sandbox does not allow yet,
-   * and the CLI asks with a request of its own (`SandboxNetworkAccess`), which does not say
-   * which command it is for.
+   * and the CLI asks with a request of its own (`SandboxNetworkAccess`). As in the recording
+   * `r4-sandbox-network-allow`, the request has the CLI's question as its reason and an id of
+   * its own as its call: it does not say which command it is for.
    */
   private async askSandboxHost(act: Actor) {
     const command = 'npm view react version';
@@ -1045,6 +1046,7 @@ export class Story {
     const call = this.started(act, 'Bash', 'execute', { command }, { command });
     const ap = await this.request(act, { kind: 'tool', name: 'SandboxNetworkAccess', input: { host: NPM_HOST } }, {
       label: NPM_HOST, choices: ['allow_once', 'deny', 'cancel'], risks: [`network (${NPM_HOST})`],
+      reason: `Allow network connection to ${NPM_HOST}?`, callId: uid(),
     });
     const ok = ap.status === 'approved';
     this.ended(act, call, since, ok, ok ? '19.2.3' : `npm error code ENOTFOUND\nnpm error network request to https://${NPM_HOST}/react failed`, ok ? 0 : 1);
