@@ -5205,8 +5205,19 @@ mod tests {
         // The other end of the actor's pipe is closed: it was the stdin of a process that is gone.
         let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
         let mut gone = proc::command(Path::new("/bin/sh"), &["-c".into(), "exit 0".into()], dir.path(), &env).spawn().unwrap();
-        actor.stdin = gone.stdin.take();
+        let mut stdin = gone.stdin.take().unwrap();
         gone.wait().await.unwrap();
+        // A process that another test starts while this one is started gets a copy of that end
+        // too, and keeps it until its exec: for that long a write still goes into the pipe.
+        // The end is closed for good once a write fails.
+        let closed = async {
+            use tokio::io::AsyncWriteExt;
+            while stdin.write_all(b"\n").await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), closed).await.expect("nothing reads the pipe of a process that is gone");
+        actor.stdin = Some(stdin);
 
         actor.on_cmd(AgentCmd::Shutdown).await;
         assert!(actor.stage == Stage::Killing && actor.stdin.is_none() && actor.deadline.is_none(), "no wait for a list: {:?}", actor.stage);
