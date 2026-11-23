@@ -149,6 +149,7 @@
     "allow-agent-git",
     "allow-agent-checkpoints",
     "allow-restore-checkpoint",
+    "allow-last-turn-diff",
     "allow-get-triggers",
     "allow-set-triggers",
     "allow-list-skills",

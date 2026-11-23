@@ -536,7 +536,12 @@ that are new there are named (the index does not search them).
   changes files only: the conversation inside the CLI stays, and the agent's next prompt says
   what was put back. It is refused while a turn runs in that worktree (whoever the agent is) or
   Codly checks a task there, and it never runs in your own checkout: an agent hired with Git
-  isolation off has no checkpoints.
+  isolation off has no checkpoints. One file can go back alone, with the same rules. A 1:1 agent
+  on a task has checkpoints of the task's worktree. What a commit leaves out (a huge new folder
+  or file) is in no checkpoint: the list names it, and a restore that would write over it is
+  refused. "Last turn" (`Core::last_turn`, in the Git tab and on a task's diff in the Changes
+  room) is the diff from the newest checkpoint before a turn to the files now; an agent's
+  answer names the task when the turn is of a task's worktree, and the Git tab says so.
 - The user's branch: Codly commits and merges by itself only on `codly/…` branches. Four
   commands change the user's branch or its remote (commits, merges, push), each behind a
   button: `merge_plan` and `merge_agent` (merge into the checked-out branch),

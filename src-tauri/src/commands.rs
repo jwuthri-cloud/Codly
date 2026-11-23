@@ -445,10 +445,30 @@ pub async fn agent_checkpoints(state: State<'_, AppState>, agent_id: String) -> 
 }
 
 /// "Restore files to this point": puts the files of the agent's worktree back to a checkpoint.
-/// Files only; the state it replaces is kept as a checkpoint, so it can be undone.
+/// Files only; the state it replaces is kept as a checkpoint, so it can be undone. With `path`,
+/// "Restore this file": that one file goes back and the others stay.
 #[tauri::command]
-pub async fn restore_checkpoint(state: State<'_, AppState>, agent_id: String, checkpoint: u32) -> R<codly_core::orchestrator::checkpoints::CheckpointRestore> {
-    state.core().await?.restore_checkpoint(&agent_id, checkpoint).await.map_err(err)
+pub async fn restore_checkpoint(
+    state: State<'_, AppState>,
+    agent_id: String,
+    checkpoint: u32,
+    path: Option<String>,
+) -> R<codly_core::orchestrator::checkpoints::CheckpointRestore> {
+    let core = state.core().await?;
+    let done = match path {
+        Some(path) => core.restore_checkpoint_file(&agent_id, checkpoint, &path).await,
+        None => core.restore_checkpoint(&agent_id, checkpoint).await,
+    };
+    done.map_err(err)
+}
+
+/// "Last turn": what the last turn of an agent, or the last turn in a task's worktree, changed.
+#[tauri::command]
+pub async fn last_turn_diff(
+    state: State<'_, AppState>,
+    source: codly_core::orchestrator::checkpoints::TurnSource,
+) -> R<Option<codly_core::orchestrator::checkpoints::LastTurn>> {
+    state.core().await?.last_turn(&source).await.map_err(err)
 }
 
 /// Triggers: schedules, context rules and network mode, with the log of what they did.

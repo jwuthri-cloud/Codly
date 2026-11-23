@@ -12,6 +12,8 @@ import type { DictationStatus } from './gen/DictationStatus';
 import type { AgentGit } from './gen/AgentGit';
 import type { AgentCheckpoints } from './gen/AgentCheckpoints';
 import type { CheckpointRestore } from './gen/CheckpointRestore';
+import type { LastTurn } from './gen/LastTurn';
+import type { TurnSource } from './gen/TurnSource';
 import type { Blocker } from './gen/Blocker';
 import type { ApprovalDecision } from './gen/ApprovalDecision';
 import type { ApprovalRule } from './gen/ApprovalRule';
@@ -485,8 +487,13 @@ export const api = {
   agentGit: (agentId: string) => call<AgentGit>('agent_git', { agentId }),
   /** An agent's checkpoints: the files of its worktree before each of its turns, newest first. */
   agentCheckpoints: (agentId: string) => call<AgentCheckpoints>('agent_checkpoints', { agentId }),
-  /** Put the files of the agent's worktree back to a checkpoint. Files only; it can be undone. */
-  restoreCheckpoint: (agentId: string, checkpoint: number) => call<CheckpointRestore>('restore_checkpoint', { agentId, checkpoint }),
+  /** Put the files of the agent's worktree back to a checkpoint, or with `path` that one file
+   *  alone (one of the checkpoint's `files`). Files only; it can be undone. */
+  restoreCheckpoint: (agentId: string, checkpoint: number, path: string | null = null) =>
+    call<CheckpointRestore>('restore_checkpoint', { agentId, checkpoint, path }),
+  /** What the last turn of an agent, or the last turn in a task's worktree, changed in the files.
+   *  Null: Codly kept no turn there. */
+  lastTurnDiff: (source: TurnSource) => call<LastTurn | null>('last_turn_diff', { source }),
   /** Schedules and network mode, with the log of what triggers did. */
   triggers: () => call<TriggersConfig>('get_triggers'),
   /** Save them; the core keeps its own clocks and log, and returns what it stored. */

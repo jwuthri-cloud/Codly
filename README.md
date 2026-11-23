@@ -334,6 +334,10 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
   under a private ref, on no branch). **Restore files to this point**, in the agent's Git tab, puts the
   files back and can be undone. It changes files only: the agent still remembers its later turns. An agent
   with Git isolation off has no checkpoints, because Codly never puts files back in your own folder.
+  **Restore this file** puts one file of a checkpoint back and leaves the others. **Last turn**, in the
+  Git tab and on a task's diff in the Changes room, shows only what the last turn changed. A file or
+  folder that is too big for a commit is not in a checkpoint either: the Git tab names it, and a restore
+  that would write over it is refused.
 
 **What an agent's commands can do**
 

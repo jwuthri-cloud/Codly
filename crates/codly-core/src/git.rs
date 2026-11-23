@@ -1235,12 +1235,19 @@ struct ScratchIndex(PathBuf);
 pub struct Snapshot {
     index: ScratchIndex,
     tree: String,
+    left_out: Vec<LeftOut>,
 }
 
 impl Snapshot {
     /// The tree of everything that was in the worktree then.
     pub fn tree(&self) -> &str {
         &self.tree
+    }
+
+    /// What was in the worktree then and is not in `tree`: the new folders and files that are
+    /// too big to keep (what `commit_work` leaves out too).
+    pub fn left_out(&self) -> &[LeftOut] {
+        &self.left_out
     }
 }
 
@@ -1261,7 +1268,8 @@ impl Git {
     /// from the files of a copied folder that the branch tracks). The
     /// index starts as a copy of the worktree's own, whose file stats keep git from reading
     /// the files that did not change.
-    async fn stage_apart(&self, wt: &Path) -> Result<ScratchIndex> {
+    /// Returns the index and what it left out.
+    async fn stage_apart(&self, wt: &Path) -> Result<(ScratchIndex, Vec<LeftOut>)> {
         let dir = self.git_path(wt, "--git-dir").await?;
         let left_out = self.not_work(wt, &dir).await?;
         let index = ScratchIndex(dir.join(format!("codly-index-{}", uuid::Uuid::new_v4())));
@@ -1284,7 +1292,7 @@ impl Git {
         for add in add_all_but(&left_out) {
             self.on_index(wt, &index, &add.iter().map(String::as_str).collect::<Vec<_>>()).await?;
         }
-        Ok(index)
+        Ok((index, left_out))
     }
 
     /// An internal git write (no hooks, no fsmonitor program) that works on a private index.
@@ -1303,9 +1311,9 @@ impl Git {
     /// checkpoint: git reads every file that changed. It writes objects only: files and
     /// folders that did not change are already stored.
     pub async fn snapshot(&self, wt: &Path) -> Result<Snapshot> {
-        let index = self.stage_apart(wt).await?;
+        let (index, left_out) = self.stage_apart(wt).await?;
         let tree = self.on_index(wt, &index, &["write-tree"]).await?.trim().to_string();
-        Ok(Snapshot { index, tree })
+        Ok(Snapshot { index, tree, left_out })
     }
 
     /// The tree of everything in the worktree now (`snapshot`, for a caller that restores
@@ -1342,14 +1350,34 @@ impl Git {
     /// Put the worktree's files back to `tree`: files that changed or were deleted since come
     /// back, files that are not in `tree` are removed, and ignored files are left alone. So
     /// is what `present` left out (a huge new folder or file, a copy of Codly's; `tree` can
-    /// only write a file there that it has itself): it is not kept, so it must not be
-    /// removed. HEAD, the branch
+    /// only write a file there that it has itself, and the caller refuses a restore that
+    /// would: see `Snapshot::left_out`): it is not kept, so it must not be removed. HEAD, the branch
     /// and the worktree's own index stay as they are, so the difference shows as uncommitted
     /// changes. `present` is the worktree as it is (`snapshot`): its tree is what to keep if
     /// the present state must not be lost, and with the files already read, this call only
     /// writes the files that differ.
     pub async fn restore_tree(&self, wt: &Path, present: Snapshot, tree: &str) -> Result<()> {
         self.on_index(wt, &present.index, &["read-tree", "--reset", "-u", tree]).await.map(drop)
+    }
+
+    /// `restore_tree` for one path: `path` goes back to how it is in `tree` (it comes back as
+    /// it was, or is removed when `tree` does not have it), and every other file stays as it
+    /// is. `path` is read as it is written, never as a pattern. Returns the files that changed:
+    /// `path`, and what was in its way (the files of a folder where `tree` has a file, a file
+    /// where `tree` has a folder).
+    pub async fn restore_path(&self, wt: &Path, present: Snapshot, tree: &str, path: &str) -> Result<Vec<String>> {
+        let only = format!(":(literal){path}");
+        // No overlay: a path that `tree` does not have is removed, as `read-tree --reset -u`
+        // does for the whole worktree.
+        self.on_index(wt, &present.index, &["checkout", "--no-overlay", tree, "--", &only]).await?;
+        let after = self.on_index(wt, &present.index, &["write-tree"]).await?;
+        self.changed_paths(wt, &[present.tree(), after.trim()]).await
+    }
+
+    /// Unified diff from the tree `from` to the tree `to` (two `snapshot`s of a worktree): what
+    /// changed in the files between the two moments, whatever was committed meanwhile.
+    pub async fn diff_trees(&self, wt: &Path, from: &str, to: &str) -> Result<String> {
+        self.ok(wt, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "-U3", from, to, "--"], true).await
     }
 }
 
@@ -1626,6 +1654,7 @@ mod tests {
         assert!(kept.contains("pkg/src/index.ts") && !kept.contains("node_modules") && !kept.contains(".next") && !kept.contains("dump.bin"));
         std::fs::write(repo.join("later.txt"), "made later\n").unwrap();
         let present = git.snapshot(&repo).await.unwrap();
+        assert_eq!(present.left_out(), left, "and says what it left out, as the commit does");
         git.restore_tree(&repo, present, &tree).await.unwrap();
         assert!(!repo.join("later.txt").exists(), "the restore ran");
         assert!(repo.join("dump.bin").exists() && repo.join("pkg/node_modules/m0/0.js").exists() && repo.join("pkg/.next/m0/0.js").exists());
@@ -2210,6 +2239,66 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.join("after.txt")).unwrap(), "not committed\n");
         assert_eq!(git.worktree_tree(&wt).await.unwrap(), after);
         assert_eq!(out(&wt, &["rev-parse", "HEAD"]), head);
+    }
+
+    /// One path goes back and every other file stays: a changed file reads as before, a deleted
+    /// file is back, a file made later goes, a folder that took a file's place makes room, and
+    /// a name is never read as a pattern. HEAD and the index do not move. The difference between
+    /// two moments reads as a diff.
+    #[tokio::test]
+    async fn restore_path_puts_one_file_back_and_leaves_the_rest() {
+        let (d, repo) = repo();
+        let git = Git::from_process_env();
+        let wt = worktree_with_work(d.path(), &repo, &git).await;
+        let before = git.worktree_tree(&wt).await.unwrap();
+
+        // A turn's work, and Codly's commit of it.
+        std::fs::write(wt.join("a.txt"), "a changed again\n").unwrap();
+        std::fs::remove_file(wt.join("b.txt")).unwrap();
+        std::fs::write(wt.join("later.txt"), "made later\n").unwrap();
+        std::fs::write(wt.join("*.txt"), "an odd name\n").unwrap();
+        std::fs::remove_file(wt.join("staged.txt")).unwrap();
+        std::fs::create_dir(wt.join("staged.txt")).unwrap();
+        std::fs::write(wt.join("staged.txt/inside.txt"), "in the way\n").unwrap();
+        git.commit_all(&wt, "the turn").await.unwrap().unwrap();
+        let head = out(&wt, &["rev-parse", "HEAD"]);
+        let admin = git.git_path(&wt, "--git-dir").await.unwrap();
+        let index = std::fs::read(admin.join("index")).unwrap();
+        let after = git.worktree_tree(&wt).await.unwrap();
+
+        let diff = git.diff_trees(&wt, &before, &after).await.unwrap();
+        assert!(diff.contains("diff --git a/a.txt b/a.txt") && diff.contains("-a changed\n+a changed again\n"), "{diff}");
+        assert!(diff.contains("diff --git a/b.txt b/b.txt\ndeleted file mode") && diff.contains("+made later\n"), "{diff}");
+        assert_eq!(git.diff_trees(&wt, &after, &after).await.unwrap(), "");
+
+        let put = async |path: &str| {
+            let present = git.snapshot(&wt).await.unwrap();
+            let mut changed = git.restore_path(&wt, present, &before, path).await.unwrap();
+            changed.sort();
+            changed
+        };
+        // A name with a `*` is that one file, not every file it could match.
+        assert_eq!(put("*.txt").await, ["*.txt"]);
+        assert!(!wt.join("*.txt").exists());
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "a changed again\n", "the other files stay");
+        assert!(!wt.join("b.txt").exists() && wt.join("later.txt").exists(), "the other files stay");
+
+        assert_eq!(put("a.txt").await, ["a.txt"]);
+        assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "a changed\n");
+        assert_eq!(put("b.txt").await, ["b.txt"]);
+        assert_eq!(std::fs::read_to_string(wt.join("b.txt")).unwrap(), "b\n", "a deleted file is back");
+        assert_eq!(put("later.txt").await, ["later.txt"]);
+        assert!(!wt.join("later.txt").exists(), "a file made later is gone");
+        // The folder that sits where the file was goes with what is in it, and the result says so.
+        assert_eq!(put("staged.txt").await, ["staged.txt", "staged.txt/inside.txt"]);
+        assert_eq!(std::fs::read_to_string(wt.join("staged.txt")).unwrap(), "staged\n");
+
+        assert_eq!(git.worktree_tree(&wt).await.unwrap(), before, "file by file, the files are as they were");
+        assert_eq!(std::fs::read_to_string(wt.join("build.log")).unwrap(), "ignored\n", "ignored files are left alone");
+        assert_eq!(out(&wt, &["rev-parse", "HEAD"]), head, "HEAD did not move");
+        assert_eq!(std::fs::read(admin.join("index")).unwrap(), index, "the worktree's own index is untouched");
+        let left: Vec<String> = std::fs::read_dir(&admin).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(!left.iter().any(|f| f.starts_with("codly-index")), "the private index is removed: {left:?}");
     }
 
     /// A checkout, a commit, a merge or a push may take minutes in a large repository; a read
