@@ -56,6 +56,9 @@ describe('the request you were last on, across a restart', () => {
     expect(Object.fromEntries(kept)).toEqual({ 'codly.request.k1': 'lead:x', 'codly.request.k2': 'lead' });
     ui.openRequest('lead:z');
     expect(Object.fromEntries(kept)).toEqual({ 'codly.request.k1': 'lead:x', 'codly.request.k2': 'lead:z' });
+    // The Plan room's request chips take you to a request too.
+    ui.openPlan(null, 'lead');
+    expect(kept.get('codly.request.k2')).toBe('lead');
   });
 
   it('is read back when Codly starts on that office, and the room you were in stays', () => {

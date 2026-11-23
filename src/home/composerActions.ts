@@ -3,8 +3,9 @@
 // working (ask, plan, edits), undo the last turn, continue in your terminal, its MCP servers.
 // That agent is the Lead in a request and the agent of a 1:1 chat. Every name is listed in
 // every conversation, so that a known name is never sent to the agent as a message; an action
-// that cannot run here or right now says why instead (`off`). The list is built here, away
-// from the component, so it can be tested; what an action does is the component's (`SlashDo`).
+// that cannot run here or right now says why instead (`off`), and one that only waits for the
+// core's answer says that too (`wait`). The list is built here, away from the component, so it
+// can be tested; what an action does is the component's (`SlashDo`).
 import type { Agent } from '../lib/gen/Agent';
 import type { AgentCheckpoints } from '../lib/gen/AgentCheckpoints';
 import type { LeadMode } from '../lib/gen/LeadMode';
@@ -31,8 +32,9 @@ export type SlashContext = {
   mcp: McpServer[];
   /** What the core said last about the agent and your terminal; null: it was not asked yet. */
   takeover: TakeoverState | null;
-  /** Why no turn of the agent can be undone (`noTurn`); null: Codly kept one. */
-  noTurn: string | null;
+  /** What the core keeps of the agent's turns; null: it was not asked yet, or has not answered.
+   *  `off`: why no turn of the agent can be undone (`noTurn`); null: Codly kept one. */
+  turns: { off: string | null } | null;
 };
 
 /** What each action does: the component's part. */
@@ -95,7 +97,7 @@ export function slashCommands(c: SlashContext, on: SlashDo): SlashCommand[] {
   const idle = c.agent && !live(c.agent) ? `${c.agent.name} isn’t running` : null;
 
   type Row = { name: string; label: string; icon: string };
-  type State = { off: string } | { hint: string; run: () => void };
+  type State = { off: string; wait?: true } | { hint: string; run: () => void };
   const list: SlashCommand[] = [
     { name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: on.newRequest },
     { name: 'issue', label: 'From issue…', hint: 'A GitHub link or number', icon: 'link', run: on.fromIssue },
@@ -153,11 +155,15 @@ export function slashCommands(c: SlashContext, on: SlashDo): SlashCommand[] {
     return why ? { off: why } : { hint: 'How full its conversation is', run: () => on.context(a) };
   });
 
-  ofAgent({ name: 'undo', label: `Undo ${name}’s last turn…`, icon: 'arrow-left' }, (a) =>
-    c.noTurn ? { off: c.noTurn } : { hint: 'Its sheet opens: put the files back under Git, at Checkpoints', run: () => on.undo(a) },
-  );
+  // Only the core knows these two, and it is asked when `/` opens the menu: until it answers,
+  // the row waits in its place (`wait`), so the letters of its name pick no other action.
+  ofAgent({ name: 'undo', label: `Undo ${name}’s last turn…`, icon: 'arrow-left' }, (a) => {
+    if (!c.turns) return { off: 'Reading what Codly kept of its turns…', wait: true };
+    if (c.turns.off) return { off: c.turns.off };
+    return { hint: 'Its sheet opens: put the files back under Git, at Checkpoints', run: () => on.undo(a) };
+  });
   ofAgent({ name: 'terminal', label: 'Continue in your terminal…', icon: 'terminal' }, (a) => {
-    if (!c.takeover) return { off: 'Asking Codly if it can go…' };
+    if (!c.takeover) return { off: 'Asking Codly if it can go…', wait: true };
     if (c.takeover.takeover) return { hint: `${a.name} is in your terminal: show it`, run: () => on.showTerminal(a) };
     if (c.takeover.blocked) return { off: capital(c.takeover.blocked) };
     return { hint: 'Codly stops its own process first, and sends it nothing until you give it back', run: () => on.terminal(a) };

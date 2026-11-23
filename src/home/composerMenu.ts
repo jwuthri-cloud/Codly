@@ -57,19 +57,23 @@ export function rankFiles(paths: string[], query: string, limit: number): string
 /**
  * One of Codly's actions in the `/` menu. `name` is what you type after the slash. An action
  * that cannot run here or right now has `off`, the reason, in place of what it does: it is
- * still listed, so its name is never sent to the agent as a message.
+ * still listed, so its name is never sent to the agent as a message. `wait`: it is off only
+ * until the core answers whether it can run, a moment from now.
  */
-export type SlashCommand = { name: string; label: string; icon: string } & ({ hint: string; run: () => void } | { off: string });
+export type SlashCommand = { name: string; label: string; icon: string } & ({ hint: string; run: () => void } | { off: string; wait?: true });
 
 /**
  * The actions that match what is typed after `/`: those whose name starts with it first, in
  * the list's order, then those that hold it in their name or label. Nothing typed: all of them.
- * In each case the actions that cannot run now come last.
+ * In each case the actions that cannot run now come last. One that waits for the core's answer
+ * (`wait`) keeps its place: while you wait, ↵ on its name runs nothing, and never the action
+ * that would be next in its place.
  */
-export function filterSlash<T extends { name: string; label: string; off?: string }>(commands: T[], query: string): T[] {
+export function filterSlash<T extends { name: string; label: string; off?: string; wait?: boolean }>(commands: T[], query: string): T[] {
   const q = query.toLowerCase();
   const starts = commands.filter((c) => c.name.startsWith(q));
   const holds = q ? commands.filter((c) => !c.name.startsWith(q) && (c.name.includes(q) || c.label.toLowerCase().includes(q))) : [];
   const found = [...starts, ...holds];
-  return [...found.filter((c) => c.off === undefined), ...found.filter((c) => c.off !== undefined)];
+  const refused = (c: T) => c.off !== undefined && !c.wait;
+  return [...found.filter((c) => !refused(c)), ...found.filter(refused)];
 }

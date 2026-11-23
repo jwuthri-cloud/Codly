@@ -36,7 +36,7 @@ const running = (id: string, provider: Agent['provider'], role: Agent['role']): 
 const server = (name: string, status: McpServer['status']): McpServer => ({ name, status, error: null, runId: 'run-ada', ts: 1 });
 
 /** A conversation where the core has answered: the agent may go to your terminal, and a turn of it is kept. */
-const at = (over: Partial<SlashContext>): SlashContext => ({ oneToOne: false, agent: null, busy: false, changes: false, modes, mcp: [], takeover: { takeover: null, blocked: null }, noTurn: null, ...over });
+const at = (over: Partial<SlashContext>): SlashContext => ({ oneToOne: false, agent: null, busy: false, changes: false, modes, mcp: [], takeover: { takeover: null, blocked: null }, turns: { off: null }, ...over });
 
 const list = (c: SlashContext, on = recorder().on) => slashCommands(c, on);
 const names = (c: SlashContext) => list(c).map((x) => x.name);
@@ -57,7 +57,7 @@ const lead = running('lea', 'claude', 'lead');
 const ada = running('ada', 'claude', 'solo');
 const cody = running('cody', 'codex', 'solo');
 
-const request = at({ agent: lead, takeover: { takeover: null, blocked: 'the Lead works through Codly\'s own tools, and a terminal does not have them' }, noTurn: 'Lea has no worktree of its own, so there are no checkpoints.' });
+const request = at({ agent: lead, takeover: { takeover: null, blocked: 'the Lead works through Codly\'s own tools, and a terminal does not have them' }, turns: { off: 'Lea has no worktree of its own, so there are no checkpoints.' } });
 const claudeChat = at({ oneToOne: true, agent: ada, mcp: [server('github', 'connected'), server('linear', 'needs_sign_in')] });
 const codexChat = at({ oneToOne: true, agent: cody });
 const newRequest = at({});
@@ -147,7 +147,7 @@ describe('the actions of /', () => {
     expect(chat({ ...ada, task_id: 't1' }).plan).toBe('Ada is on a task: its mode can change when the task is done');
     expect(chat(running('wes', 'claude', 'worker'))).toMatchObject({ edits: 'Only a 1:1 Claude agent has a mode to switch', model: 'Not for this agent', compact: 'Only a Codex agent or a 1:1 Claude agent' });
     // Undo: the core's word on what it kept.
-    expect(chat(ada, { noTurn: 'Codly kept no turn of Ada yet' }).undo).toBe('Codly kept no turn of Ada yet');
+    expect(chat(ada, { turns: { off: 'Codly kept no turn of Ada yet' } }).undo).toBe('Codly kept no turn of Ada yet');
   });
 
   it('your terminal: the core says whether the agent can go, and an agent that is there is shown', () => {
@@ -157,6 +157,32 @@ describe('the actions of /', () => {
     const there = chat({ takeover: { agent_id: 'ada', cwd: '/w', command: 'claude --resume s1', copy_command: 'cd /w && claude --resume s1', since: 1 }, blocked: null });
     expect(list(there).find((x) => x.name === 'terminal')).toMatchObject({ hint: 'Ada is in your terminal: show it' });
     expect(pick(there, 'terminal')).toEqual(['showTerminal ada']);
+  });
+});
+
+describe('what only the core knows, right after / opened the menu', () => {
+  /** A 1:1 chat with Ada: the core was asked, and has not answered yet. */
+  const opened = at({ oneToOne: true, agent: ada, takeover: null, turns: null });
+  const typed = (c: SlashContext, query: string) => filterSlash(list(c), query);
+
+  it('the action waits in its place: ↵ on its name runs nothing, and no action that holds the same letters', () => {
+    // "New request" holds a u, and "Compact Ada’s context" holds "te": they run, and they are not first.
+    expect(typed(opened, 'u')[0]).toEqual({ name: 'undo', label: 'Undo Ada’s last turn…', icon: 'arrow-left', off: 'Reading what Codly kept of its turns…', wait: true });
+    expect(typed(opened, 'u')[1]).toMatchObject({ name: 'new', run: expect.any(Function) });
+    expect(typed(opened, 'te')[0]).toEqual({ name: 'terminal', label: 'Continue in your terminal…', icon: 'terminal', off: 'Asking Codly if it can go…', wait: true });
+    expect(typed(opened, 'te')[1]).toMatchObject({ name: 'compact', run: expect.any(Function) });
+    expect(pick(opened, 'undo')).toEqual([]);
+    expect(pick(opened, 'terminal')).toEqual([]);
+  });
+
+  it('the core’s answer: yes runs in the same place, and no goes last as any action that cannot run', () => {
+    const yes = at({ oneToOne: true, agent: ada });
+    expect(typed(yes, 'u')[0]).toMatchObject({ name: 'undo', run: expect.any(Function) });
+    expect(typed(yes, 'te')[0]).toMatchObject({ name: 'terminal', run: expect.any(Function) });
+    const no = typed(at({ oneToOne: true, agent: ada, turns: { off: 'Codly kept no turn of Ada yet' } }), 'u');
+    expect(no[0]).toMatchObject({ name: 'new' });
+    expect(no.find((x) => x.name === 'undo')).toEqual({ name: 'undo', label: 'Undo Ada’s last turn…', icon: 'arrow-left', off: 'Codly kept no turn of Ada yet' });
+    expect(no.slice(no.findIndex((x) => x.name === 'undo')).every((x) => 'off' in x)).toBe(true);
   });
 });
 

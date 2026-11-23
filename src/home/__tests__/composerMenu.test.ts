@@ -137,4 +137,27 @@ describe('filterSlash', () => {
       expect(found('s')).toEqual(['settings', 'new', 'stop (Nothing is running)', 'diff (This request has no changes yet)']); // "changes" holds an s
     });
   });
+
+  describe('an action that waits for the core’s answer', () => {
+    // `/` just opened the menu: the core has not said yet what it kept of Ada's turns, or if she can go to your terminal.
+    const asked = [
+      { name: 'new', label: 'New request' },
+      { name: 'stop', label: 'Stop Ada', off: 'Nothing is running' },
+      { name: 'compact', label: 'Compact Ada’s context' },
+      { name: 'undo', label: 'Undo Ada’s last turn…', off: 'Reading what Codly kept of its turns…', wait: true },
+      { name: 'terminal', label: 'Continue in your terminal…', off: 'Asking Codly if it can go…', wait: true },
+    ];
+    const found = (rows: typeof asked, q: string) => filterSlash(rows, q).map((c) => (c.off ? `${c.name} (off)` : c.name));
+
+    it('keeps its place: ↵ on its name runs nothing, and not the action that holds the same letters', () => {
+      expect(found(asked, 'u')).toEqual(['undo (off)', 'new', 'terminal (off)']); // "New request" and "your" hold a u
+      expect(found(asked, 'te')).toEqual(['terminal (off)', 'compact']); // "context" holds "te"
+      expect(found(asked, '')).toEqual(['new', 'compact', 'undo (off)', 'terminal (off)', 'stop (off)']);
+    });
+
+    it('goes last when the core’s answer is no, as any action that cannot run', () => {
+      const answered = asked.map((c) => (c.name === 'undo' ? { name: c.name, label: c.label, off: 'Codly kept no turn of Ada yet' } : c));
+      expect(found(answered, 'u')).toEqual(['new', 'terminal (off)', 'undo (off)']);
+    });
+  });
 });

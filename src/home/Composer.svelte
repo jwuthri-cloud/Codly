@@ -249,7 +249,7 @@
         modes: MODES,
         mcp: a ? ofLiveRun(store.live[a.id]?.mcp ?? [], a.run_id) : [],
         takeover: a ? takeovers.of(a.id) : null,
-        noTurn: a && turns?.agent === a.id ? turns.off : 'Reading what Codly kept of its turns…',
+        turns: a && turns?.agent === a.id ? turns : null,
       },
       actions,
     );
