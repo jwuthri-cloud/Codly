@@ -13,11 +13,14 @@
 // A 1:1 Claude agent you hire works in its mode (plan first, ask for edits, accept edits).
 // The demo's second office, billing-api, has a Story of its own (`openBilling`): one request
 // whose plan runs, and one request of a worker's that waits for you.
+// `?resume=ask` starts the first office as a restart of Codly leaves it: nothing starts before
+// your Resume (`seedHeld`, as orchestrator/resume.rs).
 // docs/DEMO.md lists the URL parameters that start the demo in a state the script does not reach.
 import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { Citation } from '../gen/Citation';
 import type { HeldCheck } from '../gen/HeldCheck';
+import type { ResumeOffer } from '../gen/ResumeOffer';
 import type { JsonValue } from '../gen/serde_json/JsonValue';
 import type { Plan } from '../gen/Plan';
 import type { Provider } from '../gen/Provider';
@@ -90,9 +93,14 @@ const FOLLOW_UP: Record<Spec, string> = {
 /** The tool a CLI runs a shell command with, as its other calls in the story name it. */
 const shellTool = (provider: Provider) => (provider === 'claude' ? 'Bash' : provider === 'codex' ? 'commandExecution' : 'run_shell_command');
 const KEYBOARD = /keyboard|arrow|a11y|accessib/i;
+/** Why a task does not start while the work of the last run waits for your Resume: the core's words (orchestrator/resume.rs `HELD`). */
+export const HELD = "paused: Codly restarted. Nothing starts until you press 'Resume work' at the top of the window";
+const NO_TARGET: Target = { path: null, paths: [], command: null, query: null, url: null, server: null, tool: null };
 /** Claude Code and Codex take a message into the turn that runs; the other CLIs run it as the next turn (state/queue.ts). */
 const readsMidTurn = (provider: Provider) => provider === 'claude' || provider === 'codex';
 const quoted = (text: string, max: number) => `“${text.slice(0, max)}${text.length > max ? '…' : ''}”`;
+/** An agent's name as it reads in a path ("Eli 2" → "eli-2"). */
+const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
 /** What the demo's build prints. */
 const BUILD_OUTPUT = [
   '> acme-web@2.4.0 build', '> next build', '', '   ▲ Next.js 16.1.2', '   Creating an optimized production build …', ' ✓ Compiled successfully in 9.4s',
@@ -136,6 +144,10 @@ export type StoryOptions = {
   ask?: AskKind | null;
   /** The demo's second office, billing-api: its own crew and its one request (`openBilling`), and no scripted plan for what you ask there. */
   billing?: boolean;
+  /** `?resume=ask`: the first request's plan was running when Codly last closed, and its work waits for your Resume. */
+  resumeAsk?: boolean;
+  /** `?background=on`: a 1:1 Claude agent left a command and a helper at work in the background when the repo opens. */
+  background?: boolean;
 };
 
 /**
@@ -193,12 +205,17 @@ export class Story {
   private worktrees: string;
   /** agent id → what a 1:1 agent does in its next turn, in place of its stock answer (`seedAsk`). */
   private scripted = new Map<string, (act: Actor) => Promise<void>>();
+  /** The tasks that were in work when Codly last closed, while they wait for your Resume (null: nothing is held). */
+  private held: Set<string> | null = null;
+  /** agent id → its helpers whose `Agent` call waits for them (call id → what the helper was asked): they end with the agent's turn. */
+  private waitedFor = new Map<string, Map<string, string>>();
 
   constructor(private sim: Sim, private opts: StoryOptions = {}) {
     this.rules = new MockApprovalRules(sim, this);
     this.checks = opts.checks ?? new ChecksDemo();
     this.worktrees = opts.billing ? `${HOME}/.codly/worktrees/${BILLING.name}` : WORKTREES;
     sim.afterStep = (act) => this.readMidTurn(act);
+    sim.turnStopped = (act) => this.helpersStopped(act);
   }
 
   // ───────────── workspace ─────────────
@@ -251,6 +268,8 @@ export class Story {
     const ask = this.opts.ask;
     if (this.opts.planMode || ask === 'plan') this.seedPlanner();
     if (ask && ask !== 'plan') this.seedAsk(ask);
+    if (this.opts.background) this.seedBackground();
+    if (this.opts.resumeAsk) this.seedHeld();
     if (this.opts.yourRequestFirst) return sim.workspace;
     // The demo's "you": ask for the feature, add a detail while the Lead is still planning (it
     // reads it after its current step, or it queues), then open a second request in parallel.
@@ -448,15 +467,37 @@ export class Story {
     return r.planId ? (this.sim.plans.get(r.planId) ?? null) : null;
   }
 
+  /** Does this request run its plans at once? The core's `lead_mode`: Auto or Direct, by the request's own choice or by "Run plans at once" in Settings. */
+  private runsAtOnce(thread: string): boolean {
+    const mode = this.sim.requestPrefs[thread]?.mode ?? (this.sim.settings.auto_run_plans ? 'auto' : 'plan');
+    return mode === 'auto' || mode === 'direct';
+  }
+
+  /** Did this request start from an issue or a pull request ("From issue…")? Your message has it as its attachment. */
+  private fromGithub(thread: string): boolean {
+    const intake = (a: JsonValue | null) => !!a && typeof a === 'object' && !Array.isArray(a) && 'intake' in a;
+    return this.sim.chats.some((c) => c.thread === thread && c.author === 'user' && intake(c.attachment));
+  }
+
   private postPlanReady(r: Req, plan: Plan, n: number) {
-    // Like the core: Codly posts the plan in the request's thread; the card rides on this line.
-    this.sim.chat(r.thread, 'codly', `Plan ready: ${plan.summary} (${n} tasks). Review it on the board, then click Run plan.`, { plan_id: plan.id });
+    const sim = this.sim;
+    // Like the core (`submit_plan_inner`): in a request that runs its plans at once, a plan whose
+    // request started from GitHub waits for you all the same. The record says why, and the plan's
+    // card reads it from there, above Run plan.
+    const waits = this.runsAtOnce(r.thread) && this.fromGithub(r.thread);
+    if (waits) {
+      sim.decision('plan_validate', 'rule', 'not auto-running: this request started from GitHub, and other people write there, so the plan waits for you', { rule: 'intake', plan_id: plan.id });
+    }
+    const next = waits ? 'This request started from GitHub, and other people write there, so it waits for you: review it on the board, then click Run plan.' : 'Review it on the board, then click Run plan.';
+    // Codly posts the plan in the request's thread; the card rides on this line.
+    sim.chat(r.thread, 'codly', `Plan ready: ${plan.summary} (${n} tasks). ${next}`, { plan_id: plan.id });
   }
 
   private async autoRun(r: Req) {
     const sim = this.sim;
-    if (!(sim.opts.autoplay || sim.settings.auto_run_plans)) return;
-    await sim.sleep(sim.settings.auto_run_plans ? 600 : 2800);
+    const atOnce = this.runsAtOnce(r.thread) && !this.fromGithub(r.thread);
+    if (!(sim.opts.autoplay || atOnce)) return;
+    await sim.sleep(atOnce ? 600 : 2800);
     // Let a queued message to the Lead land first, so the card shows the final plan.
     await r.chain;
     await sim.sleep(600);
@@ -710,6 +751,95 @@ export class Story {
     await next;
   }
 
+  // ───────────── work that waits for your Resume ─────────────
+
+  /**
+   * `?resume=ask`: the office as a restart of Codly leaves it while "Resume work when Codly
+   * opens" is on Ask (orchestrator/resume.rs). The first request's plan was running: its two
+   * tasks that were in work are Ready again and say why they wait, the third waits for them,
+   * and nothing starts before your Resume.
+   */
+  private seedHeld() {
+    const sim = this.sim;
+    const r = this.req('lead');
+    r.spec = 'theme';
+    r.words.push(REQUEST);
+    sim.chat('lead', 'user', REQUEST);
+    const plan = this.submitTheme(this.ensureLead('lead'), r);
+    this.postPlanReady(r, plan, 3);
+    this.held = new Set(['t1', 't2'].map((key) => this.taskOf(plan.id, key).id));
+    this.runPlan(plan.id);
+    for (const id of this.held) sim.patchTask(id, { attempt: 1, status_reason: HELD });
+  }
+
+  /**
+   * `resume_work`, as a read: what waits for your Resume (the core's `resume_offer`). The count
+   * is of the tasks that were in work and are still ready: one you cancelled since is not
+   * counted. Null: nothing is held. Like the core, a hold that waits for nothing any more ends
+   * here by itself: you cancelled every task it held, and nothing else would start.
+   */
+  resumeOffer(): ResumeOffer | null {
+    const held = this.held;
+    if (!held) return null;
+    const all = [...this.sim.tasks.values()];
+    const tasks = all.filter((t) => held.has(t.id) && t.status === 'ready').length;
+    if (tasks > 0 || this.startsByItself(all)) return { tasks };
+    this.resumeWork();
+    return null;
+  }
+
+  /**
+   * Would work start by itself now (the core's `starts_by_itself`)? A running plan with a task
+   * that can start, or with only its last checks left, or a ready task of no plan. (The demo
+   * has no budget, and its pause holds nothing back.)
+   */
+  private startsByItself(tasks: Task[]): boolean {
+    const done = (id: string) => tasks.some((t) => t.id === id && t.status === 'done');
+    const starts = (t: Task) => t.status === 'ready' || (t.status === 'pending' && t.depends_on.every(done));
+    const over = (t: Task) => t.status === 'done' || t.status === 'cancelled';
+    for (const p of this.sim.plans.values()) {
+      if (p.status !== 'running' && p.status !== 'integrating') continue;
+      const own = tasks.filter((t) => t.plan_id === p.id);
+      if (own.some(starts) || (own.some((t) => t.status === 'done') && own.every(over))) return true;
+    }
+    return tasks.some((t) => !t.plan_id && t.status === 'ready');
+  }
+
+  /**
+   * `resume_work` with your Resume: the hold ends (the core's `end_hold`). Each task that was
+   * in work and still waits goes on, and its history says so; another task that only showed
+   * the hold's reason loses it. From here on tasks start as ever.
+   */
+  resumeWork() {
+    const sim = this.sim;
+    const held = this.held;
+    if (!held) return;
+    this.held = null;
+    for (const t of [...sim.tasks.values()].filter((t) => t.status === 'ready')) {
+      if (held.has(t.id)) {
+        sim.patchTask(t.id, { status_reason: 'resuming after Codly restarted' });
+        sim.decision('retry', 'rule', 'Resumed after restart: its worker goes on where it stopped', { plan_id: t.plan_id }, { task: t.id });
+      } else if (t.status_reason === HELD) sim.patchTask(t.id, { status_reason: null });
+    }
+  }
+
+  /**
+   * Before a task starts. Like the core's scheduler: no task starts while the work of the last
+   * run waits for your Resume, and a ready task says so meanwhile. Resolves when nothing is
+   * held (any more).
+   */
+  private async notHeld(taskId: string) {
+    const sim = this.sim;
+    while (this.resumeOffer()) {
+      const t = sim.tasks.get(taskId);
+      if (t?.status === 'ready' && t.status_reason !== HELD) {
+        sim.patchTask(taskId, { status_reason: HELD });
+        sim.decision('schedule', 'rule', HELD, { task: t.key }, { task: taskId });
+      }
+      await sim.sleep(300);
+    }
+  }
+
   // ───────────── plan execution ─────────────
 
   runPlan(planId: string) {
@@ -733,10 +863,13 @@ export class Story {
     void this.coordinate(planId);
   }
 
-  /** `home`: where a 1:1 agent works (a worker on a task works in that task's worktree). */
+  /**
+   * `home`: where a 1:1 agent works. A worker on a task works in that task's worktree: the one
+   * the task has already (a task on its plan's own branch works in the plan's), else a new one.
+   */
   private spawnWorker(provider: Provider, name: string, color: number, task: Task | null, model?: string | null, home: string | null = null): Actor {
     const sim = this.sim;
-    const worktree = task ? `${this.worktrees}/${task.key}-${name.toLowerCase()}` : home;
+    const worktree = task ? (task.worktree ?? `${this.worktrees}/${task.key}-${slug(name)}`) : home;
     const a = sim.putAgent(sim.newAgent({
       name, provider, model: model ?? WORKER_MODELS[provider], role: task ? 'worker' : 'solo', color, billing: provider === 'opencode' ? 'third_party' : 'subscription',
       taskId: task?.id ?? null, worktree,
@@ -754,9 +887,17 @@ export class Story {
     return act;
   }
 
+  /**
+   * A worker that Codly can give a task to by itself: at rest (not stopped, on no task, in no
+   * turn). Never a Lead, a reviewer or a 1:1 agent you hired: you talk to that one.
+   */
+  private free(a: Agent): boolean {
+    return a.role === 'worker' && a.status !== 'offline' && !this.running.has(a.id) && !this.sim.actor(a.id).inTurn;
+  }
+
   private assign(task: Task, act: Actor, branchRoot: string) {
     const sim = this.sim;
-    const worktree = `${this.worktrees}/${task.key}-${act.a.name.toLowerCase()}`;
+    const worktree = `${this.worktrees}/${task.key}-${slug(act.a.name)}`;
     act.set({ task_id: task.id, worktree, role: act.a.role === 'lead' ? 'lead' : 'worker' });
     sim.patchTask(task.id, {
       status: 'running', assignee: act.id, branch: `${branchRoot}/${task.key}`, worktree, attempt: task.attempt + 1, status_reason: null,
@@ -853,7 +994,8 @@ export class Story {
     sim.patchTask(task.id, { status: 'done', status_reason: null, summary: o.summary });
     sim.memory(o.summary, 'task', 'summary', 'codly', { scopeId: task.id, importance: 0.5, title: task.title, refs: [`task:${task.id}`] });
     await sim.sleep(2200);
-    if (!this.running.has(act.id) || act.a.task_id === task.id) act.set({ status: 'idle', activity: null, activity_label: null, task_id: null });
+    // The worker is free again. (One you stopped meanwhile stays stopped.)
+    if (!this.running.has(act.id) || act.a.task_id === task.id) act.set(act.a.status === 'offline' ? { task_id: null } : { status: 'idle', activity: null, activity_label: null, task_id: null });
   }
 
   /**
@@ -1168,29 +1310,81 @@ export class Story {
    */
   private async subagent(act: Actor, description: string, steps: HelperStep[], ms: number, result: string) {
     const sim = this.sim;
-    const call = uid('call-');
     const started = sim.now();
-    const none: Target = { path: null, paths: [], command: null, query: null, url: null, server: null, tool: null };
+    const call = this.helperStarts(act, description, false);
+    // Its call waits for it: when you stop the turn meanwhile, the helper ends with it (`helpersStopped`).
+    const waited = this.waitedFor.get(act.id) ?? new Map<string, string>();
+    this.waitedFor.set(act.id, waited.set(call, description));
+    // `?helper=slow`: 20 times as long, so the row can be looked at while the helper works.
+    const each = (ms * (this.opts.slowHelper ? 20 : 1)) / steps.length;
+    for (const [i, s] of steps.entries()) {
+      const own = this.helperCalls(act, call, s, i + 1);
+      await act.sleep(each);
+      act.emit({ type: 'tool_completed', call_id: own, ok: true, output: null, exit_code: null, duration_ms: Math.round(each), tests_passed: null, tests_failed: null });
+    }
+    waited.delete(call);
+    act.emit({ type: 'sub_agent_progress', call_id: call, name: null, step: null, tool_call_id: null, tool_uses: null, tokens: null, report: result });
+    act.emit({ type: 'sub_agent', call_id: call, description, status: 'completed' });
+    act.emit({ type: 'tool_completed', call_id: call, ok: true, output: result, exit_code: null, duration_ms: sim.now() - started, tests_passed: null, tests_failed: null });
+  }
+
+  /** A helper begins: its `Agent` call (`background`: with `run_in_background`), its row, and its kind. Returns the call's id. */
+  private helperStarts(act: Actor, description: string, background: boolean): string {
+    const call = uid('call-');
     act.emit({
-      type: 'tool_started', call_id: call, name: 'Task', activity: 'delegate', target: { ...none, tool: 'Task' },
-      input: { description, subagent_type: 'Explore' }, confidence: 'observed',
+      type: 'tool_started', call_id: call, name: 'Task', activity: 'delegate', target: { ...NO_TARGET, tool: 'Task' },
+      input: { description, subagent_type: 'Explore', ...(background ? { run_in_background: true } : {}) }, confidence: 'observed',
     });
     act.status('working', 'delegate', 'Explore');
     act.emit({ type: 'sub_agent', call_id: call, description, status: 'running' });
     act.emit({ type: 'sub_agent_progress', call_id: call, name: 'Explore', step: null, tool_call_id: null, tool_uses: null, tokens: null, report: null });
-    // `?helper=slow`: 20 times as long, so the row can be looked at while the helper works.
-    const each = (ms * (this.opts.slowHelper ? 20 : 1)) / steps.length;
-    for (const [i, s] of steps.entries()) {
-      const own = uid('call-');
-      act.emit({ type: 'tool_started', call_id: own, name: s.name, activity: s.activity, target: { ...none, ...s.target }, input: {}, confidence: 'observed' });
-      // Its `tool_started` came just before: this says that the call is the helper's own.
-      act.emit({ type: 'sub_agent_progress', call_id: call, name: null, step: s.step, tool_call_id: own, tool_uses: i + 1, tokens: 2100 * (i + 1), report: null });
-      await act.sleep(each);
-      act.emit({ type: 'tool_completed', call_id: own, ok: true, output: null, exit_code: null, duration_ms: Math.round(each), tests_passed: null, tests_failed: null });
-    }
-    act.emit({ type: 'sub_agent_progress', call_id: call, name: null, step: null, tool_call_id: null, tool_uses: null, tokens: null, report: result });
-    act.emit({ type: 'sub_agent', call_id: call, description, status: 'completed' });
-    act.emit({ type: 'tool_completed', call_id: call, ok: true, output: result, exit_code: null, duration_ms: sim.now() - started, tests_passed: null, tests_failed: null });
+    return call;
+  }
+
+  /** A call of the helper's own begins (its `n`th). Returns that call's id. */
+  private helperCalls(act: Actor, call: string, s: HelperStep, n: number): string {
+    const own = uid('call-');
+    act.emit({ type: 'tool_started', call_id: own, name: s.name, activity: s.activity, target: { ...NO_TARGET, ...s.target }, input: {}, confidence: 'observed' });
+    // Its `tool_started` came just before: this says that the call is the helper's own.
+    act.emit({ type: 'sub_agent_progress', call_id: call, name: null, step: s.step, tool_call_id: own, tool_uses: n, tokens: 2100 * n, report: null });
+    return own;
+  }
+
+  /**
+   * A turn was stopped. Like Claude Code's adapter, after the turn's end: a helper whose `Agent`
+   * call still waited for it is over with the turn, and its row says "stopped". A helper in the
+   * background is not one of them: it works on (`helperInBackground`).
+   */
+  private helpersStopped(act: Actor) {
+    for (const [call, description] of this.waitedFor.get(act.id) ?? []) act.emit({ type: 'sub_agent', call_id: call, description, status: 'stopped' });
+    this.waitedFor.delete(act.id);
+  }
+
+  /**
+   * A helper a Claude Code agent starts with `run_in_background`: its `Agent` call returns at
+   * once, the CLI lists the helper with the agent's background work, and the helper works on
+   * beside the agent's turns and past their end (`steps`, over `ms` in all). It ends with its
+   * `report`, or sooner when you stop it from the agent's sheet (demo/background.ts).
+   */
+  private helperInBackground(act: Actor, description: string, steps: HelperStep[], ms: number, report: string) {
+    const sim = this.sim;
+    const background = demoBackground(sim);
+    const call = this.helperStarts(act, description, true);
+    act.emit({ type: 'tool_completed', call_id: call, ok: true, output: 'Async agent launched successfully.', exit_code: null, duration_ms: 0, tests_passed: null, tests_failed: null });
+    const id = background.start(act, description, call);
+    const each = ms / steps.length;
+    void (async () => {
+      for (const [i, s] of steps.entries()) {
+        const own = this.helperCalls(act, call, s, i + 1);
+        background.helperIn(act.id, id, own);
+        await sim.sleep(each);
+        // Stopped meanwhile, by you or with the agent's process: the call it was in ended with it.
+        if (!background.of(act.id).some((t) => t.id === id)) return;
+        act.emit({ type: 'tool_completed', call_id: own, ok: true, output: null, exit_code: null, duration_ms: Math.round(each), tests_passed: null, tests_failed: null });
+        background.helperIn(act.id, id, null);
+      }
+      background.end(act.id, id, 'completed', report);
+    })();
   }
 
   /**
@@ -1532,8 +1726,10 @@ export class Story {
     await sim.sleep(700);
     while (tasks().some((t) => t.status !== 'done')) {
       if (cancelled()) return;
-      for (const t of tasks().sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))) {
-        if (started.has(t.id) || t.status === 'done' || t.status === 'cancelled') continue;
+      for (const { id } of tasks().sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))) {
+        // As it is now: this pass waits between two tasks, and you can cancel one meanwhile.
+        const t = sim.tasks.get(id);
+        if (!t || started.has(t.id) || t.status === 'done' || t.status === 'cancelled') continue;
         if (t.depends_on.some((d) => sim.tasks.get(d)?.status !== 'done')) continue;
         started.add(t.id);
         // At work already (billing-api's tasks are, when you open it): not started a second time.
@@ -1542,6 +1738,9 @@ export class Story {
           sim.patchTask(t.id, { status: 'ready', status_reason: 'Dependencies merged; starting' });
           await sim.sleep(900);
         }
+        if (this.held) await this.notHeld(t.id);
+        // Cancelled, or started by you, while it waited: it is not started here (Retry starts it, `moveTask`).
+        if (sim.tasks.get(t.id)?.status !== 'ready') continue;
         this.startPlanned(planId, t.key);
         await sim.sleep(500);
       }
@@ -1667,14 +1866,16 @@ export class Story {
   private async runResolution(planId: string, taskId: string, target: string) {
     const sim = this.sim;
     await sim.sleep(900);
+    await this.notHeld(taskId);
     const task = sim.tasks.get(taskId)!;
     if (task.status === 'ready') {
       // First a worker that knows the plan's work, then any free one.
-      const free = (a: Agent | undefined): a is Agent => !!a && a.role === 'worker' && a.status !== 'offline' && !this.running.has(a.id);
+      const free = (a: Agent | undefined): a is Agent => !!a && this.free(a);
       const ofPlan = [...sim.tasks.values()].filter((t) => t.plan_id === planId && t.assignee).map((t) => sim.agents.get(t.assignee!)).reverse();
       const agent = ofPlan.find(free) ?? [...sim.agents.values()].find(free);
-      const act = agent ? sim.actor(agent.id) : this.spawnWorker('claude', 'Eli', 5, task);
-      const own = act.a.worktree;
+      // (an agent started for this task only starts in the plan's worktree, and has none of its own)
+      const act = agent ? sim.actor(agent.id) : this.spawnWorker('claude', this.freeName('claude'), 5, task);
+      const own = agent ? agent.worktree : null;
       act.set({ task_id: taskId, worktree: task.worktree });
       sim.patchTask(taskId, { status: 'running', assignee: act.id, attempt: 1, status_reason: null });
       sim.decision('route', 'rule', `${task.key} → ${act.a.name}: free, and it works in the plan’s own worktree`, { plan_id: planId, task: task.key, agent: act.a.name }, { agent: act.id, task: taskId });
@@ -1801,7 +2002,10 @@ export class Story {
   /** Re-run checks, from a stopped task's card. No demo check has a risk, so none waits for your OK. */
   recheckTask(id: string): HeldCheck[] {
     const t = this.stoppedTask(id, 'only a blocked or failed task can be checked again');
-    this.sim.decision('gate', 'human', `You re-ran the checks of ${t.key}`, { task: t.key }, { task: id });
+    // The core's record of a re-run that is yours (gate.rs `recheck_task`). Its other record,
+    // "Codly re-ran the checks of … (you changed the required checks)", has no place here: no
+    // demo task waits for the required checks, so none is checked again when you change them.
+    this.sim.decision('gate', 'human', `you re-ran the checks of ${t.key}`, { allowed: [] }, { task: id });
     this.landStopped(t, true);
     return [];
   }
@@ -1878,6 +2082,7 @@ export class Story {
     await sim.sleep(700);
     // A task you stopped, then retried: its worker lets go of the old run at its next step.
     while (t.assignee && sim.cancelled.has(t.assignee) && this.running.has(t.assignee)) await sim.sleep(300);
+    await this.notHeld(t.id);
     const task = sim.tasks.get(t.id)!;
     if (task.status !== 'ready' && task.status !== 'pending') return;
     const spec = task.plan_id ? this.specOfPlan.get(task.plan_id) : undefined;
@@ -1892,11 +2097,11 @@ export class Story {
       while (this.running.has(agent.id)) await sim.sleep(600);
     }
     if (!agent) {
-      agent = [...sim.agents.values()].find((a) => a.role !== 'lead' && !this.running.has(a.id) && a.status !== 'offline') ?? null;
+      agent = [...sim.agents.values()].find((a) => this.free(a)) ?? null;
       if (!agent) {
         const used = new Set([...sim.agents.values()].map((a) => a.color));
         const color = [5, 1, 6, 0].find((c) => !used.has(c)) ?? 5;
-        agent = this.spawnWorker('claude', 'Eli', color, task).a;
+        agent = this.spawnWorker('claude', this.freeName('claude'), color, task).a;
       }
       sim.decision('route', 'rule', `${task.key} → ${agent.name}: first free worker (${agent.provider})`, { task: task.key, agent: agent.name }, { agent: agent.id, task: task.id });
     }
@@ -1957,6 +2162,14 @@ export class Story {
     }
   }
 
+  /** A name for a new agent that no agent of the office has: its CLI's stock name, then "Eli 2", "Eli 3"… */
+  private freeName(provider: Provider): string {
+    const names = new Set([...this.sim.agents.values()].map((a) => a.name));
+    let name = WORKER_NAMES[provider];
+    for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
+    return name;
+  }
+
   /**
    * A new 1:1 agent. `named` is the name the hire wizard gave it (checked there to be free);
    * without one it gets its CLI's stock name. `isolate` false: Git isolation is off, so it works
@@ -1964,18 +2177,15 @@ export class Story {
    */
   hire(provider: Provider, model: string | null = null, title: string | null = null, named: string | null = null, isolate = true): Agent {
     const sim = this.sim;
-    const names = new Set([...sim.agents.values()].map((a) => a.name));
-    let name = named ?? WORKER_NAMES[provider];
-    if (!named) for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
+    const name = named ?? this.freeName(provider);
     const used = new Set([...sim.agents.values()].map((a) => a.color));
     const color = [0, 1, 3, 5, 2, 4, 7, 6].find((c) => !used.has(c)) ?? sim.agents.size % 8;
     // Like the core: a 1:1 agent works in a worktree of its own, called after its name. Two
     // names can read the same in a path, so a path that is taken gets a number. Its session
     // starts there: the folder is known before the agent is.
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
     const taken = new Set([...sim.agents.values()].map((a) => a.worktree));
-    let worktree = `${this.worktrees}/${slug}`;
-    for (let i = 2; taken.has(worktree); i++) worktree = `${this.worktrees}/${slug}-${i}`;
+    let worktree = `${this.worktrees}/${slug(name)}`;
+    for (let i = 2; taken.has(worktree); i++) worktree = `${this.worktrees}/${slug(name)}-${i}`;
     const act = this.spawnWorker(provider, name, color, null, model, isolate ? worktree : (sim.workspace?.repo_path ?? REPO));
     act.status('idle');
     return title ? sim.patchAgent(act.a.id, { title }) : act.a;
@@ -1986,6 +2196,29 @@ export class Story {
     const a = this.hire('claude', null, 'Docs');
     this.sim.patchAgent(a.id, { permission_mode: 'plan' });
     this.userChat(`agent:${a.id}`, 'Add a short “Theming” section to the README.');
+  }
+
+  /**
+   * `?background=on`: a 1:1 Claude agent, asked for two things that take long, starts both in
+   * the background and ends its turn. Its sheet lists them under "In the background", each with
+   * Stop (demo/background.ts).
+   */
+  private seedBackground() {
+    const a = this.hire('claude', null, 'Docs');
+    this.scripted.set(a.id, (act) => this.leaveAtWork(act));
+    this.userChat(`agent:${a.id}`, 'Start the dev server, and have a helper check every link in the docs. Do not wait for them.');
+  }
+
+  private async leaveAtWork(act: Actor) {
+    await act.think('Both can run beside me: the server as a background command, the links with a helper in the background.', { pace: 40 });
+    // The dev server never ends by itself; the helper reports after about three minutes.
+    await this.inBackground(act, 'npm run dev');
+    this.helperInBackground(act, 'Check every link in the docs', [
+      { name: 'Glob', activity: 'search', target: { query: 'docs/**/*.md' }, step: 'Listing the pages in docs/' },
+      { name: 'Grep', activity: 'search', target: { query: '\\]\\((?!#)' }, step: 'Collecting the links of each page' },
+      { name: 'WebFetch', activity: 'fetch', target: { url: 'http://localhost:3000/docs' }, step: 'Following each link' },
+    ], 180_000, 'All 42 links in `docs/` answer.');
+    await act.say('The dev server runs on port 3000, and a helper checks the links in `docs/`. Both work in the background: I will tell you what the helper finds.', { thread: `agent:${act.id}` });
   }
 
   /** Interrupt the agent's turn (Send now): its next queued message runs right after. */
@@ -2005,7 +2238,9 @@ export class Story {
     }
     if (stop) {
       act.emit({ type: 'exited', code: 0 });
-      act.set({ status: 'offline', activity: null, activity_label: null });
+      // Like the core: the run ends with the process, and what it left in the background with it
+      // (no list says so). The agent's next turn starts a new run (`Actor.turn`).
+      act.set({ status: 'offline', activity: null, activity_label: null, run_id: null });
     }
   }
 

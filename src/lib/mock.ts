@@ -7,8 +7,8 @@
 // URL knobs (dev only): ?speed=2 (script speed), ?skip=90 (fast-forward N seconds of script),
 // ?autoplay=1 (auto "Run plan" and auto-approve), ?ws=1 (open acme/web immediately; always on in
 // the public site demo). More parameters start the demo in a state the script does not reach
-// (a merge conflict, a running preview, the intake dialog, a kind of request…): demo/states.ts,
-// docs/DEMO.md.
+// (a merge conflict, a running preview, the intake dialog, a kind of request, work that waits
+// for your Resume…): demo/states.ts, docs/DEMO.md.
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
@@ -192,7 +192,10 @@ type Desk = {
 /** An office around its Sim. `states`: what the URL turned on (docs/DEMO.md), for acme/web; billing-api starts with nothing turned on. */
 function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
   const checks = new ChecksDemo(states.checksOn);
-  const story = new Story(sim, { checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing });
+  const story = new Story(sim, {
+    checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing,
+    resumeAsk: states.resumeAsk, background: states.background,
+  });
   return {
     sim, story, checks,
     ctl: new MockControls(sim), breaker: new MockBreaker(sim), askMe: new MockAskMe(sim, !billing),
@@ -257,7 +260,8 @@ export class MockTransport implements Transport {
     })();
     const sim = new Sim(
       { speed: Number(p.get('speed') ?? 1) || 1, skipMs: (Number(p.get('skip') ?? 0) || 0) * 1000, autoplay: p.get('autoplay') === '1' },
-      { ...SETTINGS, theme },
+      // `?intake=…`: "Run plans at once" is on, so the plan of a request from GitHub is one that waits although its request runs plans at once: its card says why.
+      { ...SETTINGS, theme, auto_run_plans: states.intake !== null },
     );
     this.first = this.desk = makeDesk(sim, states);
     const now = this.sim.now();
@@ -536,7 +540,7 @@ export class MockTransport implements Transport {
       case 'reconnect_agent_mcp':
         return this.ctl.reconnectMcp(String(a.agentId), String(a.server ?? ''));
       case 'stop_agent_task':
-        return this.ctl.stopTask(String(a.agentId));
+        return this.ctl.stopTask(String(a.agentId), String(a.taskId ?? ''));
       case 'agent_takeover':
         return this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
       case 'list_takeovers':
@@ -837,9 +841,14 @@ export class MockTransport implements Transport {
       }
       case 'workspace_trust':
         return this.workspaceTrust.trust((a.set as TrustChoice | null) ?? null);
-      case 'resume_work':
-        // The demo starts new each time: no work of an earlier run waits for a Resume.
-        return null;
+      case 'resume_work': {
+        // One hold for every office, as in the core. The demo starts new each time, so no work
+        // of an earlier run waits, unless it starts with `?resume=ask`: then acme/web's does,
+        // whichever office is open.
+        const held = this.first.story;
+        if (a.go) held.resumeWork();
+        return held.resumeOffer();
+      }
       case 'diagnostics':
         // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
         return {

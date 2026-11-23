@@ -17,7 +17,9 @@ import type { EventKind } from '../gen/EventKind';
 import type { PrDraft } from '../gen/PrDraft';
 import type { Settings } from '../gen/Settings';
 import { waitingOf, type Turn } from '../state/queue';
-import { DEFAULT_SETTINGS } from '../state/store.svelte';
+import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
+import { DEFAULT_SETTINGS, type Decision } from '../state/store.svelte';
+import { waitReason } from '../util/plan';
 
 function demo(o: { settings?: Partial<Settings>; story?: StoryOptions; autoplay?: boolean } = {}) {
   const sim = new Sim({ speed: 1, skipMs: 0, autoplay: o.autoplay ?? false }, { ...DEFAULT_SETTINGS, ...o.settings });
@@ -461,16 +463,47 @@ describe('the MCP servers of the first Claude Lead', () => {
   });
 });
 
+describe('the MCP servers of a Lead you stop', () => {
+  it('are gone with its run, and are reported again when it works again', async () => {
+    const { sim, story } = demo();
+    await until(() => planOf(sim, 'lead')?.status === 'awaiting_approval' && lead(sim)!.status === 'idle');
+    const id = lead(sim)!.id;
+    /** The agent sheet's list: the servers of the Lead's live run (sheet/AgentMcp.svelte). */
+    const servers = () => {
+      const list = sim.log.reduce<McpServer[]>((held, e) => (e.agent_id === id && e.kind.type === 'mcp_server' ? withMcpServer(held, e.kind, e.run_id, e.ts) : held), []);
+      return ofLiveRun(list, lead(sim)!.run_id).map((x) => [x.name, x.status]);
+    };
+    const all = [['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'failed']];
+    expect(servers()).toEqual(all);
+    const first = lead(sim)!.run_id;
+
+    story.interrupt(id, true);
+    // As in the app: the run ended with the process, and the sheet shows the servers of the live run.
+    expect(lead(sim)).toMatchObject({ status: 'offline', run_id: null });
+    expect(servers()).toEqual([]);
+
+    // Your next message starts its process again: a new run, whose CLI says its servers again.
+    story.userChat('lead', 'Is the plan ready?');
+    await until(() => !!lead(sim)!.run_id);
+    expect(lead(sim)!.run_id).not.toBe(first);
+    expect(servers()).toEqual(all);
+    const turn = sim.log.filter((e) => e.agent_id === id && e.kind.type === 'turn_started').pop()!;
+    expect(turn.run_id).toBe(lead(sim)!.run_id);
+  });
+});
+
 describe('the demo states of docs/DEMO.md', () => {
   it('reads each parameter, and a value it does not know starts nothing', () => {
-    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5'));
+    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on'));
     expect(all).toEqual({
       trustAsk: true, mergeConflict: true, previewRunning: true, checksOn: true, slowHelper: true, planMode: true, intake: 'pull_request', approval: 'question-long', hour: 21.5,
+      resumeAsk: true, background: true,
     });
     expect(demoStates(new URLSearchParams('intake=issue')).intake).toBe('issue');
-    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24'));
+    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off'));
     expect(none).toEqual({
       trustAsk: false, mergeConflict: false, previewRunning: false, checksOn: false, slowHelper: false, planMode: false, intake: null, approval: null, hour: null,
+      resumeAsk: false, background: false,
     });
     // Midnight is an hour; a parameter with no value, or with words, is none.
     expect(['hour=0', 'hour=', 'hour=noon', 'hour=-1'].map((q) => demoStates(new URLSearchParams(q)).hour)).toEqual([0, null, null, null]);
@@ -481,6 +514,8 @@ describe('the demo states of docs/DEMO.md', () => {
     expect(opensRepo({ ...none, checksOn: true })).toBe(true);
     expect(opensRepo({ ...none, intake: 'issue' })).toBe(true);
     expect(opensRepo({ ...none, approval: 'file' })).toBe(true);
+    expect(opensRepo({ ...none, resumeAsk: true })).toBe(true);
+    expect(opensRepo({ ...none, background: true })).toBe(true);
   });
 
   it('a helper shows its kind, its own calls and its report; `?checks=on` runs your checks for each task', async () => {
@@ -572,5 +607,145 @@ describe('the demo states of docs/DEMO.md', () => {
     story.runPlan(plan.id);
     const draft = new PullRequestDemo().handle('draft_pull_request', { source: { kind: 'plan', id: plan.id } }, sim) as PrDraft;
     expect(draft.body.endsWith('\n\nCloses #12\n')).toBe(true);
+  });
+});
+
+describe('a plan whose request started from GitHub', () => {
+  /** What the plan card reads (state/store.svelte.ts keeps each `decision` event this way). */
+  const decisions = (sim: Sim): Decision[] =>
+    sim.log.flatMap((e) => (e.kind.type === 'decision' ? [{ id: e.kind.id, type: e.kind.decision_type, method: e.kind.method, summary: e.kind.summary, detail: e.kind.detail, ts: e.ts, agentId: e.agent_id, taskId: e.task_id, eventId: e.id }] : []));
+  const fromIssue = (story: Story) => demoIntake({ thread: 'lead', kind: 'issue', reference: '12', note: '' }, (thread, text, source) => story.userChat(thread, text, { intake: source }));
+
+  it('waits in a request that runs its plans at once, with the reason on its card, and “Run plan” starts it', async () => {
+    const { sim, story } = demo({ settings: { auto_run_plans: true }, story: { yourRequestFirst: true } });
+    fromIssue(story);
+    await until(() => planOf(sim, 'lead')?.status === 'awaiting_approval');
+    const plan = planOf(sim, 'lead')!;
+    // The core's record (`submit_plan_inner`), and what the card makes of it above Run plan.
+    const said = events(sim, 'decision').filter((d) => d.decision_type === 'plan_validate');
+    expect(said.map((d) => [d.method, d.summary, d.detail])).toEqual([
+      ['rule', 'not auto-running: this request started from GitHub, and other people write there, so the plan waits for you', { rule: 'intake', plan_id: plan.id }],
+    ]);
+    expect(waitReason(decisions(sim), plan.id)).toBe('This request started from GitHub, and other people write there, so this plan did not start by itself. Read it, then run it if it is what you want.');
+    expect(sim.chats.find((c) => c.author === 'codly')!.text).toBe(
+      'Plan ready: Dark mode toggle in Settings (3 tasks). This request started from GitHub, and other people write there, so it waits for you: review it on the board, then click Run plan.',
+    );
+    // It does not start by itself, however long you wait.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sim.plans.get(plan.id)!.status).toBe('awaiting_approval');
+    story.runPlan(plan.id);
+    await until(() => task(sim, plan.id, 't1')!.status === 'running');
+    expect(sim.plans.get(plan.id)!.status).toBe('running');
+  });
+
+  it('has no reason on its card in a request that asks you before every plan, and a typed request still runs at once', async () => {
+    // The Settings default: every plan waits for you, and the card says nothing more.
+    const asks = demo({ story: { yourRequestFirst: true } });
+    fromIssue(asks.story);
+    await until(() => planOf(asks.sim, 'lead')?.status === 'awaiting_approval');
+    expect(waitReason(decisions(asks.sim), planOf(asks.sim, 'lead')!.id)).toBeNull();
+    expect(asks.sim.chats.find((c) => c.author === 'codly')!.text).toBe('Plan ready: Dark mode toggle in Settings (3 tasks). Review it on the board, then click Run plan.');
+
+    // "Run plans at once", and a request you typed: nothing holds its plan.
+    const typed = demo({ settings: { auto_run_plans: true }, story: { yourRequestFirst: true } });
+    typed.story.userChat('lead', REQUEST);
+    await until(() => planOf(typed.sim, 'lead')?.status === 'running');
+    expect(waitReason(decisions(typed.sim), planOf(typed.sim, 'lead')!.id)).toBeNull();
+  });
+});
+
+describe('a helper and the turn you stop', () => {
+  it('a helper whose call waits for it ends with the turn, and its row says “stopped” after the turn’s end', async () => {
+    const { sim, story } = demo({ autoplay: true, story: { slowHelper: true } });
+    await until(() => events(sim, 'sub_agent').length === 1);
+    const ada = named(sim, 'Ada')!.id;
+    story.interrupt(ada);
+    await until(() => events(sim, 'turn_completed', ada).length === 1);
+    expect(events(sim, 'turn_completed', ada)[0].status).toBe('interrupted');
+    // As Claude Code's adapter says it: the row of the helper, after the end of the turn.
+    const log = sim.log.filter((e) => e.agent_id === ada);
+    const rows = events(sim, 'sub_agent', ada);
+    expect(rows.map((s) => s.status)).toEqual(['running', 'stopped']);
+    expect(rows[1]).toMatchObject({ call_id: rows[0].call_id, description: rows[0].description });
+    expect(log.findIndex((e) => e.kind.type === 'sub_agent' && e.kind.status === 'stopped')).toBeGreaterThan(log.findIndex((e) => e.kind.type === 'turn_completed'));
+    // Said once: the helper does not report later.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(events(sim, 'sub_agent', ada).map((s) => s.status)).toEqual(['running', 'stopped']);
+  });
+
+  it('a helper that finished before the stop keeps its word', async () => {
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => events(sim, 'sub_agent').length === 2);
+    const ada = named(sim, 'Ada')!.id;
+    story.interrupt(ada);
+    await until(() => events(sim, 'turn_completed', ada).length === 1);
+    expect(events(sim, 'sub_agent', ada).map((s) => s.status)).toEqual(['running', 'completed']);
+  });
+});
+
+describe('who takes a task', () => {
+  it('a task with no worker goes to a free worker: never to a 1:1 agent you hired, never to an agent in a turn', async () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    // Two 1:1 agents, at rest: the first agents of the office. One has the stock name of a Claude agent.
+    const solo = story.hire('codex');
+    const eli = story.hire('claude');
+    expect(eli.name).toBe('Eli');
+    const start = async (title: string) => {
+      const t = story.createTask(title, '');
+      story.moveTask(t.id, 'ready');
+      await until(() => !!sim.tasks.get(t.id)!.assignee);
+      return sim.agents.get(sim.tasks.get(t.id)!.assignee!)!;
+    };
+    const first = await start('Sort the imports');
+    expect([solo.id, eli.id]).not.toContain(first.id);
+    // The worker started for it gets a name of its own, as a hire does: "Eli" is taken.
+    expect([first.name, first.role, first.worktree]).toEqual(['Eli 2', 'worker', expect.stringMatching(/\/a4-eli-2$/)]);
+    for (const a of [solo, eli]) expect(sim.agents.get(a.id)).toMatchObject({ role: 'solo', task_id: null, status: 'idle' });
+
+    // That worker is free again after its task, and takes the next one.
+    await until(() => sim.taskByKey('a4')?.status === 'done');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((await start('Rename the helper')).id).toBe(first.id);
+    await until(() => sim.taskByKey('a5')?.status === 'done');
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // While it answers you (a turn runs), a new worker is started for the task.
+    sim.actor(first.id).inTurn = true;
+    const third = await start('Update the changelog');
+    expect([first.id, solo.id, eli.id]).not.toContain(third.id);
+    expect([third.name, third.role]).toEqual(['Eli 3', 'worker']);
+    // Each name still means one agent.
+    expect(sim.agentByName('Eli')!.id).toBe(eli.id);
+    expect(new Set([...sim.agents.values()].map((a) => a.name)).size).toBe(sim.agents.size);
+  });
+
+  it('an agent started only to resolve a conflict works in the plan’s worktree, and has none of its own afterwards', async () => {
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => planOf(sim, 'lead')?.status === 'done');
+    const plan = planOf(sim, 'lead')!;
+    // No worker is free: you stopped each of them.
+    for (const a of [...sim.agents.values()].filter((x) => x.role === 'worker')) story.interrupt(a.id, true);
+    const resolving = story.resolveConflict(plan.id, 'main', ['src/app/settings/page.tsx']);
+    await until(() => sim.tasks.get(resolving.id)!.status === 'running');
+    const eli = sim.agents.get(sim.tasks.get(resolving.id)!.assignee!)!;
+    expect([eli.name, eli.role, eli.worktree]).toEqual(['Eli', 'worker', plan.integration_worktree]);
+    expect(events(sim, 'session_started', eli.id).map((s) => s.cwd)).toEqual([plan.integration_worktree]);
+
+    await until(() => sim.plans.get(plan.id)!.status === 'done');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(sim.tasks.get(resolving.id)!.status).toBe('done');
+    // The workers you stopped stay stopped (Cy's last task had only just landed).
+    expect(['Ada', 'Bo', 'Cy'].map((name) => named(sim, name)!.status)).toEqual(['offline', 'offline', 'offline']);
+    // No worktree that nobody worked in is left with its name.
+    expect(sim.agents.get(eli.id)!.worktree).toBeNull();
+  });
+});
+
+describe('your re-run of a stopped task’s checks', () => {
+  it('is on record in the core’s words', () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    story.recheckTask(sim.taskByKey('a2')!.id);
+    // crates/codly-core/src/orchestrator/gate.rs, `Rerun::You`: "you re-ran the checks of {key}".
+    expect(events(sim, 'decision').filter((d) => d.decision_type === 'gate').map((d) => [d.method, d.summary])).toEqual([['human', 'you re-ran the checks of a2']]);
   });
 });
