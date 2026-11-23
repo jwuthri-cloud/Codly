@@ -84,7 +84,7 @@ async fn the_claude_switches_are_off_by_default_and_reach_the_next_agent() {
     assert!(after.sandbox_shell);
     assert_eq!(after.env.get("CLAUDE_CODE_USE_BEDROCK").map(String::as_str), Some("1"));
     assert!(!after.env.contains_key("CLAUDE_CODE_ENTRYPOINT"));
-    let args = codly_core::adapters::claude::build_args(&after, "s", None);
+    let args = codly_core::adapters::claude::build_args(&after, "s", None, &[]);
     let at = args.iter().position(|a| a == "--settings").expect("the sandbox is passed to the CLI");
     let settings: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
     assert_eq!(settings["sandbox"]["enabled"], serde_json::json!(true));

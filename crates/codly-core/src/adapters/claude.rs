@@ -2166,18 +2166,18 @@ mod tests {
         let sandbox = json!({ "enabled": true, "failIfUnavailable": true });
         for role in [Role::Worker, Role::Solo] {
             let off = spec(role, false);
-            assert_eq!(settings_arg(&build_args(&off, "s", None)), None, "off by default: {role:?}");
+            assert_eq!(settings_arg(&build_args(&off, "s", None, &[])), None, "off by default: {role:?}");
             let on = SpawnSpec { sandbox_shell: true, ..off };
-            assert_eq!(settings_arg(&build_args(&on, "s", None)), Some(json!({ "sandbox": sandbox })), "{role:?}");
+            assert_eq!(settings_arg(&build_args(&on, "s", None, &[])), Some(json!({ "sandbox": sandbox })), "{role:?}");
         }
         // Lead and reviewers have no shell to sandbox.
         for role in [Role::Lead, Role::Reviewer] {
             let read_only = SpawnSpec { sandbox_shell: true, ..spec(role, true) };
-            assert_eq!(settings_arg(&build_args(&read_only, "s", None)), None, "{role:?}");
+            assert_eq!(settings_arg(&build_args(&read_only, "s", None, &[])), None, "{role:?}");
             assert!(!tools_for(&read_only).contains(&"Bash"));
         }
         let both = SpawnSpec { sandbox_shell: true, byok_command: Some("op read key".into()), ..spec(Role::Worker, false) };
-        assert_eq!(settings_arg(&build_args(&both, "s", None)), Some(json!({ "apiKeyHelper": "op read key", "sandbox": sandbox })));
+        assert_eq!(settings_arg(&build_args(&both, "s", None, &[])), Some(json!({ "apiKeyHelper": "op read key", "sandbox": sandbox })));
         // The recorded run used exactly this key.
         let recorded = &fixture("claude-2.1.311/sandbox-allow.ndjson")[0]["_argv"];
         let argv: Vec<String> = recorded.as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect();
@@ -2221,7 +2221,7 @@ mod tests {
         harmless["request"]["input"]["command"] = json!("ls");
         let a = approval_of(&norm.on_message(&harmless));
         assert_eq!(a.risks, vec![UNSANDBOXED.to_string()]);
-        let ctx = |mode| PolicyCtx { mode, worktree: Some(worker.cwd.as_path()), verify: &[], read_only: false, edits: true };
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(worker.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None };
         for mode in [ApprovalMode::Balanced, ApprovalMode::Strict, ApprovalMode::Autonomous] {
             assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
             assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");
@@ -2269,7 +2269,7 @@ mod tests {
         assert_eq!(a.risks, vec!["network (example.com)".to_string()]);
         assert_eq!(a.reason.as_deref(), Some("Allow network connection to example.com?"));
         assert_eq!(a.choices, vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel], "no session or permanent grant");
-        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true };
+        let ctx = |mode| PolicyCtx { mode, worktree: Some(solo.cwd.as_path()), verify: &[], read_only: false, edits: true, checkout: None };
         for mode in [ApprovalMode::Balanced, ApprovalMode::Strict, ApprovalMode::Autonomous] {
             assert!(matches!(evaluate(&a, &ctx(mode)), Verdict::Ask { .. }), "{mode:?}");
             assert!(rule_offer(&a, &ctx(mode)).is_empty(), "{mode:?}: no rule to save");
@@ -3826,7 +3826,7 @@ mod tests {
     #[test]
     fn only_a_one_to_one_agent_gets_the_plan_tool() {
         assert!(tools_for(&spec(Role::Solo, false)).contains(&EXIT_PLAN_MODE));
-        assert!(build_args(&spec(Role::Solo, false), "sid", None).join(" ").contains("Skill,LSP,ExitPlanMode "));
+        assert!(build_args(&spec(Role::Solo, false), "sid", None, &[]).join(" ").contains("Skill,LSP,ExitPlanMode "));
         assert!(!tools_for(&spec(Role::Worker, false)).contains(&EXIT_PLAN_MODE));
         assert!(!tools_for(&spec(Role::Solo, true)).contains(&EXIT_PLAN_MODE), "a read-only run has nothing to plan");
         assert!(!tools_for(&spec(Role::Lead, true)).contains(&EXIT_PLAN_MODE));
