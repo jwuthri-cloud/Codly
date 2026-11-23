@@ -1,10 +1,11 @@
 // Global keyboard map. ⌘K palette · ⌘F find in the conversation · ⌘1 full office · ⌘2 full work · ⌘. focus · ⌘, settings ·
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
-// note (both also from the empty composer) · 1-9 pick an option of the question that waits · G-sequences to rooms · J/K lists · Esc (close,
+// note (both also from the empty composer; on a plan both open the note) · 1-9 pick an option of the question that waits · G-sequences to rooms · J/K lists · Esc (close,
 // deselect, then stop the running turn: the first press asks, the second stops) · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
+import { showsPlan } from '../util/planRequest';
 import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
 import { twinsIn } from './approvalGroups';
 import { digitPick, isTextField } from '../util/questionKeys';
@@ -56,6 +57,15 @@ export function keyTargetApproval(): Approval | null {
 function keyTargetIds(ap: Approval): string[] {
   const twins = inThread(ap) ? twinsIn(store.pendingApprovals.filter(inThread), ap) : [];
   return [ap, ...twins].map((a) => a.id);
+}
+
+/**
+ * What ⌘⌫ does to the request the keyboard acts on: say no at once, or open the note field
+ * first. ⇧⌘⌫ opens the note for every request. A Claude agent's plan always gets the note: its
+ * card has no plain "no", since without a note Claude Code shows the same plan again.
+ */
+export function denyKeyAction(ap: Approval, shift: boolean): 'deny' | 'note' {
+  return shift || showsPlan(ap.subject, store.agentMap.get(ap.agent_id)?.provider) ? 'note' : 'deny';
 }
 
 /** The plan ⌘↵ runs when no approval is waiting: the one of the request you are on. */
@@ -147,7 +157,7 @@ export function installKeys(): () => void {
       const ap = keyTargetApproval();
       if (!ap || !ap.choices.includes('deny')) return;
       e.preventDefault();
-      if (e.shiftKey) ui.denyNoteFor = ap.id;
+      if (denyKeyAction(ap, e.shiftKey) === 'note') ui.denyNoteFor = ap.id;
       else resolveApprovals(keyTargetIds(ap), 'deny');
       return;
     }

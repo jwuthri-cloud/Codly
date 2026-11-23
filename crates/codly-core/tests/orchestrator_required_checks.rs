@@ -555,8 +555,10 @@ async fn a_waiting_task_goes_back_to_its_team_member_who_is_on_other_work() {
     let all = events(&core).await;
     assert!(said(&all).contains(&"after you turned the required checks on: t1 goes back to Ana first (Ana is on other work in the same worktree)"), "{:?}", said(&all));
     assert!(verified(&all).is_empty(), "no check of t1 ran: {:?}", verified(&all));
-    let back = "Codly re-ran the checks of t1 (you changed the required checks); Ana is on other work in the same worktree, so t1 goes back to Ana first";
-    assert!(recorded(&all).contains(&("rule", back)), "the task's record names Codly, not you: {:?}", recorded(&all));
+    // The task's record names Codly, not you, and says what Codly wanted: no check ran.
+    let back = "Codly wanted to re-run the checks of t1 (you changed the required checks): Ana is on other work in the same worktree, so t1 goes back to Ana first";
+    assert!(recorded(&all).contains(&("rule", back)), "{:?}", recorded(&all));
+    assert!(!said(&all).iter().any(|d| d.contains("re-ran the checks of t1")), "{:?}", said(&all));
 
     // Ana finishes t2, then takes t1 again: the gate after that turn runs its checks.
     go.notify_one();
@@ -565,6 +567,36 @@ async fn a_waiting_task_goes_back_to_its_team_member_who_is_on_other_work() {
     assert!(prompts.len() == 3 && prompts[2].contains("You are back on task t1"), "{prompts:?}");
     let all = events(&core).await;
     assert!(verified(&all).iter().all(|v| v.1) && verified(&all).iter().any(|v| v.0 == "test -f t1.txt"), "{:?}", verified(&all));
+    core.shutdown().await;
+}
+
+/// The same when you click Re-run checks on the task's card while its team member is on other
+/// work in the worktree: no check runs, so the record does not say that you re-ran them. It
+/// says what you asked for and what happens next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn your_own_rerun_that_cannot_start_is_not_recorded_as_a_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path(), "true\n");
+    let turns = Turns::default();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let (lead, settings) = anas_plan();
+    let core = start_with(dir.path(), &repo, FakeSpawner { lead, worker: file_worker(Some(go.clone())), turns: turns.clone() }, settings).await;
+    turn_on(&core).await;
+    std::fs::write(repo.join(CHECKS_FILE), "test -f README.md\n").unwrap();
+
+    core.send_chat("lead", "Please do it").await.unwrap();
+    let t1 = wait_task(&core, "t1", TaskStatus::Blocked).await;
+    // Ana is in her turn on t2, in the worktree t1 shares.
+    wait_for("Ana to start t2", 20, async || (worker_prompts(&turns).len() == 2).then_some(())).await;
+
+    assert!(core.recheck_task(&t1.id, vec![]).await.unwrap().is_empty());
+    assert_eq!(wait_task(&core, "t1", TaskStatus::Ready).await.id, t1.id);
+    let all = events(&core).await;
+    let back = "you asked to re-run the checks of t1: Ana is on other work in the same worktree, so t1 goes back to Ana first";
+    assert!(recorded(&all).contains(&("human", back)), "{:?}", recorded(&all));
+    assert!(!said(&all).iter().any(|d| d.contains("re-ran the checks of t1")), "{:?}", said(&all));
+    assert!(verified(&all).is_empty(), "no check of t1 ran: {:?}", verified(&all));
+    go.notify_one();
     core.shutdown().await;
 }
 

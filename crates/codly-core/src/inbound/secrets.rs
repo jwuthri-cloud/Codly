@@ -81,6 +81,14 @@ fn plain(s: &str) -> bool {
     !s.is_empty() && s.len() <= 512 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:/+=@-".contains(&b))
 }
 
+/// The `security -i` line that stores `value` (stdin, not argv: other processes can read argv).
+fn add_line(service: &str, key: &str, value: &str) -> Result<String> {
+    if !plain(key) || !plain(value) {
+        bail!("the value contains characters the Keychain helper cannot take (use letters, digits and . _ : / + = @ -)");
+    }
+    Ok(format!("add-generic-password -U -s {service} -a {key} -w {value}\n"))
+}
+
 impl SecretStore for Keychain {
     fn get(&self, key: &str) -> Result<Option<String>> {
         if !plain(key) {
@@ -95,11 +103,8 @@ impl SecretStore for Keychain {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
-        if !plain(key) || !plain(value) {
-            bail!("the value contains characters the Keychain helper cannot take (use letters, digits and . _ : / + = @ -)");
-        }
+        let line = add_line(&self.service, key, value)?;
         let mut child = Command::new("security").arg("-i").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
-        let line = format!("add-generic-password -U -s {} -a {key} -w {value}\n", self.service);
         child.stdin.take().expect("piped").write_all(line.as_bytes())?;
         child.wait()?; // `-i` exits 0 even when a command failed, so read it back
         if self.get(key)?.as_deref() != Some(value) {
@@ -221,6 +226,14 @@ mod tests {
         assert!(!ct_eq(b"abcd", b"abc"));
         assert!(!ct_eq(b"", b"a"));
         assert!(ct_eq(b"", b""));
+    }
+
+    #[test]
+    fn the_keychain_line_takes_plain_words_only() {
+        assert_eq!(add_line("dev.codly.inbound", "slack_bot", "xoxb-1-abc.DEF_ghi").unwrap(), "add-generic-password -U -s dev.codly.inbound -a slack_bot -w xoxb-1-abc.DEF_ghi\n");
+        for (key, value) in [("a b", "v"), ("k", "two words"), ("k", "a\nadd-generic-password"), ("k", "\"q\""), ("", "v"), ("k", "")] {
+            assert!(add_line("s", key, value).is_err(), "{key:?} {value:?}");
+        }
     }
 
     #[test]

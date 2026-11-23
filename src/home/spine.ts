@@ -37,8 +37,10 @@ export type Item =
        * The message of the agent this row shows: its key, and the words it reads while they are
        * written. Null for a chat row with no held message behind it: the message is not held
        * (any more), the row's author is not the thread's agent (another Lead served the request
-       * then, or the thread has no agent now), or the core posted the row for a turn result
-       * that no message carried.
+       * then, the thread has no agent now, or a Lead wrote to a worker: the core posts that in
+       * the worker's thread with the Lead as author), the row's id belongs to a later message by
+       * now (a CLI used the id again: a newer row shows that message, or it was said after this
+       * row), or the core posted the row for a turn result that no message carried.
        */
       itemId: string | null;
       text: string;

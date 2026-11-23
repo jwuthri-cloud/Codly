@@ -52,7 +52,19 @@ tests_passed: number | null, tests_failed: number | null, } | { "type": "files_c
 /**
  * "provider" | "tool_input" | "git"
  */
-source: string, } | { "type": "plan_updated", steps: Array<PlanStep>, } | { "type": "approval_requested", approval: Approval, } | { "type": "approval_resolved", approval_id: string, status: ApprovalStatus, 
+source: string, } | { "type": "plan_updated", steps: Array<PlanStep>, } | { "type": "approval_requested", approval: Approval, } | { "type": "approval_said", approval_id: string, 
+/**
+ * What you told the agent to do instead (at most 2000 characters).
+ */
+note: string | null, 
+/**
+ * Your answers to a question, on one line (at most 500 characters).
+ */
+answer: string | null, 
+/**
+ * The plan was accepted with your text in place of the agent's.
+ */
+plan_changed: boolean, } | { "type": "approval_resolved", approval_id: string, status: ApprovalStatus, 
 /**
  * "user" | "policy" | "provider"
  */

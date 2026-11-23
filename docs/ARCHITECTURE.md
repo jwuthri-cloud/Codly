@@ -94,8 +94,9 @@ opens": ask, always or never; ask is the default). Until your Resume the schedul
 task, no plan runs its integration checks and no task is checked again; the app shows one
 question (ask) or only the Resume work button (never). The tasks that wait are in the store:
 a start you leave without an answer asks again for the same ones. The question counts the
-tasks that still wait; once you cancelled them all and nothing else would start, the hold ends
-by itself. Each task that goes on gets a
+tasks that still wait; once you cancelled them all and nothing else could start, the hold ends
+by itself. A pause or a reached budget does not end it, in this run or at the next start: what
+starts when they end still waits for Resume work. Each task that goes on gets a
 "Resumed after restart" line in its history. A restart also keeps the fix and conflict rounds a
 task has used (in the store), the files of a task that waits for your answer (while its
 question is open), and what you were already told: the shell's notifier starts from the tasks
@@ -222,12 +223,15 @@ started in the background still runs, or while a helper (a subagent) still works
 waits (`orchestrator/background.rs`): the task says what it waits for, and its checks start when
 that work has ended. After 5 minutes Codly stops what still runs (Claude Code: its `stop_task`
 request), writes in the task's record what it stopped and what it could not stop, and checks the
-work as it is. The 5 minutes are one budget for a run of the worker: a turn of the worker in the
-middle (a test run that ended woke the CLI) does not start them again, and a retry of the task
-has 5 minutes of its own. A worker that ended its turn with no report is asked for one only
-after this wait. For Codex, a subagent that is still in a turn counts; that part is built from the
-protocol's types and is not verified on a live run. Claude Code says its whole list of
-background tasks at every change, and that list is the one record of this work
+work as it is. The 5 minutes are one budget each time the worker hands in its work: a turn of
+the worker in the middle (a test run that ended woke the CLI) does not start them again. They
+are whole again when Codly sends the work back (a failed check, a file outside the scope, a
+reviewer's request, a merge conflict), when you send it back from the diff, and for a retry of
+the task. A worker that ended its turn
+with no report is asked for one only after this wait, and the record of a stop says which comes
+next: that question, or the checks. For Codex, a subagent that is still in a turn counts; that
+part is built from the protocol's types and is not verified on a live run. Claude Code says its
+whole list of background tasks at every change, and that list is the one record of this work
 (`EventKind::BackgroundTasks`, with what left the list and how it ended): the gate waits on it,
 and the agent sheet shows it, with Stop on a command. The sheet also shows the run's MCP
 servers; a new run whose servers stand as the agent's last run recorded them writes no rows.
@@ -595,6 +599,10 @@ that are new there are named (the index does not search them).
   left it against its resolution, then the later commits), not the user's commits; the checks
   its gate ran on the plan's branch as it is are not run again when the plan finishes; and one
   that does not finish also takes its worker's new files out of the integration worktree.
+  Codly writes the start of such a task down before the merge, so a start that Codly was closed
+  in the middle of is taken back before the plan is merged, finished or resolved again. The
+  task's commits leave out the new files that were in the integration worktree before it
+  started (they are on no branch), and its record names them.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.

@@ -13,6 +13,10 @@
 //!
 //! Who else hears it is the gate's choice (`gate.rs`): the task's worker, once, while a turn
 //! of its own can still change what is merged; the Lead, when no worker turn follows.
+//!
+//! One more kind of path stays out of the gate's commit, for a task that works on its plan's
+//! own branch: what was in the plan's worktree before the task. That record, of the same
+//! type, is written in `merge_conflict.rs` (`note_there_before`).
 
 use std::path::Path;
 

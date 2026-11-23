@@ -10,7 +10,9 @@
   stay, and the rest scrolls inside it (the "Always allow" choices fold when it is short of room).
   A plan (Claude's plan mode asks to leave it with `ExitPlanMode`) renders as the plan itself:
   accept it, accept it with your changes (Claude Code takes your text as the plan), or send it
-  back with a note.
+  back with a note. It has no plain "no" (`footerButtons`): ⌘⌫ opens the note field too.
+  Once answered, the card is one row: how it ended, and what you said with the answer (your
+  answer to a question, the note of a "no", that you changed the plan), as the core recorded it.
   The plan card and the card for a host that Claude Code's sandbox blocks are for Claude agents
   only: these two tool names are Claude Code's own, and for any other CLI a request with such a
   name shows as every other tool request, by its name and its input.
@@ -34,9 +36,10 @@
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
+  import { footerButtons, PLAN_NOTE_HINT, type FooterButton } from '../../lib/util/approvalFooter';
   import { idVar } from '../../lib/util/labels';
-  import { firstQuestion, outcomeBy, outcomeWord } from '../../lib/util/outcome';
-  import { PERMISSION_SCOPE, permissionsAsked } from '../../lib/util/permissionsAsked';
+  import { firstQuestion, outcomeBy, settledWord, wordsOf } from '../../lib/util/outcome';
+  import { permissionsAsked } from '../../lib/util/permissionsAsked';
   import { shownPlan } from '../../lib/util/planRequest';
   import { digitQuestion, sendsFromField } from '../../lib/util/questionKeys';
   import { HOST_ALLOW_LASTS, sandboxHost, sandboxWants } from '../../lib/util/sandbox';
@@ -114,20 +117,14 @@
     return lines;
   });
 
-  const CHOICE: Record<ApprovalChoice, { label: string; kbd?: string; cls: string }> = {
-    allow_once: { label: 'Approve once', kbd: '⌘↵', cls: 'primary' },
-    allow_session: { label: 'Allow for this session', kbd: '⌥⌘↵', cls: '' },
-    allow_always: { label: 'Always allow', cls: '' },
-    deny: { label: 'Deny', kbd: '⌘⌫', cls: 'ghost' },
-    cancel: { label: 'Stop the turn', cls: 'danger' },
-  };
-  const ORDER: ApprovalChoice[] = ['allow_once', 'allow_session', 'allow_always', 'deny', 'cancel'];
-  /** A plan is accepted or rejected, not "approved once". */
-  /** A permissions request is allowed for this turn or for the session (the scope Codly answers with). */
-  const choiceLabel = (c: ApprovalChoice) =>
-    plan !== null ? (c === 'allow_once' ? 'Accept the plan' : c === 'deny' ? 'Reject the plan' : CHOICE[c].label)
-    : perms && (c === 'allow_once' || c === 'allow_session') ? PERMISSION_SCOPE[c]
-    : CHOICE[c].label;
+  /** The buttons under the request: a plan has its own set, with no plain "no"; a permissions
+   *  request is allowed for this turn or for this session. */
+  const buttons = $derived(footerButtons(plan !== null, approval.choices, subject.kind === 'permissions'));
+  function press(b: FooterButton) {
+    if (b.act === 'edit') openEdit();
+    else if (b.act === 'note') openNote();
+    else if (b.choice) decide(b.choice);
+  }
 
   async function decide(choice: ApprovalChoice, message: string | null = null, answers: JsonValue | null = null) {
     if (!pending || busy || !offered.has(choice)) return;
@@ -199,6 +196,11 @@
     editOpen = false;
     noteOpen = true;
     tick().then(() => noteEl?.focus());
+  }
+  /** The "no" with what you wrote. A plan goes back only with a note: without one Claude Code shows the same plan again. */
+  function sendNote() {
+    const text = note.trim();
+    if (plan === null || text) decide('deny', text || null);
   }
   $effect(() => {
     if (ui.denyNoteFor === approval.id) {
@@ -359,10 +361,14 @@
     });
   });
 
-  // A question is answered or skipped, with what you answered; only a permission is approved or denied.
-  const outcome = $derived(outcomeWord(approval.status, approval));
+  // A question is answered or skipped, a plan is accepted (with your changes, when you changed
+  // it) or sent back, every other request is approved or denied. Your words show after it.
+  const said = $derived(wordsOf(approval, approval.decided_by));
+  const outcome = $derived(settledWord(approval.status, approval, agent?.provider ?? null, !!said?.planChanged));
   const by = $derived(outcomeBy(approval.decided_by));
   const answer = $derived(subject.kind === 'question' && approval.status === 'approved' ? (yourAnswers.get(approval.id) ?? null) : null);
+  /** Your words on the closed row: your answer to a question, or the note that went with a "no". */
+  const quote = $derived(answer ?? said?.note ?? null);
   const what = $derived(subject.kind === 'command' ? subject.command : subject.kind === 'question' ? (questions[0]?.question || envelope || 'a question') : subject.kind === 'file_change' ? subject.paths.join(', ') : subject.kind === 'tool' ? (plan !== null ? 'its plan' : netHost !== null ? (netHost ? `network access to ${netHost}` : 'network access') : subject.name) : perms?.lines.length ? perms.wants : 'more permissions');
   /** How long you allowed it, when this window sent the answer: a permissions request is for a turn or for the session. */
   const allowedFor = $derived.by(() => {
@@ -370,21 +376,21 @@
     const c = yourChoice.get(approval.id);
     return c === 'allow_session' ? 'for this session' : c === 'allow_once' && subject.kind === 'permissions' ? 'for this turn' : null;
   });
-  /** The closed row of an answered question cuts both to fit: the whole question and answer, for its tooltip. */
-  const asked = $derived(answer ? `${oneLine(what, Infinity)} “${oneLine(answer, Infinity)}”` : null);
+  /** The closed row cuts what was asked and your words to fit: both whole, for its tooltip. */
+  const asked = $derived(quote ? `${oneLine(what, Infinity)} “${oneLine(quote, Infinity)}”` : null);
 </script>
 
 {#if !pending}
-  <div class="resolved s-{approval.status}" class:has-answer={!!answer}>
+  <div class="resolved s-{approval.status}" class:has-answer={!!quote}>
     <Icon name={approval.status === 'approved' ? 'check' : 'x'} size={12} stroke={2} />
     <span class="r-l">{outcome} {by}</span>
     {#if agent}<span class="r-who">{agent.name}</span>{/if}
-    {#if answer}
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex (the row cuts the question and the answer: focus shows both whole, as hover does) -->
+    {#if quote}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (the row cuts what was asked and your words: focus shows both whole, as hover does) -->
       <code class="truncate asked" tabindex="0" data-tip={asked}>{oneLine(what, 120)}</code>
       <time class="num">{clock(approval.created_at)}</time>
-      <!-- The answer has a line of its own, two at most: as wide as the row. -->
-      <span class="r-a" data-tip={asked}>“{oneLine(answer, 600)}”</span>
+      <!-- Your words have a line of their own, two at most: as wide as the row. -->
+      <span class="r-a" data-tip={asked}>“{oneLine(quote, 600)}”</span>
     {:else}
       <code class="truncate">{oneLine(what, 120)}{#if allowedFor}<span class="r-for"> · {allowedFor}</span>{/if}</code>
       <time class="num">{clock(approval.created_at)}</time>
@@ -496,11 +502,13 @@
         {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={() => decide('deny')}>Skip{#if isKeyTarget}<span class="k">⌘⌫</span>{/if}</button>{/if}
       </footer>
     {:else if noteOpen}
-      <form class="note" onsubmit={(e) => { e.preventDefault(); decide('deny', note.trim() || null); }}>
+      <form class="note" onsubmit={(e) => { e.preventDefault(); sendNote(); }}>
         <input bind:this={noteEl} class="input" placeholder="Tell {agent?.name ?? 'the agent'} what to do instead…" bind:value={note} spellcheck="true"
           onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (noteOpen = false))} />
-        <button class="btn" type="submit" disabled={busy}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
+        <button class="btn" type="submit" disabled={busy || (plan !== null && !note.trim())}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
+        <button class="btn ghost" type="button" disabled={busy} onclick={() => (noteOpen = false)}>Cancel</button>
       </form>
+      {#if plan !== null}<p class="same">{PLAN_NOTE_HINT}</p>{/if}
     {:else if editOpen}
       <footer>
         <button class="btn primary" disabled={busy || !edited.trim()} onclick={acceptEdited}>Accept with my changes</button>
@@ -509,13 +517,11 @@
       <p class="same">{agent?.name ?? 'The agent'} then works from your text: Claude Code takes it as the plan.</p>
     {:else}
       <footer>
-        {#each ORDER.filter((c) => offered.has(c)) as c (c)}
-          <button class="btn {CHOICE[c].cls}" disabled={busy} onclick={() => decide(c)}>
-            {choiceLabel(c)}{#if isKeyTarget && CHOICE[c].kbd}<span class="k">{CHOICE[c].kbd}</span>{/if}
+        {#each buttons as b (b.label)}
+          <button class="btn {b.cls}" disabled={busy} onclick={() => press(b)}>
+            {b.label}{#if isKeyTarget && b.kbd}<span class="k">{b.kbd}</span>{/if}
           </button>
         {/each}
-        {#if plan !== null && offered.has('allow_once')}<button class="btn" disabled={busy} onclick={openEdit}>Change the plan…</button>{/if}
-        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={openNote}>{plan !== null ? 'Send it back with a note…' : 'Deny with a note…'}{#if isKeyTarget}<span class="k">⇧⌘⌫</span>{/if}</button>{/if}
       </footer>
       {#if rulePrefix || ruleExact}
         {#snippet ruleButtons()}
@@ -608,8 +614,9 @@
   .r-who { color: var(--ink-2); font-weight: var(--w-med); }
   .resolved code { flex: 1; font-size: 11.5px; color: var(--ink-3); }
   .r-for { color: var(--ink-2); }
-  /* An answered question: the question on the row's line, the answer on its own lines below it,
-     as wide as the row and two lines at most (all of it in the tooltip and on focus). */
+  /* A row with your words (an answer, a note): what was asked on the row's line, your words on
+     their own lines below it, as wide as the row and two lines at most (all of it in the tooltip
+     and on focus). */
   .resolved.has-answer { flex-wrap: wrap; height: auto; min-height: 28px; padding: 5px 0; row-gap: 2px; }
   .r-a { flex: 1 0 100%; padding-left: 20px; color: var(--ink-1); line-height: var(--lh-sm); display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
   .resolved time { font-size: var(--t-xs); }

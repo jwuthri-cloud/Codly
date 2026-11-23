@@ -1,13 +1,14 @@
 // Words for rows of an agent's History that are built from ids or lists: a fact of the knowledge
-// graph, a task that changed, a change of what runs in the background. Which rows of a task say
-// something new. And what a row needs to know about the agent's other events: which calls
-// showed a plan, and which conversation rows only repeat a reply.
+// graph, a task that changed, a helper, a change of what runs in the background, a compaction.
+// Which rows of a task say something new. And what a row needs to know about the agent's other
+// events: which calls showed a plan, and which conversation rows only repeat a reply.
 // Pure, so the sheet and the tests agree; the sheet passes the names.
 import type { EventKind } from '../lib/gen/EventKind';
 import type { EventRow } from '../lib/gen/EventRow';
 import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
 import type { Triple } from '../lib/gen/Triple';
+import { tokens } from '../lib/util/format';
 import { TASK_STATUS_LABEL } from '../lib/util/labels';
 import { isPlanCall } from '../lib/util/planRequest';
 import { oneLine } from '../lib/util/sanitize';
@@ -84,19 +85,44 @@ export function withoutRepeatedTaskRows<T extends { kind: EventKind }>(rows: T[]
   return keep.reverse();
 }
 
+type SubAgentRow = Extract<EventKind, { type: 'sub_agent' }>;
 type BackgroundTasks = Extract<EventKind, { type: 'background_tasks' }>;
+type Compacting = Extract<EventKind, { type: 'compacting' }>;
 
-/** "Background command", "Helper": what a piece of background work is called in a row. */
-const backgroundWord = (kind: string) => (kind === 'command' ? 'Background command' : kind === 'helper' ? 'Helper' : 'Background task');
+/** "Helper completed: Run the tests": a helper (subagent) with its CLI's word for where it stands. One word for it on every screen: "helper". */
+export function helperRowLine(k: Pick<SubAgentRow, 'description' | 'status'>): string {
+  return `Helper ${oneLine(k.status, 24)}: ${oneLine(k.description, 90)}`;
+}
+
+/** "Background command": what a piece of background work that is no helper is called in a row. */
+const backgroundWord = (kind: string) => (kind === 'command' ? 'Background command' : 'Background task');
 
 /**
  * One change of what an agent runs in the background, as its CLI lists it: what ended, with the
  * CLI's word for it, then what still runs. "Background command stopped: npm run dev · still
  * runs: npm test"; with nothing ended, "Runs in the background: npm run dev".
+ *
+ * The end of a helper is not said here: its own row says it ("Helper stopped: Run the tests",
+ * the adapter writes one for every helper that leaves the list), and History says a thing once.
+ * Null: the list has nothing left to say (all that ended were helpers), so it is no row.
  */
-export function backgroundLine(k: Pick<BackgroundTasks, 'tasks' | 'ended'>): string {
+export function backgroundLine(k: Pick<BackgroundTasks, 'tasks' | 'ended'>): string | null {
   const runs = oneLine(k.tasks.map((t) => t.description).join(', '), 120);
   if (!k.ended.length) return k.tasks.length ? `Runs in the background: ${runs}` : 'Nothing runs in the background';
-  const ended = k.ended.map((e) => `${backgroundWord(e.kind)} ${e.status}: ${oneLine(e.description, 90)}`).join('; ');
+  const others = k.ended.filter((e) => e.kind !== 'helper');
+  if (!others.length) return null;
+  const ended = others.map((e) => `${backgroundWord(e.kind)} ${e.status}: ${oneLine(e.description, 90)}`).join('; ');
   return k.tasks.length ? `${ended} · still runs: ${runs}` : ended;
+}
+
+/**
+ * A row of a compaction, by the rule of the row under "Compact now" (`compactionLine`,
+ * state/control.svelte.ts): only an event with token numbers says that a compaction is done.
+ * Claude Code sends one without numbers when a compaction begins, so that row says "started".
+ * From another CLI such an event can be the start or the end (Codex sends both, and nothing
+ * tells them apart): its row says neither.
+ */
+export function compactionRowLine(k: Pick<Compacting, 'pre_tokens' | 'post_tokens'>, provider: Provider | null): string {
+  if (k.post_tokens != null) return `Compacted context${k.pre_tokens == null ? '' : ` ${tokens(k.pre_tokens)} → ${tokens(k.post_tokens)}`}`;
+  return provider === 'claude' ? 'Compaction started' : 'Context compaction';
 }

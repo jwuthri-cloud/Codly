@@ -4,9 +4,10 @@
 //! question you left open is asked again at the next start, for the same tasks; each resumed
 //! task says so in its history; the fix rounds a task used are not handed out again; and a
 //! task that waits for your answer keeps its files. The question counts what still waits: a
-//! hold whose tasks you cancelled ends by itself, an office whose folder is not there holds
-//! nothing, a task whose worktree is gone goes on through its worker, and a review that was
-//! under way is done again by a new reviewer.
+//! hold whose tasks you cancelled ends by itself (also when only the scheduler looks), a
+//! pause does not end a hold, an office whose folder is not there holds nothing, a task whose
+//! worktree is gone goes on through its worker, and a review that was under way is done again
+//! by a new reviewer.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -355,6 +356,12 @@ const PLAN_CHECK: &str = "test -f README.md";
 /// What a quit leaves behind for a plan that was in its integration checks: its one task is
 /// done, and its branch and worktree are there. Returns the plan's id.
 fn seed_plan_in_checks(store: &Store, ws: &Workspace, data: &Path) -> Id {
+    seed_plan(store, ws, data, "integrating", "done").0
+}
+
+/// What a quit leaves behind for a plan (`status`) with its branch, its worktree and one task
+/// "t1" (`task_status`). Returns (plan id, task id).
+fn seed_plan(store: &Store, ws: &Workspace, data: &Path, status: &str, task_status: &str) -> (Id, Id) {
     let repo = Path::new(&ws.repo_path);
     let root = format!("{}-{}", codly_core::orchestrator::names::slug(&ws.name, 24), &ws.id[ws.id.len() - 6..]);
     let wt = data.join("worktrees").join(root).join("p1").join("integration");
@@ -363,7 +370,7 @@ fn seed_plan_in_checks(store: &Store, ws: &Workspace, data: &Path) -> Id {
     let plan_id = new_id();
     let plan: Plan = serde_json::from_value(json!({
         "id": plan_id, "workspace_id": ws.id, "thread": "lead", "request": "Add a greeting", "summary": "Add a greeting",
-        "assumptions": [], "open_questions": [], "status": "integrating", "base_commit": git(repo, &["rev-parse", "HEAD"]),
+        "assumptions": [], "open_questions": [], "status": status, "base_commit": git(repo, &["rev-parse", "HEAD"]),
         "base_branch": "main", "integration_branch": "codly/p1/integration", "integration_worktree": wt, "merged_sha": null, "kept": false,
         "created_at": now_ms(), "updated_at": now_ms(),
     }))
@@ -372,10 +379,10 @@ fn seed_plan_in_checks(store: &Store, ws: &Workspace, data: &Path) -> Id {
     store.append_event(Some(&ws.id), &ev(None, EventKind::PlanChanged { plan })).unwrap();
     store.with(|db| codly_core::store::set_plan_json(db, &plan_id, &json!({ "integration_checks": [PLAN_CHECK] }))).unwrap();
     let task_id = new_id();
-    let mut task = adhoc_task(&task_id, "t1", "done");
+    let mut task = adhoc_task(&task_id, "t1", task_status);
     task["plan_id"] = json!(plan_id);
     store.append_event(Some(&ws.id), &ev(Some(&task_id), EventKind::TaskChanged { task: serde_json::from_value(task).unwrap() })).unwrap();
-    plan_id
+    (plan_id, task_id)
 }
 
 async fn wait_for<T>(what: &str, mut f: impl AsyncFnMut() -> Option<T>) -> T {
@@ -889,6 +896,94 @@ async fn a_hold_ends_by_itself_once_you_cancelled_the_tasks_it_held() {
     core.shutdown().await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "the hold is over in the store too");
+}
+
+/// The same with nobody reading the question: the look of the scheduler's own pass, in the
+/// office that is open, ends the hold, and a task you add then runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_scheduler_ends_a_hold_whose_tasks_you_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let (first, second) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings::default());
+        (seed_task_in_checks(&store, &ws, &data, "a1", Left::Checked), seed_task_in_checks(&store, &ws, &data, "b1", Left::MidTurn))
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    // The hold is on: the scheduler writes its reason on the tasks.
+    for id in [&first.0, &second.0] {
+        wait_for("the task to wait for your Resume", async || Some(task_now(&core, id).await).filter(|t| t.status_reason.as_deref() == Some(HELD))).await;
+    }
+    core.move_task(&first.0, TaskStatus::Cancelled).await.unwrap();
+    core.move_task(&second.0, TaskStatus::Cancelled).await.unwrap();
+
+    // No call of `resume_offer` or `activity` here: only the scheduler looks at the hold. Its
+    // next pass ends it, in the store too.
+    let store = store_of(dir.path());
+    wait_for("the scheduler to end the hold", async || store.kv_get(HOLD_ROW).unwrap().is_none().then_some(())).await;
+    drop(store);
+    let task = core.create_task("Write the greeting", "Create a text file").await.unwrap();
+    core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
+    let task = task_ended(&core, &task.id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(seen.lock().unwrap().runs.len(), 1, "only the new task's worker ran");
+    assert!(resumed(&core).await.is_empty(), "nothing was resumed");
+    core.shutdown().await;
+    drop(core);
+    assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "the hold is over in the store too");
+}
+
+/// "Never", and a plan that was about to start its next task: nothing starts before Resume
+/// work. You pause everything while the hold is on. The pause is no reason to end the hold,
+/// in this run or at the next start: when you take the pause off, the task still waits for
+/// Resume work, and starts after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pause_does_not_end_the_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let data = dir.path().join("data");
+    let (_, task_id) = {
+        let store = store_of(dir.path());
+        let ws = seed_office(&store, &repo, Settings { resume_on_launch: ResumeOnLaunch::Never, ..Default::default() });
+        seed_plan(&store, &ws, &data, "running", "ready")
+    };
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "no task was in work: the plan was about to start one");
+
+    // You pause everything, and scheduling passes go by: the hold is still on.
+    core.update_settings(Settings { paused: true, ..core.settings() }).await.unwrap();
+    passes(&core).await;
+    wait_for("the pause to show on the task", async || {
+        Some(task_now(&core, &task_id).await).filter(|t| t.status_reason.as_deref().is_some_and(|r| r.starts_with("paused: no new tasks start")))
+    })
+    .await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "a pause is no reason to end the hold");
+    // You close Codly with the pause on: the next start keeps the hold too.
+    core.shutdown().await;
+    drop(core);
+    let core = start_core(dir.path(), &seen, works()).await;
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "the hold that Codly closed on is still on");
+
+    // You take the pause off: nothing starts until you press Resume work.
+    core.update_settings(Settings { paused: false, ..core.settings() }).await.unwrap();
+    passes(&core).await;
+    let waits = wait_for("the task to wait for your Resume", async || Some(task_now(&core, &task_id).await).filter(|t| t.status_reason.as_deref() == Some(HELD))).await;
+    assert_eq!(waits.status, TaskStatus::Ready);
+    assert!(seen.lock().unwrap().runs.is_empty(), "no worker started before your Resume");
+    assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }));
+
+    core.resume_work().await.unwrap();
+    assert_eq!(core.resume_offer(), None);
+    let task = task_ended(&core, &task_id).await;
+    assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
+    assert_eq!(seen.lock().unwrap().runs.len(), 1, "the plan's task started after your Resume");
+    core.shutdown().await;
+    drop(core);
+    assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "your Resume ended the hold");
 }
 
 /// An office whose repo folder is not there (a disk that is not mounted) gets no work from

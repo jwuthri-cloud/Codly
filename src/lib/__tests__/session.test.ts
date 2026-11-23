@@ -8,7 +8,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { MCP_HINT, MCP_LABEL, backgroundKind, backgroundSummary, canReconnect, canStop, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundTask } from '../state/session';
+import { MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundSummary, canReconnect, canStop, mcpSummary, ofLiveRun, reconnectAnswer, reconnectMcp, signInSteps, stopBackgroundTask, stopHint, stopOnItsWay } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -107,13 +107,14 @@ describe('a snapshot of a run that went on for long', () => {
       ['docs', 'connected', null, 10],
       ['linear', 'needs_sign_in', REFUSED, 11],
     ]);
-    expect(ofLiveRun(live().background, bo.run_id).map((w) => [w.id, w.status, w.startedAt])).toEqual([['tid-1', 'running', 12]]);
+    // (the list was read from the snapshot: when its work started is not known)
+    expect(ofLiveRun(live().background, bo.run_id).map((w) => [w.id, w.status, w.startedAt])).toEqual([['tid-1', 'running', null]]);
     // They are state, not rows of the log: the log starts where the snapshot's events start.
     expect(store.events.map((e) => e.id)).toEqual([899, 900]);
     // What comes live lands on them.
     apply({ ...list(20_000, 'r2', [], [['tid-1', 'stopped']]), id: 901 }, { ...server(20_001, 'r2', 'linear', 'connected'), id: 902 });
     expect(live().mcp.map((s) => [s.name, s.status])).toEqual([['docs', 'connected'], ['linear', 'connected']]);
-    expect(live().background.map((w) => [w.id, w.status, w.startedAt, w.endedAt])).toEqual([['tid-1', 'stopped', 12, 20_000]]);
+    expect(live().background.map((w) => [w.id, w.status, w.startedAt, w.endedAt])).toEqual([['tid-1', 'stopped', null, 20_000]]);
   });
 
   it('keeps them when the agent\'s earlier history is loaded and its state is built again', async () => {
@@ -197,12 +198,30 @@ describe('what an agent left at work in the background', () => {
     expect(backgroundSummary(live().background)).toBe('2 ended');
   });
 
-  it('a helper is listed beside the commands, and only a command that runs has "Stop"', () => {
+  // Recorded (docs/research/cli-claude-stream-json-2.1.311-part3.md, section 1): `stop_task` stops a
+  // helper of the list as it stops a command. Before, a helper had no "Stop".
+  it('a helper is listed beside the commands; a command and a helper that run have "Stop", another kind of task has none', () => {
     const tasks = [task('tid-1'), task('tid-3', 'helper'), task('tid-4', 'remote')];
     apply(ev(10, 'r2', { type: 'background_tasks', tasks, ended: [] }));
-    expect(live().background.map((w) => [w.id, backgroundKind(w), canStop(w)])).toEqual([['tid-1', null, true], ['tid-3', 'helper', false], ['tid-4', 'task', false]]);
-    apply(list(20, 'r2', [], [['tid-1', 'completed']]));
-    expect(live().background.filter(canStop)).toEqual([]);
+    expect(live().background.map((w) => [w.id, backgroundKind(w), canStop(w)])).toEqual([['tid-1', null, true], ['tid-3', 'helper', true], ['tid-4', 'task', false]]);
+    // What ended has no "Stop": the command, and the helper.
+    apply(ev(20, 'r2', { type: 'background_tasks', tasks: [tasks[2]], ended: [{ ...tasks[0], status: 'completed' }, { ...tasks[1], status: 'stopped' }] }));
+    expect(live().background.map((w) => [w.id, w.status, canStop(w)])).toEqual([['tid-4', 'running', false], ['tid-1', 'completed', false], ['tid-3', 'stopped', false]]);
+  });
+
+  it('the "Stop" of a helper says what follows: its agent is told and takes a turn', () => {
+    apply(ev(10, 'r2', { type: 'background_tasks', tasks: [task('tid-1'), task('tid-3', 'helper')], ended: [] }));
+    const [command, helper] = live().background;
+    expect(stopHint(helper, 'Bo')).toBe('Stops this helper. Bo is told and goes on with a turn of its own.');
+    expect(stopHint(command, 'Bo')).toBeNull();
+  });
+
+  it('a row reads "Stopping…" from the stop Claude Code took until its list drops the work, for 10 s at most', () => {
+    expect(stopOnItsWay(undefined, 50_000)).toBe(false); // no stop was asked
+    expect(stopOnItsWay(50_000, 50_000)).toBe(true);
+    expect(stopOnItsWay(50_000, 50_000 + STOP_WAIT_MS - 1)).toBe(true);
+    // The row still runs after the wait: that request did not stop it, and "Stop" is there again.
+    expect(stopOnItsWay(50_000, 50_000 + STOP_WAIT_MS)).toBe(false);
   });
 
   it('work that a list drops without a word is over too, and work that was never seen running has no start', () => {
@@ -237,14 +256,60 @@ describe('what an agent left at work in the background', () => {
     expect(rows()).toEqual([['tid-1', 'stopped', null, 30]]);
   });
 
-  it('"Stop" names the command by Claude Code\'s id, and a refusal says why', async () => {
+  it('"Stop" names the work by Claude Code\'s id, and a refusal says why', async () => {
     for (const t of toasts.list) toasts.dismiss(t.id);
-    const stop = vi.spyOn(api, 'stopAgentTask').mockResolvedValueOnce(undefined).mockRejectedValueOnce('Bo is not running');
-    expect(await stopBackgroundTask('a1', 'tid-2')).toBe(true);
+    const stop = vi.spyOn(api, 'stopAgentTask').mockResolvedValueOnce(undefined).mockRejectedValueOnce('Bo is not running').mockResolvedValueOnce(undefined).mockRejectedValueOnce('Bo is not running');
+    expect(await stopBackgroundTask('a1', { id: 'tid-2', kind: 'command' })).toBe(true);
     expect(stop).toHaveBeenCalledWith('a1', 'tid-2');
     expect(toasts.list).toHaveLength(0);
-    expect(await stopBackgroundTask('a1', 'tid-2')).toBe(false);
+    expect(await stopBackgroundTask('a1', { id: 'tid-2', kind: 'command' })).toBe(false);
     expect(toasts.list.map((t) => [t.title, t.body])).toEqual([['Couldn’t stop the command', 'Bo is not running']]);
     for (const t of toasts.list) toasts.dismiss(t.id);
+    // A helper goes the same way, by its id of the list.
+    expect(await stopBackgroundTask('a1', { id: 'tid-3', kind: 'helper' })).toBe(true);
+    expect(stop).toHaveBeenLastCalledWith('a1', 'tid-3');
+    expect(await stopBackgroundTask('a1', { id: 'tid-3', kind: 'helper' })).toBe(false);
+    expect(toasts.list.map((t) => [t.title, t.body])).toEqual([['Couldn’t stop the helper', 'Bo is not running']]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+});
+
+// The event of a list has no start time: work starts with the list that names it first. After
+// the window was loaded again, the first list at hand of a run can be a late one of a long run.
+// Before, its work got that list's time, and the row's timer was too short.
+describe('when background work started', () => {
+  const said = (n: number): EventRow => ({ id: n, ts: 1000 + n, agent_id: 'a1', task_id: null, run_id: 'r2', kind: { type: 'message', item_id: `m${n}`, text: 'on it', phase: 'final' } as EventKind });
+  const starts = () => live().background.map((w) => [w.id, w.status, w.startedAt]);
+
+  it('is the time of the list that names it first, when the window saw that list come', () => {
+    apply(list(10, 'r2', ['tid-1']), list(20, 'r2', ['tid-1', 'tid-2']));
+    expect(starts()).toEqual([['tid-1', 'running', 10], ['tid-2', 'running', 20]]);
+  });
+
+  it('is not known for work that the first list of a snapshot names, in its events or beside them', () => {
+    fresh({ as_of: 900, events: [{ ...list(500, 'r2', ['tid-1']), id: 890 }, said(899), said(900)] });
+    expect(starts()).toEqual([['tid-1', 'running', null]]);
+    fresh({ as_of: 900, events: [said(899), said(900)], session_events: [{ ...list(500, 'r2', ['tid-1']), id: 40 }] });
+    expect(starts()).toEqual([['tid-1', 'running', null]]);
+    // It ends: how long it ran is not known either.
+    apply({ ...list(20_000, 'r2', [], [['tid-1', 'completed']]), id: 901 });
+    expect(live().background.map((w) => [w.id, w.status, w.startedAt, w.endedAt])).toEqual([['tid-1', 'completed', null, 20_000]]);
+  });
+
+  it('is known for work that a later list of the snapshot adds, and for work that comes after the snapshot', () => {
+    fresh({ as_of: 900, events: [{ ...list(500, 'r2', ['tid-1']), id: 890 }, { ...list(600, 'r2', ['tid-1', 'tid-2']), id: 895 }, said(900)] });
+    expect(starts()).toEqual([['tid-1', 'running', null], ['tid-2', 'running', 600]]);
+    apply({ ...list(20_000, 'r2', ['tid-1', 'tid-2', 'tid-3']), id: 901 });
+    expect(starts()).toEqual([['tid-1', 'running', null], ['tid-2', 'running', 600], ['tid-3', 'running', 20_000]]);
+  });
+
+  it('a start the window saw stays known when the agent\'s earlier history is loaded and its state is built again', async () => {
+    fresh({ as_of: 900, events: [said(899), said(900)] });
+    apply({ ...list(20_000, 'r2', ['tid-1']), id: 901 });
+    expect(starts()).toEqual([['tid-1', 'running', 20_000]]);
+    vi.spyOn(api, 'threadEvents').mockResolvedValue([said(898), said(897)]);
+    await store.loadEarlier('agent:a1');
+    expect(live().messages).toHaveLength(4);
+    expect(starts()).toEqual([['tid-1', 'running', 20_000]]);
   });
 });

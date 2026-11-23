@@ -78,8 +78,8 @@ export class Sim {
   private nextId = 1;
   log: EventRow[] = [];
   private queue: EventRow[] = [];
-  /** The last `mcp_server` event of each agent's server: the log is cut, and a snapshot still says where a server stands. */
-  private servers = new Map<string, EventRow>();
+  /** The last `mcp_server` event of each agent's server, and each agent's last list of background work: the log is cut, and a snapshot still says where they stand. */
+  private session = new Map<string, EventRow>();
   sink: ((b: UiBatch) => void) | null = null;
 
   clis: CliInfo[] = [];
@@ -106,6 +106,10 @@ export class Sim {
   touched = new Map<string, Set<string>>();
   /** Runs after each tool call of an agent's turn, while the turn goes on (the story sets it). */
   afterStep: ((act: Actor) => Promise<void>) | null = null;
+  /** Runs when an agent's turn was stopped, after its `turn_completed` (the story sets it). */
+  turnStopped: ((act: Actor) => void) | null = null;
+  /** The offices of this machine that the demo plays, this one included (`sameMachineAs`). */
+  machine: Sim[] = [this];
   private waiters = new Set<Waiter>();
 
   constructor(opts: SimOptions, settings: Settings) {
@@ -127,6 +131,8 @@ export class Sim {
     share('clis');
     share('recent');
     share('signIns');
+    first.machine.push(this);
+    this.machine = first.machine;
   }
 
   now() {
@@ -148,7 +154,8 @@ export class Sim {
     if (!ephemeral) {
       this.log.push(row);
       if (this.log.length > 8000) this.log = this.log.slice(-6000);
-      if (kind.type === 'mcp_server') this.servers.set(`${row.agent_id}:${kind.name}`, row);
+      if (kind.type === 'mcp_server') this.session.set(`${row.agent_id}:mcp:${kind.name}`, row);
+      if (kind.type === 'background_tasks') this.session.set(`${row.agent_id}:background`, row);
     }
     this.queue.push(row);
     this.check();
@@ -166,9 +173,18 @@ export class Sim {
     return this.nextId - 1;
   }
 
+  /**
+   * The agent's process starts: a run of its own, as in the core. Like Claude Code at the start
+   * of a session, it says again where each of its MCP servers stands (here: as it last stood).
+   */
+  startRun(agentId: string) {
+    const a = this.patchAgent(agentId, { run_id: uid('r-') });
+    for (const [key, row] of [...this.session]) if (key.startsWith(`${agentId}:mcp:`)) this.emit(row.kind, { agent: a.id, task: a.task_id, run: a.run_id });
+  }
+
   /** Where an agent's MCP server stands, as it last reported (null: it reported none by that name). */
   mcpStatus(agentId: string, name: string): McpServerStatus | null {
-    const k = this.servers.get(`${agentId}:${name}`)?.kind;
+    const k = this.session.get(`${agentId}:mcp:${name}`)?.kind;
     return k?.type === 'mcp_server' ? k.status : null;
   }
 
@@ -193,8 +209,8 @@ export class Sim {
       triples: this.triples,
       artifacts: [...this.artifacts.values()],
       events,
-      // Like the core: where each MCP server stands, when that is older than `events`. (The demo's agents leave no command running.)
-      session_events: [...this.servers.values()].filter((e) => e.id < from).sort((a, b) => a.id - b.id),
+      // Like the core: where each MCP server stands and each agent's last list of background work, when that is older than `events`.
+      session_events: [...this.session.values()].filter((e) => e.id < from).sort((a, b) => a.id - b.id),
     };
   }
 
@@ -439,6 +455,8 @@ export class Actor {
   inTurn = false;
 
   async turn(input: string | null, body: () => Promise<void>) {
+    // A turn needs a process: an agent that has none (you stopped it, or it never started) starts one.
+    if (!this.a.run_id) this.sim.startRun(this.id);
     const started = this.sim.now();
     this.inTurn = true;
     this.emit({ type: 'turn_started', input });
@@ -452,6 +470,7 @@ export class Actor {
       this.inTurn = false;
       if (e instanceof Cancelled) {
         this.emit({ type: 'turn_completed', status: 'interrupted', result_text: null, duration_ms: this.sim.now() - started });
+        this.sim.turnStopped?.(this);
       }
       throw e;
     }

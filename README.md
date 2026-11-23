@@ -353,8 +353,9 @@ The full code map is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), section 8.
     repository's git data. It can still read your other files.
   - It can reach only the hosts that your Claude Code settings allow. Codly adds no host and no folder.
     When a command wants another host, Codly asks you, in every approval mode except Full access: the
-    approval card names the host. If you allow it, the host stays allowed for the rest of that agent's
-    session, for every later command. If you deny it, the command gets a network error.
+    approval card names the host. Approve once lets this command connect. Claude Code then does not ask
+    again for this host while this agent keeps running. When the agent starts again (Codly restarts, or
+    a change that restarts the agent) it asks again. If you deny it, the command gets a network error.
   - Commands still go through the approval rules, as they do with the switch off: what the rules ask
     about (a `git push`, an `rm -rf`, a download) still asks you first. The sandbox is a second check
     under the rules, not a way around them. So one command can ask twice: once for itself, and once
