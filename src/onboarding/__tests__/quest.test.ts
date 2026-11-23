@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CliInfo } from '../../lib/gen/CliInfo';
 import { catalog } from '../catalog';
-import { LEVELS, XP_PER_LEVEL, complete, crewReady, earned, nextLevel, progress, rank, xp } from '../quest';
+import { LEVELS, NO_LEAD, XP_PER_LEVEL, complete, crewReady, earned, nextLevel, progress, rank, xp } from '../quest';
 
 const cli = (over: Partial<CliInfo>): CliInfo => ({ provider: 'claude', path: null, version: null, logged_in: null, billing: 'unknown', plan: null, problem: null, transport: 'stream-json', ...over }) as CliInfo;
 
@@ -38,8 +38,17 @@ describe('what Continue rewards', () => {
     expect(earned('crew', [cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: false })])).toBe(false);
     expect(earned('crew', [cli({ path: '/bin/claude', logged_in: true })])).toBe(true);
   });
+  it('the Lead level only with a Lead to appoint: a CLI that is ready', () => {
+    expect(earned('lead', [])).toBe(false);
+    expect(earned('lead', [cli({}), cli({ provider: 'codex', path: '/bin/codex', logged_in: false })])).toBe(false);
+    expect(earned('lead', [cli({ path: '/bin/claude', logged_in: true })])).toBe(true);
+    // What Continue says instead of the reward names what is missing, not the reward.
+    expect(NO_LEAD.title).toBe('No Lead yet');
+    expect(NO_LEAD.body).toContain('No agent is ready');
+    expect(`${NO_LEAD.title} ${NO_LEAD.body}`).not.toContain(LEVELS.find((l) => l.id === 'lead')!.reward);
+  });
   it('every other level as you move on, with or without a CLI', () => {
-    for (const l of LEVELS.filter((x) => x.id !== 'crew')) expect(earned(l.id, [])).toBe(true);
+    for (const l of LEVELS.filter((x) => x.id !== 'crew' && x.id !== 'lead')) expect(earned(l.id, [])).toBe(true);
   });
 });
 
