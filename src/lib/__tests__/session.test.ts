@@ -18,10 +18,11 @@ const apply = (...evs: EventRow[]) => (store as unknown as { applyEvents(evs: Ev
 
 let id = 0;
 /** A snapshot takes the place of everything the store holds. */
-const fresh = (o: Partial<Snapshot> = {}) => {
-  const snap = { as_of: 0, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [bo], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [], ...o };
-  (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snap as unknown as Snapshot);
-};
+const snapshot = (o: Partial<Snapshot>) =>
+  ({ as_of: 0, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [bo], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [], ...o }) as unknown as Snapshot;
+const fresh = (o: Partial<Snapshot> = {}) => (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snapshot(o));
+/** A snapshot of the office that is open (the event stream fell behind, or connected again): it is merged into what the store holds. `missed`: the stored rows since. */
+const merge = (o: Partial<Snapshot>, missed: EventRow[] = []) => (store as unknown as { mergeSnapshot(s: Snapshot, missed: EventRow[]): void }).mergeSnapshot(snapshot(o), missed);
 beforeEach(() => {
   id = 0;
   fresh();
@@ -141,6 +142,25 @@ describe('a snapshot of a run that went on for long', () => {
       expect(store.events.map((e) => e.id)).toEqual([898, 899, 900]);
       // A server that changes has its row, and lands on the same list.
       apply({ ...server(60, 'r2', 'docs', 'failed', 'Connection closed'), id: 901 });
+      expect(servers()).toEqual([['docs', 'failed'], ['linear', 'needs_sign_in']]);
+      expect(store.events.map((e) => e.id)).toEqual([898, 899, 900, 901]);
+    });
+
+    // The run started while the open office's event stream fell behind: its servers' live events
+    // are lost, and no stored row holds them. The snapshot that catches up has them.
+    it('shows them when their live events were lost and a snapshot is merged into the open office', () => {
+      fresh({ as_of: 900, events: earlier() });
+      expect(servers()).toEqual([]);
+      merge({ as_of: 900, events: earlier(), session_events: unchanged() });
+      expect(servers()).toEqual([['docs', 'connected'], ['linear', 'needs_sign_in']]);
+      expect(store.events.map((e) => e.id)).toEqual([898, 899, 900]);
+    });
+
+    it('a merged snapshot gives a server that changed from its missed row, and the others beside it', () => {
+      fresh({ as_of: 900, events: earlier() });
+      // "docs" failed in the live run: that is a stored row. "linear" stands as recorded.
+      const failed = { ...server(60, 'r2', 'docs', 'failed', 'Connection closed'), id: 901 };
+      merge({ as_of: 901, events: [...earlier(), failed], session_events: [unchanged()[1]] }, [failed]);
       expect(servers()).toEqual([['docs', 'failed'], ['linear', 'needs_sign_in']]);
       expect(store.events.map((e) => e.id)).toEqual([898, 899, 900, 901]);
     });

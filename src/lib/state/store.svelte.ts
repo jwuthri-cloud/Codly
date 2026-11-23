@@ -511,6 +511,10 @@ class CodlyStore {
    *  the place of ours. Nothing older is dropped, and nothing remounts (`epoch` stays). */
   private mergeSnapshot(s: Snapshot, missed: EventRow[]) {
     this.applyEvents(missed);
+    // A server that stands where an earlier run recorded it has no row in any log (id 0), so
+    // the missed rows do not hold it, and its live event may be lost with what was missed. It
+    // is the newest word about that server, of the run that is live: it lands last.
+    for (const ev of s.session_events ?? []) if (ev.id === 0) this.derive(ev, true);
     this.adopt(s);
     // Approvals: the snapshot has the ones that wait. Answered ones are in no snapshot: ours stay.
     const waiting = new Set(s.approvals.map((a) => a.id));
