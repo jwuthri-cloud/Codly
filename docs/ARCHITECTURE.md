@@ -92,11 +92,12 @@ same Settings section). At the next start, work that was under way when Codly cl
 go on by itself (`orchestrator/resume.rs`, Settings → Long runs → "Resume work when Codly
 opens": ask, always or never; ask is the default). Until your Resume the scheduler starts no
 task, no plan runs its integration checks and no task is checked again; the app shows one
-question (ask) or only the Resume work button (never). Each task that goes on gets a "Resumed
-after restart" line in its history. A restart also keeps the fix and conflict rounds a task has
-used (in the store), the files of a task that waits for your answer (while its question is
-open), and what you were already told: the shell's notifier starts from the tasks and plans
-that already stood (`Core::standing`).
+question (ask) or only the Resume work button (never). The tasks that wait are in the store:
+a start you leave without an answer asks again for the same ones. Each task that goes on gets a
+"Resumed after restart" line in its history. A restart also keeps the fix and conflict rounds a
+task has used (in the store), the files of a task that waits for your answer (while its
+question is open), and what you were already told: the shell's notifier starts from the tasks
+and plans that already stood (`Core::standing`).
 After a restart a resumed worker's first prompt says what Codly sees in
 its worktree: the branch, the uncommitted files, Codly's last commit and its last check. When an
 agent's process is gone, what it left in its process group (a dev server, a watcher) is ended

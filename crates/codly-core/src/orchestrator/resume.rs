@@ -8,8 +8,10 @@
 //!   shows one question for "ask" and only the Resume work button for "never". With "always"
 //!   the work goes on at once. Nothing is held when nothing would start: no task was in
 //!   work, and every plan waits for you, for its paused office or for a budget.
-//!   The hold is in memory. After another restart the same rule finds the waiting work again;
-//!   a task that only had its checks left then gets a worker turn first.
+//!   The hold is in the store too (`HOLD`): when Codly closes before your answer, the next
+//!   start waits for the same tasks, whatever they say by then, and a task that only had its
+//!   checks left still gets no worker turn. If you chose "always" meanwhile, they go on at
+//!   that start.
 //! - **"Resumed after restart"**: each task that goes on gets that line in its history.
 //! - **Round counters**: the fix and conflict rounds a task has used are in the store, so a
 //!   restart does not give it new ones (`count_rounds`, `forget_rounds`).
@@ -40,12 +42,16 @@ const RESUMING: &str = "resuming after Codly restarted";
 const CHECKING: &str = "checking the work again after Codly restarted";
 
 /// The work of the last run, while it waits for your Resume.
+#[derive(Default, Serialize, Deserialize)]
 pub(super) struct Hold {
     /// The tasks that were in work when Codly closed.
     tasks: Vec<Id>,
     /// Those of them whose worker had ended its turn: their gate runs again, with no worker turn.
     regate: Vec<Id>,
 }
+
+/// Where the store keeps the hold, from the start that sets it until it ends.
+const HOLD: &str = "resume_hold";
 
 /// What waits for your Resume since Codly opened (`Core::resume_offer`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -141,39 +147,74 @@ impl Inner {
     /// that only had their gate left). They, the tasks an earlier start held, and whatever
     /// else would start by itself now, wait for your Resume.
     pub(super) fn hold_at_launch(&self, in_work: Vec<Id>, regate: Vec<Id>) {
-        let mut tasks = in_work;
-        match self.held_before() {
+        let mut hold = Hold { tasks: in_work, regate };
+        match self.still_held() {
             Ok(before) => {
-                for id in before {
-                    if !tasks.contains(&id) {
-                        tasks.push(id);
+                // What this start found about a task counts, not what an earlier one wrote.
+                for id in before.tasks {
+                    if !hold.tasks.contains(&id) {
+                        if before.regate.contains(&id) {
+                            hold.regate.push(id.clone());
+                        }
+                        hold.tasks.push(id);
                     }
                 }
             }
             Err(e) => tracing::warn!("could not read the tasks an earlier start held: {e}"),
         }
-        let waits = !tasks.is_empty()
+        let waits = !hold.tasks.is_empty()
             || self.starts_by_itself().unwrap_or_else(|e| {
                 // Not known: nothing starts before you say so.
                 tracing::warn!("could not tell whether work would start by itself, so it waits for Resume: {e}");
                 true
             });
+        if let Err(e) = self.keep_hold(waits.then_some(&hold)) {
+            tracing::warn!("the work that waits for your Resume is not in the store, so the next start may not ask for the same tasks: {e}");
+        }
         if waits {
-            *lock(&self.held_work) = Some(Hold { tasks, regate });
+            *lock(&self.held_work) = Some(hold);
         }
     }
 
-    /// The tasks that were in work and that a start of Codly held, when Codly closed again
-    /// before your answer: each is ready, says why it waits, and has a worker run from before.
-    /// (The tasks this start held read the same.)
-    fn held_before(&self) -> Result<Vec<Id>> {
-        let mut tasks = vec![];
-        for t in self.store.tasks_with_status(&[TaskStatus::Ready])? {
-            if t.status_reason.as_deref() == Some(HELD) && self.store.latest_task_run(&t.id, Some(Role::Worker))?.is_some() {
-                tasks.push(t.id);
-            }
-        }
-        Ok(tasks)
+    /// Write the hold to the store, or take it out of it (None).
+    fn keep_hold(&self, hold: Option<&Hold>) -> Result<()> {
+        let row = hold.map(|hold| serde_json::to_string(hold)).transpose()?;
+        self.store.kv_write(&[(HOLD.to_string(), row)])
+    }
+
+    /// The hold of a start that Codly closed on before your answer, as that start wrote it.
+    /// None: no hold was left open.
+    fn hold_left_open(&self) -> Result<Option<Hold>> {
+        let Some(row) = self.store.kv_get(HOLD)? else { return Ok(None) };
+        let hold = serde_json::from_str(&row).unwrap_or_else(|e| {
+            tracing::warn!("the tasks an earlier start held cannot be read, so none is said to be resumed: {e}");
+            Hold::default()
+        });
+        Ok(Some(hold))
+    }
+
+    /// The tasks of a hold that was left open which still wait (ready): you may have
+    /// cancelled one meanwhile.
+    fn still_held(&self) -> Result<Hold> {
+        let Some(mut hold) = self.hold_left_open()? else { return Ok(Hold::default()) };
+        let ready: HashSet<Id> = self.store.tasks_with_status(&[TaskStatus::Ready])?.into_iter().map(|t| t.id).collect();
+        hold.tasks.retain(|id| ready.contains(id));
+        Ok(hold)
+    }
+
+    /// Recovery with "always", after a start that asked and that Codly closed on before your
+    /// answer: the tasks that start held go on now. Not `in_work`: those went on already.
+    /// Returns the tasks whose gate runs again.
+    pub(super) fn resume_left_open(&self, in_work: &[Id]) -> Vec<Id> {
+        let resumed = (|| -> Result<Vec<Id>> {
+            let Some(mut hold) = self.hold_left_open()? else { return Ok(vec![]) };
+            hold.tasks.retain(|id| !in_work.contains(id));
+            Ok(self.end_hold(&hold, &self.store.tasks_with_status(&[TaskStatus::Ready])?))
+        })();
+        resumed.unwrap_or_else(|e| {
+            tracing::warn!("could not resume the tasks an earlier start held: {e}");
+            vec![]
+        })
     }
 
     /// Would work start by itself now? A running plan that goes on (`goes_on`; one that was
@@ -196,18 +237,33 @@ impl Inner {
         Ok(false)
     }
 
-    /// Your Resume: the hold ends. Each task that was in work goes on (`resume_task`), the
-    /// others start as the scheduler finds room for them.
+    /// Your Resume: the hold ends (`end_hold`), and the gates of the tasks that only had
+    /// their checks left start.
     async fn resume_work(self: &Arc<Self>) -> Result<()> {
         // Under the scheduler's lock: no pass starts a task between the end of the hold and
         // the writes below.
         let sched = self.sched_lock.lock().await;
         let waiting = self.store.tasks_with_status(&[TaskStatus::Ready])?;
         let Some(hold) = lock(&self.held_work).take() else { return Ok(()) };
+        let regate = self.end_hold(&hold, &waiting);
+        drop(sched);
+        for task_id in regate {
+            tokio::spawn(self.clone().gate(task_id));
+        }
+        self.kick();
+        Ok(())
+    }
+
+    /// The end of a hold. Each of its tasks that still waits (`waiting`: the ready tasks) goes
+    /// on (`resume_task`), the other tasks lose the reason they waited for and start as the
+    /// scheduler finds room for them, and the store forgets the hold. Returns the tasks whose
+    /// gate the caller starts.
+    fn end_hold(&self, hold: &Hold, waiting: &[Task]) -> Vec<Id> {
         let mut regate = vec![];
-        for t in &waiting {
-            let gate_only = hold.regate.contains(&t.id);
-            let res = if hold.tasks.contains(&t.id) {
+        for t in waiting {
+            let was_in_work = hold.tasks.contains(&t.id);
+            let gate_only = was_in_work && hold.regate.contains(&t.id);
+            let res = if was_in_work {
                 // Whatever it says by now (a paused office writes its own reason).
                 self.resume_task(t, gate_only)
             } else if t.status_reason.as_deref() == Some(HELD) {
@@ -230,12 +286,10 @@ impl Inner {
                 Err(e) => tracing::warn!("resuming task {}: {e}", t.key),
             }
         }
-        drop(sched);
-        for task_id in regate {
-            tokio::spawn(self.clone().gate(task_id));
+        if let Err(e) = self.keep_hold(None) {
+            tracing::warn!("the hold stays in the store, so the next start asks again about the tasks that still wait: {e}");
         }
-        self.kick();
-        Ok(())
+        regate
     }
 
     /// The blocked tasks of an office that wait for your answer to a question that is still

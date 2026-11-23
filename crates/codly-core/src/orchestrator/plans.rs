@@ -1219,6 +1219,9 @@ impl Inner {
             // Their gates run when you say Resume, with everything else that waits. Held
             // from here on, whatever the rest of the recovery finds.
             self.hold_at_launch(in_work, std::mem::take(&mut regate));
+        } else {
+            // A start that asked, and that Codly closed on before your answer: its tasks go on too.
+            regate.extend(self.resume_left_open(&in_work));
         }
         for a in self.store.all_agents()? {
             let busy = !matches!(a.status, AgentStatus::Idle | AgentStatus::Offline | AgentStatus::Done);
