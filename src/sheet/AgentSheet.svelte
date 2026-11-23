@@ -249,8 +249,9 @@
     tick().then(() => root?.querySelector(`[data-section="${f}"]`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
   });
 
-  /** The head with the agent's name has scrolled away: a slim bar keeps saying whose sheet this is. */
+  /** The agent's name in the head has scrolled out of view: a slim bar keeps saying whose sheet this is. */
   let headGone = $state(false);
+  let nameEl: HTMLHeadingElement | undefined = $state();
 
   // ── menu ──
   let moreBtn: HTMLButtonElement | undefined = $state();
@@ -288,13 +289,13 @@
   ]);
 </script>
 
-<div class="as" bind:this={root} style:--hue={idVar(agent.color)} onscroll={() => (headGone = (root?.scrollTop ?? 0) > 72)}>
+<div class="as" bind:this={root} style:--hue={idVar(agent.color)} onscroll={() => (headGone = !!root && !!nameEl && nameEl.getBoundingClientRect().bottom <= root.getBoundingClientRect().top)}>
   <!-- The name again (the head's own stays for screen readers): what you press below acts on this agent. -->
   <div class="pin" class:on={headGone} aria-hidden="true"><div class="pin-bar"><Portrait {agent} size={22} /><b class="truncate">{agent.name}</b></div></div>
   <header class="head">
     {#if n}<Orbit size={64} progress={n.progress} tone={n.tone} stroke={2.5}><Portrait {agent} size={50} /></Orbit>{/if}
     <div class="h-text">
-      <h2 class="serif">{agent.name}</h2>
+      <h2 class="serif" bind:this={nameEl}>{agent.name}</h2>
       <p class="h-sub">{agentTitle(agent) ? `${agentTitle(agent)} · ` : ''}{PROVIDER_LABEL[agent.provider]} ({COMPANY_LABEL[agent.provider]}){#if acctTag}{' · '}<span class="acct" data-tip={account?.identity ? `Runs on the ${acctTag} sign-in · ${account.identity}` : `Runs on the ${acctTag} sign-in`}>{acctTag}</span>{/if}{` · ${model}`}</p>
       <div class="h-tags">
         <BillingBadge billing={agent.billing} plan={account?.plan ?? cli?.plan} />
@@ -536,7 +537,8 @@
   /* No height of its own: the bar lies over the top of what scrolls and takes no room. */
   .pin { position: sticky; top: 0; z-index: 1; height: 0; flex-shrink: 0; }
   .pin-bar { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 56px 0 22px; background: var(--glass-solid); box-shadow: 0 1px 0 var(--line); opacity: 0; pointer-events: none; transition: opacity var(--d-2) var(--ease-out); }
-  .pin.on .pin-bar { opacity: 1; pointer-events: auto; }
+  /* It is there at once (the head's name has just left), and fades only on its way out. */
+  .pin.on .pin-bar { opacity: 1; pointer-events: auto; transition: none; }
   .pin-bar b { font-weight: var(--w-semi); color: var(--ink-1); }
   .head { display: flex; gap: 16px; align-items: center; padding: 24px 22px 10px; background: radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--hue) 14%, transparent), transparent 60%); }
   .h-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 30px; }

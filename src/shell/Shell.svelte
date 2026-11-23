@@ -114,9 +114,7 @@
   .sheet .frame { right: calc(var(--sheet-w) + var(--gutter) * 2); }
   .frame > :global(*) { pointer-events: auto; }
   .tauri .frame :global(.top) { padding-left: 10px; }
-  /* The stage gives way to the toast stack under the top bar: a toast never lies on a room's or a
-     conversation's controls. No transition: it gives way in the frame the toast is first drawn in. */
-  .stage { position: relative; flex: 1; min-height: 0; padding-top: var(--toast-room); padding-bottom: var(--gutter); display: flex; flex-direction: column; pointer-events: none; }
+  .stage { position: relative; flex: 1; min-height: 0; padding-bottom: var(--gutter); display: flex; flex-direction: column; pointer-events: none; }
   .stage > :global(.home), .stage > :global(.room) { pointer-events: auto; }
   .room { flex: 1; min-height: 0; display: flex; flex-direction: column; border-radius: var(--r-xl); overflow: hidden; animation: room-in var(--d-4) var(--spring); background: var(--glass-strong); }
   .mode-work .room { background: var(--glass-solid); }
