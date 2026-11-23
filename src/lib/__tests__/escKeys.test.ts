@@ -7,7 +7,7 @@ import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 
 /** A part of the page; `closing`: it is inside a dialog whose close has started. */
-const part = (closing = false) => ({ closest: (selector: string) => (selector === '[data-closing]' && closing ? {} : null) });
+const part = (closing = false) => ({ closest: (selector: string) => (selector === '[inert]' && closing ? {} : null) });
 
 let onKey: ((e: KeyboardEvent) => void) | null = null;
 let modals: ReturnType<typeof part>[] = [];

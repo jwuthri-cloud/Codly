@@ -33,15 +33,16 @@ class Toasts {
 
   /**
    * Shows a toast, and gives its id. A toast with the kind, the title and the text of one that
-   * shows is not added: that one counts it, takes its action and its time (which starts again)
-   * and keeps its place. A progress toast is never joined: each one tells of its own work.
+   * shows is not added: that one counts it, takes its time (which starts again) and keeps its
+   * place. Never joined: a progress toast (each one tells of its own work), and a toast with an
+   * action, new or showing (its action and its id are its own: an Undo, a pointer to one approval).
    */
   show(t: { kind?: ToastKind; title: string; body?: string; action?: ToastAction; duration?: number }): number {
     const kind = t.kind ?? 'info';
     const duration = t.duration ?? DEFAULT_DURATION[kind];
-    const same = kind === 'progress' ? undefined : this.list.find((x) => x.kind === kind && x.title === t.title && x.body === t.body);
+    const same = kind === 'progress' || t.action ? undefined : this.list.find((x) => !x.action && x.kind === kind && x.title === t.title && x.body === t.body);
     if (same) {
-      this.list = this.list.map((x) => (x.id === same.id ? { ...x, action: t.action, duration, count: x.count + 1 } : x));
+      this.list = this.list.map((x) => (x.id === same.id ? { ...x, duration, count: x.count + 1 } : x));
       this.restart(same.id, duration);
       return same.id;
     }

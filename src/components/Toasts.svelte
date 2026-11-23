@@ -119,20 +119,32 @@
     el.style.overflowY = 'auto';
   }
 
-  /** Puts the stack at its place: how far down it is, and whether it is folded. `keep`: it keeps the place it has while that is free. */
-  function place(el: HTMLDivElement, keep: boolean) {
-    // What an earlier call set is taken off: the stack has its whole height.
+  const stacked = (heights: number[]) => heights.reduce((sum, h) => sum + h, 0) + GAP * (heights.length - 1);
+
+  /** The stack's toasts and its heights as they are now, with the window's fit taken off: the stack has its whole height. */
+  function measure(el: HTMLDivElement) {
     el.style.maxHeight = '';
     el.style.overflowY = '';
-    const top = el.offsetTop;
     // Not a toast that is fading out.
     const here = new Set(toasts.list.map((t) => t.id));
     const items = [...el.querySelectorAll<HTMLElement>('.toast')].filter((t) => here.has(Number(t.dataset.id)));
     const first = items.find((t) => Number(t.dataset.id) === front?.id);
-    const stacked = (heights: number[]) => heights.reduce((sum, h) => sum + h, 0) + GAP * (heights.length - 1);
     /** The line "Dismiss all" under the whole stack. */
     const foot = all ? GAP + MORE : 0;
     const real = stacked(items.map((t) => t.offsetHeight)) + foot;
+    return { top: el.offsetTop, items, first, foot, real };
+  }
+
+  /** The window's fit alone, where the stack is: a look that waits moves nothing, but a stack that
+   *  became higher than the room under it (you unfolded it, or opened a long text) scrolls at once. */
+  function refit(el: HTMLDivElement) {
+    const { top, first, real } = measure(el);
+    fit(el, top + down, hides && first ? first.offsetHeight + GAP + MORE : real);
+  }
+
+  /** Puts the stack at its place: how far down it is, and whether it is folded. `keep`: it keeps the place it has while that is free. */
+  function place(el: HTMLDivElement, keep: boolean) {
+    const { top, items, first, foot, real } = measure(el);
     if (unfolded) {
       // You unfolded it: it stays where it is.
       fit(el, top + down, real);
@@ -207,6 +219,7 @@
     const how = lookFor(change, busy);
     if (how === 'wait') {
       owed = true;
+      refit(el);
       return;
     }
     owed = false;

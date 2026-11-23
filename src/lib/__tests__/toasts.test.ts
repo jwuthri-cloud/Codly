@@ -182,17 +182,37 @@ describe('the same message', () => {
     expect(titles()).toEqual(['Push failed', 'Couldn’t copy']);
   });
 
-  it('starts its time again, and takes the newest action', () => {
-    const run = vi.fn();
+  it('starts its time again', () => {
     toasts.show({ kind: 'success', title: 'Copied' });
     vi.advanceTimersByTime(3000);
-    toasts.show({ kind: 'success', title: 'Copied', action: { label: 'Open', run } });
+    toasts.show({ kind: 'success', title: 'Copied' });
     vi.advanceTimersByTime(3999);
     expect(titles()).toEqual(['Copied']);
-    toasts.list[0].action!.run();
-    expect(run).toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(titles()).toEqual([]);
+  });
+
+  it('a toast with an action is never joined: each keeps its own id and its own action', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const a = toasts.show({ kind: 'info', title: 'Request closed', action: { label: 'Undo', run: first } });
+    const b = toasts.show({ kind: 'info', title: 'Request closed', action: { label: 'Undo', run: second } });
+    expect(b).not.toBe(a);
+    expect(toasts.list.map((t) => t.count)).toEqual([1, 1]);
+    toasts.list[0].action!.run();
+    toasts.list[1].action!.run();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+    // Dismissing one by its id leaves the other.
+    toasts.dismiss(a);
+    expect(toasts.list.map((t) => t.id)).toEqual([b]);
+  });
+
+  it('an equal toast with and without an action are two toasts', () => {
+    toasts.show({ kind: 'success', title: 'Copied' });
+    toasts.show({ kind: 'success', title: 'Copied', action: { label: 'Open', run: () => {} } });
+    toasts.show({ kind: 'success', title: 'Copied' });
+    expect(toasts.list.map((t) => [!!t.action, t.count])).toEqual([[false, 2], [true, 1]]);
   });
 
   it('under the pointer its time stands still, and it gets its whole time when the pointer leaves', () => {

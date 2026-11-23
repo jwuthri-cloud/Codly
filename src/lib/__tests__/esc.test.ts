@@ -79,7 +79,7 @@ describe('Esc and a toast that waits for you', () => {
 
 describe('a dialog that is closing', () => {
   /** An element of the page: `closing` says whether it is inside a dialog whose close has started. */
-  const el = (closing: boolean) => ({ closest: (selector: string) => (selector === '[data-closing]' && closing ? {} : null) });
+  const el = (closing: boolean) => ({ closest: (selector: string) => (selector === '[inert]' && closing ? {} : null) });
 
   it('is not open: an Esc while it fades out goes to what is under it', () => {
     expect(openOne([el(true)])).toBe(false);

@@ -5,8 +5,9 @@
 // once the build targets Safari 17 (before that the top layer hides toasts, tooltips and menus).
 import { on } from 'svelte/events';
 
-/** What a closing dialog carries from the moment its close starts (components/Dialog.svelte). */
-export const CLOSING = '[data-closing]';
+/** What marks a closing dialog from the moment its close starts: Svelte makes an element with an
+ *  `out:` transition inert while it goes, and takes that off again when it comes back mid-way. */
+export const CLOSING = '[inert]';
 
 const TABBABLE = 'a[href], button, input, select, textarea, summary, [tabindex]';
 
