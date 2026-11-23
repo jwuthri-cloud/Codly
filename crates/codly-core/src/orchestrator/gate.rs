@@ -668,6 +668,8 @@ impl Inner {
         // Only a run of this task takes its feedback: after your own pass the agent may be in
         // a chat or on other work by now.
         if self.works_on(worker, &task.id) {
+            // A new round: the worker's background work has the whole wait again (background.rs).
+            self.background_round(worker);
             self.send_prompt(worker, prompt)?;
         } else {
             // The worker exited; the next run of this task resumes its session with the feedback.

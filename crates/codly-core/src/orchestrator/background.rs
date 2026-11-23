@@ -10,12 +10,16 @@
 //! - after `WAIT` at the latest: Codly stops what still runs, says in the task's record what
 //!   it stopped, and checks the work as it is (`background_wait_over`).
 //!
-//! `WAIT` is one budget for a run of the worker, not a time per wait. A turn of the worker
-//! ends the wait of a pass, and the pass at the end of that turn waits again: it gets what is
-//! left of the budget. With nothing left Codly stops the open work at once. So a dev server
-//! that never ends, beside a test run that ends after 4 minutes and wakes the CLI, is stopped
-//! 5 minutes after the first wait began, not 9. A new run of the task (a retry) has a new
-//! budget.
+//! `WAIT` is one budget for a round of the worker, not a time per wait. A round is the work
+//! the worker hands in once: it begins with the task's brief, or when the gate sends the work
+//! back (a failed check, a file outside the scope, a reviewer's request, a merge conflict:
+//! `Inner::background_round`). A turn of the worker inside a round ends the wait of a pass,
+//! and the pass at the end of that turn waits again: it gets what is left of the budget. With
+//! nothing left Codly stops the open work at once. So a dev server that never ends, beside a
+//! test run that ends after 4 minutes and wakes the CLI, is stopped 5 minutes after the first
+//! wait began, not 9. The next round has the whole budget again: a test run that the worker
+//! leaves open after its fix is waited for, as the worker's rules say (`prompts.rs`). A new
+//! run of the task (a retry) has a new budget too.
 //!
 //! What is open comes from the adapters. Claude Code says its whole list at every change
 //! (`EventKind::BackgroundTasks`, the one record of that work: the agent sheet shows the same
@@ -38,7 +42,7 @@ use crate::git::name_list;
 use crate::model::*;
 
 /// How long the gate waits for a worker's background work before Codly stops it: in all the
-/// waits of one run together.
+/// waits of one round together.
 pub(super) const WAIT: Duration = Duration::from_secs(300);
 /// How long Codly waits, once nothing is open any more, for the turn that Claude Code starts
 /// by itself when a background task ends (recorded: its first line follows the task's last
@@ -64,7 +68,7 @@ pub(super) struct Background {
     hold: Option<(u64, Instant)>,
     /// The waits that began in this run.
     holds: u64,
-    /// How long the waits of this run that are over took together: used up of the run's
+    /// How long the waits of this round that are over took together: used up of the round's
     /// budget (`WAIT`).
     waited: Duration,
 }
@@ -94,6 +98,15 @@ impl Background {
     /// A turn of the run started.
     pub(super) fn turn_started(&mut self, now: Instant) {
         self.end_hold(now);
+    }
+
+    /// The gate sends the work back to the worker: a new round begins, with the whole budget.
+    /// A wait that still runs is over (the turn that the gate's message starts would end it),
+    /// and its time is not the new round's. Work that Codly could not stop stays let go: no
+    /// round waits for it again.
+    pub(super) fn round_starts(&mut self, now: Instant) {
+        self.end_hold(now);
+        self.waited = Duration::ZERO;
     }
 
     /// The wait of a pass is over (none: nothing changes). Its time is used up of the budget.
@@ -133,8 +146,8 @@ impl Background {
         self.held()
     }
 
-    /// What is left of the run's `budget` at `now`: the waits that are over and the one that
-    /// runs are used up.
+    /// What is left of the round's `budget` at `now`: the waits that are over and the one
+    /// that runs are used up.
     fn left(&self, now: Instant, budget: Duration) -> Duration {
         let running = self.hold.map_or(Duration::ZERO, |(_, since)| now.saturating_duration_since(since));
         budget.saturating_sub(self.waited + running)
@@ -187,7 +200,7 @@ fn it_or_them(tasks: &[BackgroundTask]) -> &'static str {
 impl Inner {
     /// Before the gate commits a worker's files: does the worker's run still have work open
     /// in the background? True = this pass waits for it. The task says so, and Codly stops
-    /// the work when the wait runs out: after what is left of the run's budget, at once when
+    /// the work when the wait runs out: after what is left of the round's budget, at once when
     /// nothing is left. True also when a turn of the worker started since the pass began: the
     /// pass ends here, and the end of that turn runs the gate.
     pub(super) fn hold_for_background(self: &Arc<Self>, task: &Task, worker: &str, ws: Option<&str>) -> Result<bool> {
@@ -236,6 +249,14 @@ impl Inner {
         Ok(true)
     }
 
+    /// The gate sends the work back to the worker's live run (`gate.rs`, `back_to_worker`): a
+    /// new round begins there, with the whole wait for what the worker leaves running.
+    pub(super) fn background_round(&self, worker: &str) {
+        if let Some(l) = lock(&self.live).get_mut(worker) {
+            l.background.round_starts(Instant::now());
+        }
+    }
+
     /// A run's background work changed (`ingest`). When a pass of the gate waits for it and
     /// nothing is left, the pass goes on: at the end of the turn the CLI starts by itself, or
     /// here, a moment later, when no such turn came (Codly stopped the work, a Codex subagent
@@ -261,7 +282,7 @@ impl Inner {
     }
 
     /// The wait `hold` of a pass of the gate ran out, `wait` after it began (what was left of
-    /// the run's budget: nothing, when the budget was used up before). Still that wait, with
+    /// the round's budget: nothing, when the budget was used up before). Still that wait, with
     /// work still open: Codly asks the CLI to stop each piece, looks at what the CLI then says
     /// is left, writes both in the task's record, and runs the gate on the work as it is. The
     /// wait stands until the gate runs, so the watchdog does not take the worker for idle
@@ -308,9 +329,11 @@ impl Inner {
             return;
         }
         if provider == Provider::Claude {
-            // `stop_task` is recorded on a background command (part 2 §6), not on a subagent.
-            // Its answer is the same whether anything was stopped or not, so nobody waits for
-            // it: the CLI's next list of its background tasks is what Codly reads below.
+            // `stop_task` is recorded on a background command (part 2 §6) and on a background
+            // subagent (part 3 §1): both leave the list. Its answer is the same whether
+            // anything was stopped or not, so nobody waits for it: the CLI's next list of its
+            // background tasks is what Codly reads below. (After the stop of a subagent the
+            // CLI starts a turn by itself: its end runs the gate, as any turn's end does.)
             for t in &asked {
                 if let Err(e) = self.ask_session(&worker, SessionRequest::StopTask(t.id.clone())) {
                     tracing::debug!("background task {} not stopped: {e}", t.id);
@@ -343,19 +366,43 @@ impl Inner {
             due && quiet
         };
         // "after 5 min" for work that one wait waited the whole budget for; else the budget
-        // went on several waits of the run, and this work may have run for less.
+        // went on several waits of the round, and this work may have run for less.
         let whole = gate::span(budget);
         let waited = if wait >= budget { format!("after {whole}") } else { format!("after Codly waited {whole} in all") };
-        self.say_stopped(&task_id, &asked, &kept, &waited, budget, go_on);
+        // What the pass that goes on does first: it asks for a report that is missing before
+        // it checks anything (`gate.rs`).
+        let next = go_on.then(|| match (self.report_comes_first(&task_id, &run_id), kept.is_empty()) {
+            (true, _) => "asks the worker for its report",
+            (false, true) => "checks the work now",
+            (false, false) => "checks the work as it is",
+        });
+        self.say_stopped(&task_id, &asked, &kept, &waited, budget, next);
         if go_on {
             self.pass_goes_on(&worker, &run_id, task_id).await;
         }
     }
 
+    /// Does the pass of the gate that goes on now ask the worker for its report before it
+    /// checks the work? As `gate.rs` decides it: the worker's run gave no report, and was not
+    /// asked for one before.
+    fn report_comes_first(&self, task_id: &str, run_id: &str) -> bool {
+        if lock(&self.nudges).get(run_id).is_some_and(|asked| *asked > 0) {
+            return false;
+        }
+        match self.store.latest_task_run(task_id, Some(Role::Worker)) {
+            Ok(run) => run.and_then(|r| r.report).is_none_or(|report| report.is_null()),
+            Err(e) => {
+                tracing::debug!("could not read the report of {task_id}'s worker: {e}");
+                false
+            }
+        }
+    }
+
     /// The task's record says what Codly stopped of `left` when the wait ran out (`waited`:
-    /// that wait in words, "after 5 min"; `budget`: the run's whole wait), and what it could
-    /// not stop (`kept`).
-    fn say_stopped(&self, task_id: &str, left: &[BackgroundTask], kept: &[BackgroundTask], waited: &str, budget: Duration, go_on: bool) {
+    /// that wait in words, "after 5 min"; `budget`: the round's whole wait), what it could
+    /// not stop (`kept`), and what the pass that goes on does first (`next`; None: no pass
+    /// goes on from here, because a turn of the worker runs and its end runs the gate).
+    fn say_stopped(&self, task_id: &str, left: &[BackgroundTask], kept: &[BackgroundTask], waited: &str, budget: Duration, next: Option<&str>) {
         let task = match self.task(task_id) {
             Ok(task) => task,
             Err(e) => {
@@ -369,10 +416,10 @@ impl Inner {
             (false, false) => format!("Codly stopped {}. It could not stop {}", names(stopped.iter().copied()), names(kept)),
             (true, _) => format!("Codly could not stop {}", it_or_them(left)),
         };
-        let next = match (go_on, kept.is_empty()) {
-            (false, _) => "",
-            (true, true) => " and checks the work now",
-            (true, false) => ", and checks the work as it is",
+        let next = match (next, kept.is_empty()) {
+            (None, _) => String::new(),
+            (Some(does), true) => format!(" and {does}"),
+            (Some(does), false) => format!(", and {does}"),
         };
         let summary = format!("{}: {} still ran {waited}. {acted}{next}", task.key, names(left));
         let ws = self.store.task_workspace(task_id).ok().flatten();
@@ -383,7 +430,7 @@ impl Inner {
     }
 
     /// The wait of a pass of the gate is over, and the pass goes on. The wait stood until
-    /// here (the watchdog); the pass that starts waits anew, for what is left of the run's
+    /// here (the watchdog); the pass that starts waits anew, for what is left of the round's
     /// budget, for work that the run got meanwhile.
     async fn pass_goes_on(self: Arc<Self>, worker: &str, run_id: &str, task_id: Id) {
         if let Some(l) = lock(&self.live).get_mut(worker).filter(|l| l.run_id == run_id) {
@@ -394,7 +441,7 @@ impl Inner {
 }
 
 impl super::Core {
-    /// How long the gate waits for a worker's background work, in all the waits of one run,
+    /// How long the gate waits for a worker's background work, in all the waits of one round,
     /// before Codly stops it (`WAIT` until set; the tests shorten it).
     pub fn set_background_wait(&self, wait: Duration) {
         *write(&self.inner.background_wait) = wait;
@@ -430,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn the_waits_of_one_run_share_one_budget() {
+    fn the_waits_of_one_round_share_one_budget() {
         let (budget, min) = (Duration::from_secs(300), Duration::from_secs(60));
         let t0 = Instant::now();
         let mut b = Background::default();
@@ -457,11 +504,45 @@ mod tests {
         // A wait that is over twice counts once.
         b.end_hold(t0 + 9 * min);
         assert_eq!(b.waited, 6 * min);
-        // A new run of the task has its own `Background`: a new budget.
+        // A new run of the task has its own `Background`: a new budget. (So has a new round
+        // of the same run: the next test.)
         assert_eq!(Background::default().left(t0 + 9 * min, budget), budget);
         // The task's record says a wait in whole seconds, rounded up.
         assert_eq!(whole_secs(Duration::from_millis(1200)), Duration::from_secs(2));
         assert_eq!(whole_secs(Duration::from_secs(60)), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_round_that_the_gate_starts_has_the_whole_budget_again() {
+        let (budget, min) = (Duration::from_secs(300), Duration::from_secs(60));
+        let t0 = Instant::now();
+        let (server, tests) = (task("tid-1", "command", "npm run dev"), task("tid-2", "command", "npm test"));
+        let mut b = Background::default();
+        // Round 1: a dev server took the whole budget, and Codly could not stop it.
+        b.listed(std::slice::from_ref(&server));
+        let first = b.begin_hold(t0).unwrap();
+        b.end_hold(t0 + 5 * min);
+        b.let_go.insert(server.id.clone());
+        assert_eq!(b.left(t0 + 5 * min, budget), Duration::ZERO);
+        // A check failed, and the gate sends the work back: the round that starts has the
+        // whole budget for the test run that the worker leaves open after its fix.
+        b.round_starts(t0 + 6 * min);
+        assert_eq!(b.left(t0 + 6 * min, budget), budget);
+        b.listed(&[server, tests.clone()]);
+        assert_eq!(b.waited_for(), [tests], "the server that could not be stopped is not waited for again");
+        let second = b.begin_hold(t0 + 7 * min).unwrap();
+        assert!(second > first, "the waits of a run keep their numbers");
+        // Inside the round a second turn gets only what is left: 5 minutes less the 2 of the
+        // first wait.
+        b.turn_started(t0 + 9 * min);
+        b.begin_hold(t0 + 10 * min).unwrap();
+        assert_eq!(b.left(t0 + 10 * min, budget), 3 * min);
+        assert_eq!(b.left(t0 + 11 * min, budget), 2 * min);
+        // A wait that still runs when a round starts is over, and its time is not the new
+        // round's.
+        b.round_starts(t0 + 12 * min);
+        assert!(!b.holds_gate());
+        assert_eq!(b.left(t0 + 20 * min, budget), budget);
     }
 
     #[test]
