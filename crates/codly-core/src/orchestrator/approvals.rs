@@ -17,21 +17,27 @@
 //! 4. then the mode: strict asks for everything else; read-only agents (a 1:1 Claude agent
 //!    that plans first is one until you accept its plan) get only reads in every other mode;
 //!    balanced allows read-only actions, the task's own verify commands and test runners;
-//!    autonomous allows anything with no detected risk; full allows everything.
+//!    autonomous allows anything with no detected risk, except a tool of an MCP server that
+//!    Codly did not set up (`foreign_mcp_tool`): what such a tool does is not in its name;
+//!    full allows everything.
 //!
 //! Only `allow_once` is ever chosen automatically, never a session or permanent grant.
 //!
 //! 5. What the rules above would ask you about, a rule you saved for the repo ("always allow
-//!    in this repo", `rule_offer`) may answer instead: the exact command, or one plain command
-//!    that starts with the saved words (`cargo test`). A saved rule covers a package download
+//!    in this repo", `rule_offer`) may answer instead: the exact command, or a command that
+//!    starts with the saved words (`cargo test`), alone on its line or with commands that only
+//!    read (`cd web && cargo test 2>&1 | tail -5`). A saved rule covers a package download
 //!    into the project and a git command that changes the repository; the exact command also
 //!    covers other network use. Every other risk still asks, and so do strict mode, read-only
-//!    agents and a command that changes your own account or settings (`cargo login`).
+//!    agents and a command that changes your own account or settings (`cargo login`). A tool
+//!    of an MCP server can be saved by its name, when the request shows no risk.
 //!
 //! What the rules cannot see: they read the command line, not what a program does. A script,
-//! an interpreter (`python x.py`, `node -e …`), `make` or a test the agent wrote can do anything
-//! the agent's user account can, so no mode proves that an allowed command stays inside the
-//! worktree; only an OS sandbox does (Codex has one).
+//! an interpreter (`python x.py`), `make` or a test the agent wrote can do anything the
+//! agent's user account can, so no mode proves that an allowed command stays inside the
+//! worktree. Only an OS sandbox does: Codex runs its commands in one, and Claude Code does
+//! when "Sandbox Claude's shell" is on in Settings (its sandboxed commands then send no
+//! request, so these rules never see them). The other CLIs have none.
 //!
 //! The shell checks err toward asking: a "read-only command" is a bare program name (no path,
 //! no `VAR=x` prefix, no wrapper, no `$` expansion) whose arguments use none of its options
@@ -42,7 +48,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 
 use crate::adapters::claude::EXIT_PLAN_MODE;
-use crate::adapters::classify::{self, ShellRun, first_non_flag, git_read_only, git_sub, has, long_flag, options, read_only, short_flag};
+use crate::adapters::classify::{self, ShellRun, first_non_flag, git_read_only, git_sub, has, long_flag, operands, options, read_only, short_flag};
+use crate::housekeeping::connections;
 use crate::mcp::tools;
 use crate::model::*;
 
@@ -113,7 +120,7 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
     match ctx.mode {
         ApprovalMode::Strict => ask("strict mode: you approve every action".into()),
         _ if ctx.read_only => match &a.subject {
-            ApprovalSubject::Command { command, .. } if classify_command(command, &[]) == Some("read-only command") => {
+            ApprovalSubject::Command { command, .. } if classify_command(command, &[]) == Some(READ_ONLY) => {
                 allow(format!("read-only command `{}`", short(command)))
             }
             ApprovalSubject::Tool { name, input } if is_read_only_tool(name, input) => allow(format!("read-only tool {name}")),
@@ -133,9 +140,12 @@ pub fn evaluate(a: &Approval, ctx: &PolicyCtx) -> Verdict {
             _ => ask("balanced mode asks before file changes the CLI did not auto-accept".into()),
         },
         // Not "stays inside the worktree": what a script or program does is not checked.
-        ApprovalMode::Autonomous => match ctx.worktree {
-            Some(_) => allow("autonomous: no risk detected".into()),
-            None => ask("autonomous mode needs a worktree to check paths against".into()),
+        ApprovalMode::Autonomous => match (&a.subject, ctx.worktree) {
+            (ApprovalSubject::Tool { name, .. }, _) if foreign_mcp_tool(name) => {
+                ask(format!("tool {name} is from an MCP server that Codly did not set up"))
+            }
+            (_, Some(_)) => allow("autonomous: no risk detected".into()),
+            (_, None) => ask("autonomous mode needs a worktree to check paths against".into()),
         },
         ApprovalMode::Full if risks.is_empty() => allow("full access".into()),
         ApprovalMode::Full => allow(format!("full access, despite risk: {}", risks.join(", "))),
@@ -154,25 +164,36 @@ pub fn with_trust(mode: ApprovalMode, trusted: bool) -> ApprovalMode {
 /// always asks about. A saved rule allows exactly the requests that offer it, so the card that
 /// shows the choice and the broker that follows the rule can never disagree.
 ///
-/// - Only commands, from an agent that may write, outside strict mode, with a worktree to
-///   check paths against and a one-time allow to answer with.
-/// - Every risk of the request must be one a rule may cover: `PACKAGE_INSTALL`,
+/// - Only commands and the tools of MCP servers, from an agent that may write, outside strict
+///   mode, with a worktree to check paths against and a one-time allow to answer with.
+/// - A tool of an MCP server is saved by its full name (`mcp__linear__create_issue`), as an
+///   exact rule, and only when the request shows no risk at all. Codly's own tools never ask.
+/// - Every risk of a command must be one a rule may cover: `PACKAGE_INSTALL`,
 ///   `NPX_DOWNLOAD`, `GIT_WRITE`, and for the exact command any other "network". A delete, a
 ///   push, sudo, a pipe into a shell, a secret, a path outside the worktree (an install for
 ///   the whole machine too), a change to an agent's settings and what cannot be checked are
 ///   never covered.
 /// - A command that changes your own account or settings (`OWN_ACCOUNT`) is never saved, and
 ///   neither is one that can lose work in your own project folder (`checkout_loss`).
-/// - The prefix is for one plain command only (`rule_prefix`): a longer line that chains or
-///   substitutes anything offers at most itself, as the exact command.
+/// - The prefix is for one command (`rule_prefix`), alone on its line or with commands that
+///   only read: a line that runs two commands that do more, or substitutes anything, offers
+///   at most itself, as the exact command.
 pub fn rule_offer(a: &Approval, ctx: &PolicyCtx) -> ApprovalRuleOffer {
     let none = ApprovalRuleOffer::default();
-    let ApprovalSubject::Command { command, .. } = &a.subject else { return none };
     let one_time = a.choices.is_empty() || a.choices.contains(&ApprovalChoice::AllowOnce);
-    if ctx.mode == ApprovalMode::Strict || ctx.read_only || ctx.worktree.is_none() || !one_time || command.trim().is_empty() {
+    if ctx.mode == ApprovalMode::Strict || ctx.read_only || ctx.worktree.is_none() || !one_time {
         return none;
     }
     let detected = detect_risks(&a.subject, ctx.worktree);
+    let no_risk = a.risks.is_empty() && detected.is_empty();
+    let command = match &a.subject {
+        // A command line that reads like a tool's name would be allowed by that tool's rule.
+        ApprovalSubject::Command { command, .. } if !command.trim().is_empty() && mcp_server(command.trim()).is_none() => command,
+        ApprovalSubject::Tool { name, .. } if no_risk && mcp_server(name).is_some() && !is_codly_tool(name) => {
+            return ApprovalRuleOffer { exact: Some(name.clone()), prefix: None };
+        }
+        _ => return none,
+    };
     // A provider says "network" for every download; Codly's own label says which kind it is.
     let download = detected.iter().any(|r| r == PACKAGE_INSTALL || r == NPX_DOWNLOAD) && !detected.iter().any(|r| r == "network");
     let by_prefix = |r: &String| [PACKAGE_INSTALL, NPX_DOWNLOAD, GIT_WRITE].contains(&r.as_str()) || (r == "network" && download);
@@ -246,18 +267,23 @@ fn names_what_runs(words: &[&str]) -> bool {
 }
 
 /// The prefix a command can be saved under: `cargo test` for `cargo test -p core`,
-/// `npm run build` for `npm run build -- --watch`. Only for one plain command: no chain,
-/// pipe, substitution or redirect to a file, no `$` expansion, no `VAR=x`, wrapper or path in
-/// front of the program. The words of the prefix are plain names, so no option and no path
-/// is ever part of a rule. A command the prefix must not cover gives no prefix here, so it
-/// offers no rule that an earlier, plainer command saved (`git checkout -B main`,
+/// `npm run build` for `npm run build -- --watch`. The line holds that one command and,
+/// beside it, only commands that read (`cd web && pnpm install`,
+/// `pnpm install 2>&1 | tail -5`): a read-only command carries none of the risks a rule
+/// covers, so every covered risk on the line is that one command's. No second command that
+/// does more, no substitution or redirect to a file, no `$` expansion, no `VAR=x`, wrapper
+/// or path in front of the program. The words of the prefix are plain names, so no option
+/// and no path is ever part of a rule. A command the prefix must not cover gives no prefix
+/// here, so it offers no rule that an earlier, plainer command saved (`git checkout -B main`,
 /// `make docs deploy`).
-/// ponytail: a line that only pipes the command into a filter (`pnpm install 2>&1 | tail -5`)
-/// offers the exact line alone; give it the prefix once risks are known per simple command.
 fn rule_prefix(cmd: &str) -> Option<String> {
     let p = parse(cmd);
-    let [seg] = p.segments.as_slice() else { return None };
-    if p.complex || p.writes.iter().any(|w| w.var || w.text != "/dev/null") || seg.iter().any(|w| w.var) {
+    if p.complex || p.writes.iter().any(|w| w.var || w.text != "/dev/null") {
+        return None;
+    }
+    let mut others = p.segments.iter().filter(|seg| plain_command(seg) != Some(READ_ONLY));
+    let (Some(seg), None) = (others.next(), others.next()) else { return None };
+    if seg.iter().any(|w| w.var) {
         return None;
     }
     let name = |w: &&Word| {
@@ -284,6 +310,20 @@ fn rule_prefix(cmd: &str) -> Option<String> {
 fn short(s: &str) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if one.chars().count() > 60 { format!("{}…", one.chars().take(59).collect::<String>()) } else { one }
+}
+
+/// The MCP server of a tool, by the name Claude Code gives its tools: `mcp__<server>__<tool>`
+/// (recorded in docs/research/fixtures/claude-2.1.311/r4-project-mcp-project.ndjson). An ACP
+/// agent names a tool request by a free-text title, so no server can be read from it.
+fn mcp_server(name: &str) -> Option<&str> {
+    name.strip_prefix("mcp__")?.split_once("__").map(|(server, _)| server).filter(|server| !server.is_empty())
+}
+
+/// Is the tool from an MCP server that Codly did not set up: not Codly's own server, and not
+/// one of Settings → Connections (`connections::CATALOG`)? Such a server comes from your own
+/// CLI setup or from the repo (`.mcp.json`), and nothing here says what its tools do.
+fn foreign_mcp_tool(name: &str) -> bool {
+    mcp_server(name).is_some_and(|server| server != "codly" && !connections::CATALOG.iter().any(|entry| entry.id == server))
 }
 
 /// Codly's own MCP tools, as each CLI names them (`mcp__codly__codly_board` for Claude,
@@ -560,7 +600,7 @@ struct Word {
 #[derive(Debug, Default)]
 struct Parsed {
     segments: Vec<Vec<Word>>,
-    /// Files written through `>` / `>>` / `&>`.
+    /// Files written through `>` / `>>` / `&>` / `>&`.
     writes: Vec<Word>,
     /// Command or process substitution, here-docs, zsh glob qualifiers and `=(…)`: what runs
     /// cannot be checked.
@@ -682,15 +722,19 @@ fn parse(cmd: &str) -> Parsed {
                 if it.peek() == Some(&'>') {
                     it.next();
                 }
-                match it.peek() {
-                    Some('&') => {
+                let both = it.next_if_eq(&'&').is_some();
+                // `2>&1`, `>&-`: a copy of a descriptor takes no file.
+                let copies = both && classify::fd_copy(&mut it).is_some();
+                if !both && it.peek() == Some(&'(') {
+                    lx.p.complex = true;
+                } else if !copies {
+                    // A file follows: after `>` and `>>`, and after `>&` too (`cmd >&out.log`
+                    // sends stdout and stderr there). `>|file` and zsh's `>!file` write it
+                    // even where `noclobber` is set.
+                    if matches!(it.peek(), Some('|' | '!')) {
                         it.next();
-                        while it.peek().is_some_and(|c| c.is_ascii_digit() || *c == '-') {
-                            it.next();
-                        }
                     }
-                    Some('(') => lx.p.complex = true,
-                    _ => lx.redirect = true,
+                    lx.redirect = true;
                 }
             }
             '<' => {
@@ -703,6 +747,9 @@ fn parse(cmd: &str) -> Parsed {
                 lx.flush();
                 it.next();
                 if it.peek() == Some(&'>') {
+                    it.next();
+                }
+                if matches!(it.peek(), Some('|' | '!')) {
                     it.next();
                 }
                 lx.redirect = true;
@@ -782,8 +829,47 @@ fn git_dirs(args: &[String], start: &Path) -> Vec<PathBuf> {
     out
 }
 
-const NETWORK: &[&str] =
-    &["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "http", "https", "aria2c", "gh"];
+/// Programs that talk to another machine: transfers, remote shells, name lookups (a host name
+/// can carry data out), and the command lines of hosting and cloud accounts.
+const NETWORK: &[&str] = &[
+    "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "socat", "telnet", "ftp", "http", "https", "xh", "aria2c", "gh", "dig",
+    "nslookup", "host", "whois", "ping", "ping6", "traceroute", "aws", "gcloud", "gsutil", "az", "kubectl", "helm", "terraform", "heroku", "vercel",
+    "netlify", "flyctl", "wrangler", "firebase",
+];
+
+/// Subcommands that publish under your name, or change your account at a registry
+/// (`npm publish`, `cargo yank`, `npm owner add`, `gem push`, `cargo login`).
+const PUBLISHES: &[(&[&str], &[&str])] = &[
+    (
+        &["npm", "pnpm", "yarn", "bun"],
+        &["publish", "unpublish", "deprecate", "owner", "access", "dist-tag", "token", "login", "logout", "adduser", "team", "org", "profile"],
+    ),
+    (&["cargo"], &["publish", "yank", "owner", "login", "logout"]),
+    (&["poetry", "uv", "deno", "pdm", "hatch", "flit"], &["publish"]),
+    (&["gem"], &["push", "yank", "owner", "signin", "signout"]),
+    (&["twine"], &["upload"]),
+];
+
+/// Does a package manager's command publish, or change your account (`PUBLISHES`)? Maven and
+/// Gradle run every goal on the line: `mvn clean deploy`, `gradle build publish`.
+fn publishes(prog: &str, args: &[String]) -> bool {
+    let mut words = args.iter().map(String::as_str).filter(|a| !a.starts_with('-'));
+    match prog {
+        "mvn" | "mvnw" => words.any(|goal| goal == "deploy" || goal.starts_with("release:")),
+        "gradle" | "gradlew" => words.any(|task| task.rsplit(':').next().is_some_and(|name| name.starts_with("publish"))),
+        _ => {
+            let sub = words.next().unwrap_or("");
+            // `yarn npm publish` (yarn 2 and later)
+            let sub = if prog == "yarn" && sub == "npm" { words.next().unwrap_or("") } else { sub };
+            PUBLISHES.iter().any(|(progs, subs)| progs.contains(&prog) && subs.contains(&sub))
+        }
+    }
+}
+
+/// Programs that start another program in the project's environment (`uv run python -c …`,
+/// `pnpm exec node -e …`, `bundle exec ruby -e …`): an interpreter they start is read too.
+const STARTERS: &[&str] = &["uv", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "mise", "bundle", "npm", "pnpm", "yarn", "bun", "npx", "bunx"];
+
 /// The risk labels a saved rule can cover (`rule_offer`): a package manager's download, an
 /// npx download, a git command that changes the repository.
 const PACKAGE_INSTALL: &str = "network (package install)";
@@ -924,6 +1010,15 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
         {
             runs.push((basename(x).to_string(), args[i + 2..].to_vec()));
         }
+        if STARTERS.contains(&prog.as_str())
+            && let Some(i) = args.iter().position(|a| classify::is_interpreter(basename(a)))
+        {
+            runs.push((basename(&args[i]).to_string(), args[i + 1..].to_vec()));
+        }
+        // `python -m pip install x` runs pip.
+        let modules: Vec<(String, Vec<String>)> =
+            runs.iter().filter_map(|(prog, args)| classify::python_module(prog, args)).map(|(module, rest)| (module.to_string(), rest.to_vec())).collect();
+        runs.extend(modules);
         // Does `npx <args>` run a tool the project has installed, seen from where it runs?
         let npx_local = |args: &[String]| dir.as_deref().is_some_and(|d| classify::npx_runs_local(args, d, root));
         for (prog, args) in runs {
@@ -934,14 +1029,34 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
             if installs_outside(&prog, a) {
                 add("outside worktree");
             }
+            if classify::inline_code(&prog, a) {
+                add("runs dynamic code");
+            }
+            if publishes(&prog, a) {
+                add("publish");
+            }
             match prog.as_str() {
                 "sudo" | "doas" | "su" => add("sudo"),
                 p if DELETES.contains(&p) => add("deletes files"),
                 "find" if has(a, &["-delete"]) => add("deletes files"),
                 p if NETWORK.contains(&p) => add("network"),
+                "openssl" if first_non_flag(a).is_some_and(|sub| ["s_client", "s_server", "s_time", "ocsp"].contains(&sub)) => add("network"),
+                // `python -m http.server` serves the folder to the network.
+                "http.server" => add("network"),
                 "chmod" | "chown" | "chgrp" if has(a, &["-R", "--recursive"]) => add("changes permissions recursively"),
                 "dd" | "mkfs" | "diskutil" | "fdisk" => add("disk"),
                 "kill" | "pkill" | "killall" | "launchctl" | "systemctl" | "shutdown" | "reboot" => add("system"),
+                // Jobs that run later, the settings of macOS and its apps, scripts that drive them.
+                "crontab" | "at" | "batch" | "defaults" | "osascript" => add("system"),
+                // Hands a file or an address to another app: a browser, Terminal for a `.command` file.
+                "open" | "xdg-open" => {
+                    add("system");
+                    if a.iter().any(|x| x.contains("://")) {
+                        add("network");
+                    }
+                }
+                // The clipboard, the screen and the keychain can hold a password.
+                "pbpaste" | "screencapture" | "security" => add(classify::SECRETS),
                 "docker" | "podman" => add("containers"),
                 "eval" | "source" | "." => add("runs dynamic code"),
                 p if classify::SHELLS.contains(&p) => match classify::shell_run(a) {
@@ -972,7 +1087,6 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                     }
                 }
                 "npm" | "pnpm" | "yarn" | "bun" => match first_non_flag(a).unwrap_or("") {
-                    "publish" => add("publish"),
                     "install" | "i" | "add" | "ci" | "update" | "upgrade" | "up" | "remove" | "rm" | "uninstall" | "dlx" | "x"
                     | "create" => add(PACKAGE_INSTALL),
                     "exec" if package_flag(a) => add(PACKAGE_INSTALL),
@@ -996,11 +1110,7 @@ fn command_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: 
                 }
                 // uvx runs a package from PyPI; tox and nox install what their config lists.
                 "uvx" | "tox" | "nox" => add(PACKAGE_INSTALL),
-                "cargo" => match first_non_flag(a).unwrap_or("") {
-                    "publish" => add("publish"),
-                    "install" | "add" | "remove" | "update" | "login" => add(PACKAGE_INSTALL),
-                    _ => {}
-                },
+                "cargo" if first_non_flag(a).is_some_and(|x| ["install", "add", "remove", "update"].contains(&x)) => add(PACKAGE_INSTALL),
                 "go" if first_non_flag(a).is_some_and(|x| ["get", "install"].contains(&x)) => add(PACKAGE_INSTALL),
                 _ => {}
             }
@@ -1016,6 +1126,7 @@ const REWRITES_HISTORY: &str = "rewrites git history";
 const DISCARDS_WORK: &str = "discards uncommitted work";
 const FORCE_PUSH: &str = "force push";
 const DELETES_FOLDERS: &str = "deletes folders";
+const DELETES_FILES: &str = "deletes files";
 
 /// Folders a build or a package manager fills again: deleting one loses no work.
 const BUILD_DIRS: &[&str] = &[
@@ -1034,9 +1145,10 @@ fn checkout_loss(subject: &ApprovalSubject, ctx: &PolicyCtx) -> Option<&'static 
 
 /// Does the line run a command that can lose work for good in `checkout`, your project
 /// folder: git history rewritten, work that is not committed dropped, a force push, a
-/// recursive delete outside the build folders? Behind a wrapper or `sh -c` too. `start` is
-/// where the line runs; `cd`, `git -C` and the paths on the line say where each command acts.
-/// A folder the line does not name (`cd $DIR`, no `start`) may be yours, and counts as yours.
+/// recursive delete outside the build folders, a file of yours deleted from another folder?
+/// Behind a wrapper or `sh -c` too. `start` is where the line runs; `cd`, `git -C` and the
+/// paths on the line say where each command acts. A folder the line does not name
+/// (`cd $DIR`, no `start`) may be yours, and counts as yours.
 /// Like every rule here it reads the command line: what a script does is not looked into.
 fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, depth: u8) -> Option<&'static str> {
     // Where the next simple command runs: `cd` moves it.
@@ -1057,9 +1169,22 @@ fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, depth: u8) -> Op
                 ShellRun::Command(inner) if depth < 3 => loses_work(inner, here, checkout, depth + 1),
                 _ => None,
             },
-            "git" => git_loss(&args).filter(|_| git_acts_in(&seg[..at], rest, here, checkout)),
-            "rm" if short_flag(&args, "rR") || long_flag(&args, &["recursive"]) => {
-                deletes_work(rest.iter().filter(|w| !w.text.starts_with('-')), here, checkout)
+            "git" => {
+                let (folder, mut places) = git_places(&seg[..at], rest, here);
+                let loss = git_loss(&args, folder.as_deref());
+                places.push(folder);
+                loss.filter(|_| places.iter().any(|place| yours(place.as_deref(), checkout)))
+            }
+            "rm" => {
+                let mut targets = rest.iter().filter(|w| !w.text.starts_with('-'));
+                if short_flag(&args, "rR") || long_flag(&args, &["recursive"]) {
+                    deletes_work(targets, here, checkout)
+                } else {
+                    // One file by its name is everyday work for an agent that works in your
+                    // folder. From another folder it is not, and a file of yours that is not
+                    // committed is gone for good.
+                    (!yours(here, checkout) && targets.any(|w| deletes_yours(w, here, checkout))).then_some(DELETES_FILES)
+                }
             }
             // `find` deletes what it finds below the folders it starts from (its words before
             // the first test), by itself or through `rm`.
@@ -1099,10 +1224,11 @@ fn yours(dir: Option<&Path>, checkout: &Path) -> bool {
     dir.is_none_or(|d| below(d, checkout).is_some())
 }
 
-/// Does a git command act on `checkout`: it runs there, or `-C`, `--git-dir`, `--work-tree`
-/// (`opts`: its words, of which those before the subcommand are read) or `GIT_DIR`,
-/// `GIT_WORK_TREE` (`env`: the words before `git`) point into it?
-fn git_acts_in(env: &[Word], opts: &[Word], dir: Option<&Path>, checkout: &Path) -> bool {
+/// Where a git command acts, on a line that runs in `dir`: the folder it runs in, moved by
+/// each `-C`, and the places that `--git-dir`, `--work-tree` (`opts`: its words, of which
+/// those before the subcommand are read) and `GIT_DIR`, `GIT_WORK_TREE` (`env`: the words
+/// before `git`) point at. None = the line does not say.
+fn git_places(env: &[Word], opts: &[Word], dir: Option<&Path>) -> (Option<PathBuf>, Vec<Option<PathBuf>>) {
     let mut cur = dir.map(Path::to_path_buf);
     // The value glued to an option or a variable, as a word of its own.
     let glued = |w: &Word, keys: [&str; 2]| keys.iter().find_map(|k| w.text.strip_prefix(k)).map(|v| Word { text: v.to_string(), ..w.clone() });
@@ -1117,8 +1243,7 @@ fn git_acts_in(env: &[Word], opts: &[Word], dir: Option<&Path>, checkout: &Path)
         }
         i += if matches!(w.text.as_str(), "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace") { 2 } else { 1 };
     }
-    places.push(cur);
-    places.iter().any(|place| yours(place.as_deref(), checkout))
+    (cur, places)
 }
 
 /// `find … -exec rm …` (or `-execdir`, `-ok`, `-okdir`).
@@ -1143,43 +1268,80 @@ fn deletes_work<'a>(targets: impl Iterator<Item = &'a Word>, dir: Option<&Path>,
 ///   the line does not say (`$DIR`, `*`) is deleted where the line runs, not in your folder.
 fn deletes_yours(w: &Word, dir: Option<&Path>, checkout: &Path) -> bool {
     if yours(dir, checkout) {
-        return !in_build_dir(w);
+        return !in_build_dir(w, dir);
     }
     let Some(all) = classify::braces(&w.text) else { return false };
     let mut named = all.into_iter().filter_map(|text| written_path(&Word { glob: text.starts_with(['*', '?', '[']), var: w.var, text }, dir));
     named.any(|path| match below(&path, checkout) {
-        Some(inside) => !inside.components().any(|part| part.as_os_str().to_str().is_some_and(|name| BUILD_DIRS.contains(&name))),
+        Some(inside) => {
+            !inside.components().any(|part| part.as_os_str().to_str().is_some_and(|name| BUILD_DIRS.contains(&name))) || through_link(checkout, &inside)
+        }
         None => below(checkout, &path).is_some(),
     })
 }
 
-/// Is every path the word can stand for a build folder below where the command runs, or
-/// inside one: a relative path with no `..`, one of whose folders is in `BUILD_DIRS`
+/// Is every path the word can stand for a build folder below where the command runs (`dir`),
+/// or inside one: a relative path with no `..`, one of whose folders is in `BUILD_DIRS`
 /// (`node_modules`, `./web/dist/assets`)? A `$` expansion, a leading wildcard, `~` and an
-/// absolute path are not.
-fn in_build_dir(w: &Word) -> bool {
-    let inside = |p: &String| !p.starts_with(['/', '~']) && p.split('/').all(|part| part != "..") && p.split('/').any(|part| BUILD_DIRS.contains(&part));
+/// absolute path are not, and neither is a path that goes through a link (`through_link`).
+fn in_build_dir(w: &Word, dir: Option<&Path>) -> bool {
+    let inside = |p: &String| {
+        !p.starts_with(['/', '~'])
+            && p.split('/').all(|part| part != "..")
+            && p.split('/').any(|part| BUILD_DIRS.contains(&part))
+            && !dir.is_some_and(|d| through_link(d, Path::new(p)))
+    };
     !w.var && !w.glob && classify::braces(&w.text).is_some_and(|all| all.iter().all(inside))
+}
+
+/// Is one of the folders or files that `path` names below `base` a symbolic link? Behind a
+/// link named `dist` there can be any folder, and `rm -rf dist/` empties that one.
+fn through_link(base: &Path, path: &Path) -> bool {
+    let mut at = base.to_path_buf();
+    path.components().any(|part| {
+        at.push(part);
+        at.symlink_metadata().is_ok_and(|found| found.file_type().is_symlink())
+    })
 }
 
 /// The git commands that can lose work: commits that leave the branch (history rewritten),
 /// changes that are not committed, the stash, and a push that replaces or deletes what the
-/// remote has.
-fn git_loss(args: &[String]) -> Option<&'static str> {
+/// remote has. `folder` is where git runs (None = the line does not say): a word of
+/// `git reset` or `git checkout` names a file when there is one, a commit or a branch if not.
+fn git_loss(args: &[String], folder: Option<&Path>) -> Option<&'static str> {
     let (sub, rest) = git_sub(args);
     let first = first_non_flag(rest).unwrap_or("");
+    let words = || rest.iter().map(String::as_str).filter(|a| !a.starts_with('-'));
+    // Some(false): no file or folder of that name is there. None: the folder is not known.
+    let is_file = |word: &str| folder.map(|f| f.join(word).symlink_metadata().is_ok());
+    // What `git reset` moves the branch to: its first word, when no `--` comes before it.
+    let reset_to = rest.iter().map(String::as_str).take_while(|a| *a != "--").find(|a| !a.starts_with('-'));
     match sub? {
         "rebase" | "filter-branch" | "filter-repo" | "update-ref" | "prune" => Some(REWRITES_HISTORY),
+        // `git pull --rebase` replays your commits on what it fetched, as `git rebase` does.
+        "pull" if short_flag(rest, "r") || long_flag(rest, &["rebase"]) => Some(REWRITES_HISTORY),
         "commit" if long_flag(rest, &["amend"]) => Some(REWRITES_HISTORY),
         // -D deletes a branch that is not merged; -M, -C and -f replace one that exists.
         "branch" if short_flag(rest, "DMCf") || long_flag(rest, &["force"]) => Some(REWRITES_HISTORY),
         "reflog" if ["expire", "delete", "drop"].contains(&first) => Some(REWRITES_HISTORY),
         "gc" if long_flag(rest, &["prune"]) => Some(REWRITES_HISTORY),
         "reset" if long_flag(rest, &["hard", "merge"]) => Some(DISCARDS_WORK),
+        // `git reset HEAD~1` takes commits off the branch, with `--soft` too. `git reset`,
+        // `git reset HEAD` and `git reset <file>` only change the index.
+        "reset" if reset_to.is_some_and(|to| !matches!(to, "HEAD" | "@") && is_file(to) != Some(true)) => Some(REWRITES_HISTORY),
         // `git clean -n` only lists.
         "clean" if !(short_flag(rest, "n") || long_flag(rest, &["dry-run"])) => Some(DISCARDS_WORK),
         // -B moves a branch that exists; -f and `--` / `.` overwrite changed files.
         "checkout" if short_flag(rest, "fB") || long_flag(rest, &["force"]) || rest.iter().any(|x| x == "--" || x == ".") => Some(DISCARDS_WORK),
+        // So does a file named without `--` (`git checkout src/a.ts`, `git checkout HEAD~1 '*.ts'`).
+        // With `-b` or `--orphan` the words are a new branch and where it starts.
+        "checkout"
+            if !short_flag(rest, "b")
+                && !long_flag(rest, &["orphan"])
+                && words().any(|word| word.contains(['*', '?']) || word.starts_with(':') || is_file(word) != Some(false)) =>
+        {
+            Some(DISCARDS_WORK)
+        }
         "switch" if short_flag(rest, "fC") || long_flag(rest, &["force", "force-create", "discard-changes"]) => Some(DISCARDS_WORK),
         // `git restore --staged x` only takes x out of the index.
         "restore" if !(short_flag(rest, "S") || long_flag(rest, &["staged"])) || short_flag(rest, "W") || long_flag(rest, &["worktree"]) => {
@@ -1242,6 +1404,10 @@ const GLOB_SAFE: &[&str] = &[
     "sha256sum", "shasum", "echo",
 ];
 
+/// What balanced mode allows by itself, as the rule on the decision names it.
+const READ_ONLY: &str = "read-only command";
+const TEST_RUNNER: &str = "test runner";
+
 /// Why a command is safe to auto-allow in balanced mode, if it is.
 pub fn classify_command(cmd: &str, verify: &[String]) -> Option<&'static str> {
     let trimmed = cmd.trim();
@@ -1252,34 +1418,58 @@ pub fn classify_command(cmd: &str, verify: &[String]) -> Option<&'static str> {
     if p.complex || p.writes.iter().any(|w| w.var || w.text != "/dev/null") || p.segments.is_empty() {
         return None;
     }
-    let mut kind = "read-only command";
+    let mut kind = READ_ONLY;
     for seg in &p.segments {
-        let (first, rest) = seg.split_first()?;
-        // A plain `program args…`: a bare name (`./cat` or `bin/tool` could be anything), no
-        // `VAR=x` prefix (GIT_EXTERNAL_DIFF, PAGER, LD_PRELOAD…), no wrapper, no `$` expansion.
-        let prog = first.text.as_str();
-        if first.var
-            || first.glob
-            || prog.is_empty()
-            || prog.contains('/')
-            || classify::is_assignment(prog)
-            || classify::is_wrapper(prog)
-            || rest.iter().any(|w| w.var)
-            || (rest.iter().any(|w| w.glob) && !GLOB_SAFE.contains(&prog))
-        {
-            return None;
+        if plain_command(seg)? == TEST_RUNNER {
+            kind = TEST_RUNNER;
         }
-        let args: Vec<String> = rest.iter().map(|w| w.text.clone()).collect();
-        if read_only(prog, &args) {
-            continue;
-        }
-        if test_runner(prog, &args) {
-            kind = "test runner";
-            continue;
-        }
-        return None;
     }
     Some(kind)
+}
+
+/// One simple command of a line: `READ_ONLY`, `TEST_RUNNER`, or None for anything else.
+fn plain_command(seg: &[Word]) -> Option<&'static str> {
+    let (first, rest) = seg.split_first()?;
+    // A plain `program args…`: a bare name (`./cat` or `bin/tool` could be anything), no
+    // `VAR=x` prefix (GIT_EXTERNAL_DIFF, PAGER, LD_PRELOAD…), no wrapper, no `$` expansion.
+    let prog = first.text.as_str();
+    if first.var
+        || first.glob
+        || prog.is_empty()
+        || prog.contains('/')
+        || classify::is_assignment(prog)
+        || classify::is_wrapper(prog)
+        || rest.iter().any(|w| w.var)
+        || (rest.iter().any(|w| w.glob) && !GLOB_SAFE.contains(&prog))
+    {
+        return None;
+    }
+    let args: Vec<String> = rest.iter().map(|w| w.text.clone()).collect();
+    if read_only(prog, &args) {
+        Some(READ_ONLY)
+    } else if test_runner(prog, &args) {
+        Some(TEST_RUNNER)
+    } else {
+        None
+    }
+}
+
+/// Targets of `make`, `just`, `task` and `ninja` that are checks of the project.
+const CHECK_TARGETS: &[&str] = &["test", "tests", "check", "lint", "fmt", "format", "build", "typecheck", "type-check"];
+
+/// Is every target on a `make`, `just`, `task` or `ninja` line a check? These programs run
+/// each target they are given, so `make test deploy` also deploys: one target that is not in
+/// `CHECK_TARGETS` (or no target, which runs the default one) makes the line an unknown
+/// command. Not targets: a variable (`make test V=1`; ninja has none) and the folder or file
+/// an option names (`make -C web test`, `just -f other.just test`).
+fn only_check_targets(prog: &str, args: &[String]) -> bool {
+    let valued = match prog {
+        "make" | "ninja" => "Cf",
+        "just" => "fd",
+        _ => "dt",
+    };
+    let mut targets = operands(args, valued).into_iter().filter(|word| prog == "ninja" || !classify::is_assignment(word)).peekable();
+    targets.peek().is_some() && targets.all(|target| CHECK_TARGETS.contains(&target))
 }
 
 fn test_runner(prog: &str, args: &[String]) -> bool {
@@ -1326,7 +1516,7 @@ fn test_runner(prog: &str, args: &[String]) -> bool {
             Some("fmt") => has(args, &["--check"]),
             _ => false,
         },
-        "make" | "just" | "task" | "ninja" => words.iter().any(|w| ["test", "tests", "check", "lint", "typecheck", "build"].contains(w)),
+        "make" | "just" | "task" | "ninja" => only_check_targets(prog, args),
         "gradle" | "gradlew" | "mvn" | "mvnw" => words.iter().any(|w| ["test", "check", "build", "verify", "compile"].contains(w)),
         "dotnet" | "swift" | "deno" | "mix" | "zig" | "bazel" | "bazelisk" | "xcodebuild" => {
             words.iter().any(|w| ["test", "build", "check", "lint", "vet"].contains(w))
@@ -1969,6 +2159,367 @@ mod tests {
         let mut a = cmd("git push", wt);
         a.choices = vec![ApprovalChoice::AllowAlways, ApprovalChoice::Deny];
         assert!(matches!(eval(&a, false), Verdict::Ask { .. }), "no allow_once offered");
+    }
+
+    /// `cmd >&file` sends stdout and stderr to the file: it is a write, not a copy of a
+    /// descriptor. `>|` and zsh's `>!` write too.
+    #[test]
+    fn a_file_after_a_redirect_is_a_write() {
+        let writes = |c: &str| parse(c).writes.iter().map(|w| w.text.clone()).collect::<Vec<_>>();
+        for (c, file) in [
+            ("cmd >&out.log", "out.log"),
+            ("cmd >& out.log", "out.log"),
+            ("cmd >>&out.log", "out.log"),
+            ("cmd 2>&out.log", "out.log"),
+            ("cmd >&2file", "2file"),
+            ("cmd &>out.log", "out.log"),
+            ("cmd >|out.log", "out.log"),
+            ("cmd >!out.log", "out.log"),
+            ("cmd >>| out.log", "out.log"),
+            ("cmd >&|out.log", "out.log"),
+            ("cmd &>!out.log", "out.log"),
+            ("cmd 2>|out.log", "out.log"),
+        ] {
+            assert_eq!(writes(c), [file], "{c}");
+            assert_eq!(texts(&parse(c).segments), vec![vec!["cmd"]], "{c}");
+        }
+        for c in ["cmd 2>&1", "cmd >&2", "cmd >&-", "cmd 2>&1-", "cmd 3>&1 1>&2", "cmd >&2; ls"] {
+            assert!(writes(c).is_empty(), "{c}");
+        }
+        assert_eq!(texts(&parse("cmd 2>&1|tail -5").segments), vec![vec!["cmd"], vec!["tail", "-5"]]);
+        assert_eq!(texts(&parse("cmd >&2 arg").segments), vec![vec!["cmd", "arg"]]);
+
+        // The file is checked like any other file a line writes.
+        let wt = Path::new("/w/t1");
+        for c in ["echo '{}' >&.claude/settings.local.json", "echo '{}' >!.claude/settings.local.json", "echo '{}' >|.mcp.json"] {
+            for mode in [ApprovalMode::Balanced, ApprovalMode::Autonomous, ApprovalMode::Full] {
+                let v = eval_in(wt, mode, false, command(c, wt));
+                assert!(asks_about(&v, classify::AGENT_SETTINGS), "{c} in {mode:?}: {v:?}");
+            }
+        }
+        for c in ["ls >&/tmp/out.log", "ls >&~/out.log", "ls >!../out.log", "ls >&$OUT"] {
+            assert!(risks(c).iter().any(|r| r == "outside worktree"), "{c}: {:?}", risks(c));
+        }
+        assert_eq!(classify_command("ls >&out.log", &[]), None, "a write is not a read-only command");
+        assert_eq!(classify_command("ls >&2", &[]), Some(READ_ONLY));
+        assert_eq!(classify_command("cargo test 2>&1 | tail -5", &[]), Some(TEST_RUNNER));
+    }
+
+    /// `make`, `just`, `task` and `ninja` run every target on the line: only a line whose
+    /// targets are all checks is a test run.
+    #[test]
+    fn only_check_targets_are_a_test_run() {
+        for c in [
+            "make test",
+            "make check lint",
+            "make build",
+            "make fmt",
+            "make format",
+            "make typecheck",
+            "make -j8 test",
+            "make -C web test",
+            "make -f ci.mk tests",
+            "make test V=1",
+            "make test 2>&1 | tail -20",
+            "cd web && make lint",
+            "just test",
+            "just -f other.just typecheck",
+            "just -d web fmt",
+            "just test FEATURES=all",
+            "task lint",
+            "task -d web test",
+            "ninja test",
+            "ninja -C out build",
+        ] {
+            assert_eq!(classify_command(c, &[]), Some(TEST_RUNNER), "{c}");
+        }
+        for c in [
+            "make",
+            "make deploy",
+            "make test deploy",
+            "make deploy test",
+            "make test install",
+            "make all",
+            "make -C web",
+            "make -j 8 test",
+            "make test-deploy",
+            "just",
+            "just deploy",
+            "just test unit",
+            "just -c sh test",
+            "task test release",
+            "task -f deploy test",
+            "ninja",
+            "ninja test install",
+            "ninja test A=b",
+        ] {
+            assert_eq!(classify_command(c, &[]), None, "{c}");
+        }
+    }
+
+    /// Publishing, and commands that change your account at a registry, ask under the same
+    /// name as `npm publish`.
+    #[test]
+    fn publish_like_commands_are_a_publish() {
+        for c in [
+            "npm publish",
+            "pnpm publish -r",
+            "yarn npm publish",
+            "bun publish",
+            "npm unpublish left-pad@1.0.0",
+            "npm deprecate left-pad 'old'",
+            "npm owner add someone left-pad",
+            "npm access public left-pad",
+            "npm dist-tag add left-pad@1.0.0 latest",
+            "npm token create",
+            "npm login",
+            "npm logout",
+            "npm adduser",
+            "cargo publish",
+            "cargo yank --version 1.0.0",
+            "cargo owner --add someone",
+            "cargo login abc",
+            "cargo logout",
+            "poetry publish",
+            "uv publish",
+            "deno publish",
+            "gem push pkg-1.0.0.gem",
+            "gem yank pkg -v 1.0.0",
+            "twine upload dist/pkg.tar.gz",
+            "python -m twine upload dist/pkg.tar.gz",
+            "mvn clean deploy",
+            "./gradlew build publish",
+            "gradle :app:publishToMavenLocal",
+            "timeout 60 npm publish",
+            "sh -c 'cargo yank --version 1.0.0'",
+            "cd web && npm publish 2>&1 | tail -5",
+        ] {
+            assert!(risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
+        }
+        for c in [
+            "npm install",
+            "npm install token",
+            "npm run publish-docs",
+            "yarn npm info left-pad",
+            "cargo build",
+            "cargo add owner",
+            "gem install rails",
+            "uv pip install twine",
+            "mvn test",
+            "gradle build",
+        ] {
+            assert!(!risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
+        }
+        // `cargo login` is your account, not a download a saved rule may cover.
+        assert_eq!(risks("cargo login abc"), ["publish"]);
+    }
+
+    #[test]
+    fn python_m_pip_is_read_like_pip() {
+        for c in [
+            "python -m pip install requests",
+            "python3 -m pip install -r requirements.txt",
+            "python3.12 -m pip install requests",
+            "python -mpip install requests",
+            "python3 -um pip install requests",
+            "python -W ignore -m pip install requests",
+            "python -m uv pip install requests",
+            "uv run python -m pip install requests",
+            "find . -name setup.py -exec python -m pip install -e . \\;",
+        ] {
+            assert!(risks(c).iter().any(|r| r == PACKAGE_INSTALL), "{c}: {:?}", risks(c));
+        }
+        for c in ["python3 -m pip install --user requests", "python -m pip install --break-system-packages requests", "poetry run python -m pip install --user x"] {
+            assert!(risks(c).iter().any(|r| r == "outside worktree"), "{c}: {:?}", risks(c));
+        }
+        // Another module, a script with its own `-m`, or pip's name as a word of the code.
+        for c in ["python -m pytest -q", "python -m venv .venv", "python scripts/tool.py -m pip", "python3 pip_report.py"] {
+            assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
+        }
+        assert!(risks("python3 -m http.server 8000").iter().any(|r| r == "network"));
+        assert_eq!(classify_command("python -m pytest -q", &[]), Some(TEST_RUNNER), "a test run as before");
+    }
+
+    /// security#4: code given to an interpreter on the command line holds its paths and
+    /// addresses where no check reads them.
+    #[test]
+    fn code_on_the_command_line_runs_dynamic_code() {
+        let dynamic = |c: &str| risks(c).iter().any(|r| r == "runs dynamic code");
+        for c in [
+            "python3 -c 'print(1)'",
+            "python -Bc 'print(1)'",
+            "python3.12 -c 'print(1)'",
+            "pypy3 -c 'print(1)'",
+            "python -W ignore -c 'print(1)'",
+            "node -e 'console.log(1)'",
+            "node --eval 'console.log(1)'",
+            "node --eval=1",
+            "node -p '1+1'",
+            "node -pe '1+1'",
+            "node -r ts-node/register -e 'run()'",
+            "node --require ./setup.js -e 'run()'",
+            "bun -e 'console.log(1)'",
+            "bun --print '1+1'",
+            "deno eval 'console.log(1)'",
+            "ruby -e 'puts 1'",
+            "ruby -rjson -e 'puts 1'",
+            "ruby -r json -ne 'puts 1'",
+            "perl -e 'print 1'",
+            "perl -pe 's/a/b/' notes.txt",
+            "perl -i -pe 's/a/b/' notes.txt",
+            "perl -MFile::Temp -E 'say 1'",
+            "perl -F: -lane 'print $F[0]' notes.txt",
+            "php -r 'echo 1;'",
+            "osascript -e 'tell application \"Finder\" to quit'",
+            "awk 'BEGIN { system(\"id\") }'",
+            "awk '{ print | \"sh\" }' notes.txt",
+            "awk 'BEGIN { \"date\" | getline d; print d }'",
+            // behind a wrapper, a runner or `find -exec`
+            "timeout 5 python3 -c 'print(1)'",
+            "env FOO=1 node -e 'run()'",
+            "uv run python -c 'print(1)'",
+            "poetry run python -c 'print(1)'",
+            "pnpm exec node -e 'run()'",
+            "bun run node -e 'run()'",
+            "bundle exec ruby -e 'puts 1'",
+            "find . -name '*.py' -exec python -c 'print(1)' {} \\;",
+        ] {
+            assert!(dynamic(c), "{c}: {:?}", risks(c));
+        }
+        // A script file, and the script's own options after it, are no code on the line.
+        for c in [
+            "python3 scripts/gen.py",
+            "python3 scripts/gen.py -c config.yaml",
+            "python -m pytest -c pytest.ini",
+            "python -W ignore scripts/gen.py",
+            "python -Wignore::DeprecationWarning scripts/gen.py",
+            "node scripts/gen.js",
+            "node server.js -p 3000",
+            "node --test",
+            "node -r ts-node/register src/main.ts",
+            "bun install -p",
+            "bun test",
+            "bun run build",
+            "deno run -A main.ts",
+            "ruby -Itest test/a_test.rb",
+            "ruby -rset script.rb",
+            "perl script.pl -e",
+            "perl -MFile::Temp script.pl",
+            "php artisan migrate",
+            "php -d memory_limit=1G script.php",
+            "awk '{print $1}' notes.txt",
+            "awk -F'|' '{print $2}' notes.txt",
+            "awk '/a|b/ {print}' notes.txt",
+            "awk '$1 == \"a\" || $2 == \"b\"' notes.txt",
+            "uv run pytest",
+            "pnpm exec vitest run",
+            "npm install python-shell",
+        ] {
+            assert!(!dynamic(c), "{c}: {:?}", risks(c));
+        }
+        let wt = Path::new("/w/t1");
+        let v = eval_in(wt, ApprovalMode::Autonomous, false, command("python3 -c 'import os; os.remove(os.path.expanduser(\"~/x\"))'", wt));
+        assert!(asks_about(&v, "runs dynamic code"), "{v:?}");
+    }
+
+    /// security#4: programs that reach another machine, change the system, or show what the
+    /// clipboard, the screen or the keychain holds.
+    #[test]
+    fn more_programs_have_a_risk_name() {
+        for (c, risk) in [
+            ("dig example.com", "network"),
+            ("nslookup example.com", "network"),
+            ("host example.com", "network"),
+            ("ping -c 1 example.com", "network"),
+            ("whois example.com", "network"),
+            ("xh get example.com", "network"),
+            ("openssl s_client -connect example.com:443", "network"),
+            ("python3 -m http.server 8000", "network"),
+            ("aws s3 ls", "network"),
+            ("gcloud compute instances list", "network"),
+            ("kubectl get pods", "network"),
+            ("terraform apply -auto-approve", "network"),
+            ("vercel deploy --prod", "network"),
+            ("open https://example.com/?q=1", "network"),
+            ("open https://example.com/?q=1", "system"),
+            ("open build/report.html", "system"),
+            ("open -a Terminal run.command", "system"),
+            ("xdg-open build/report.html", "system"),
+            ("crontab jobs.txt", "system"),
+            ("at now + 1 minute", "system"),
+            ("defaults write com.apple.dock autohide -bool true", "system"),
+            ("osascript scripts/quit.scpt", "system"),
+            ("pbpaste", classify::SECRETS),
+            ("screencapture shot.png", classify::SECRETS),
+            ("security find-generic-password -s codly -w", classify::SECRETS),
+        ] {
+            assert!(risks(c).iter().any(|r| r == risk), "{c}: {:?}", risks(c));
+        }
+        for c in ["openssl rand -hex 16", "openssl dgst -sha256 notes.txt", "pbcopy", "hostname"] {
+            assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
+        }
+        assert!(!risks("open build/report.html").iter().any(|r| r == "network"));
+    }
+
+    /// In your own project folder the floor looks at the folder: a word after `git checkout`
+    /// or `git reset` that names a file there is a file, and a build folder that is a link is
+    /// whatever the link points at.
+    #[test]
+    fn the_own_folder_floor_knows_files_and_links() {
+        let (_tmp, root) = worktree();
+        for d in ["src", "build", "node_modules/.cache", "docs"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("src/a.ts"), "export {}").unwrap();
+        std::os::unix::fs::symlink(root.join("docs"), root.join("dist")).unwrap();
+        std::os::unix::fs::symlink(root.join("src"), root.join("node_modules/pkg")).unwrap();
+        let full = |c: &str| {
+            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(root.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()) };
+            evaluate(&approval(command(c, &root)), &ctx)
+        };
+        for (c, why) in [
+            ("git checkout src/a.ts", DISCARDS_WORK),
+            ("git checkout HEAD~1 src/a.ts", DISCARDS_WORK),
+            ("git checkout src", DISCARDS_WORK),
+            ("git checkout --theirs src/a.ts", DISCARDS_WORK),
+            ("git checkout '*.ts'", DISCARDS_WORK),
+            ("git checkout HEAD~1 ':(glob)**/*.ts'", DISCARDS_WORK),
+            ("git -C src checkout a.ts", DISCARDS_WORK),
+            ("cd src && git checkout a.ts", DISCARDS_WORK),
+            ("git reset main", REWRITES_HISTORY),
+            ("rm -rf dist", DELETES_FOLDERS),
+            ("rm -rf dist/", DELETES_FOLDERS),
+            ("rm -rf dist/guide", DELETES_FOLDERS),
+            ("rm -rf node_modules/pkg/", DELETES_FOLDERS),
+        ] {
+            let v = full(c);
+            assert!(asks_about(&v, why) && asks_about(&v, "your project folder itself"), "{c}: {v:?}");
+        }
+        for c in [
+            "git checkout main",
+            "git checkout a.ts",
+            "git checkout -b src",
+            "git checkout -b fix src",
+            "git checkout --orphan docs",
+            "git reset src/a.ts",
+            "git reset HEAD src/a.ts",
+            "rm -rf build",
+            "rm -rf node_modules",
+            "rm -rf node_modules/.cache",
+        ] {
+            let v = full(c);
+            assert!(matches!(v, Verdict::Allow { .. }), "{c}: {v:?}");
+        }
+        // From a worktree, a build folder of yours that is a link is not a build folder either.
+        let (_tmp2, wt) = worktree();
+        let from_wt = |c: &str| {
+            let ctx = PolicyCtx { mode: ApprovalMode::Full, worktree: Some(wt.as_path()), verify: &[], read_only: false, edits: false, checkout: Some(root.as_path()) };
+            evaluate(&approval(command(c, &wt)), &ctx)
+        };
+        let v = from_wt(&format!("rm -rf {}/dist/guide", root.display()));
+        assert!(asks_about(&v, DELETES_FOLDERS), "{v:?}");
+        let v = from_wt(&format!("rm -rf {}/build", root.display()));
+        assert!(matches!(v, Verdict::Allow { .. }), "{v:?}");
     }
 
     #[test]
