@@ -17,6 +17,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { PrDraft } from '../gen/PrDraft';
 import type { Settings } from '../gen/Settings';
 import { waitingOf, type Turn } from '../state/queue';
+import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
 import { DEFAULT_SETTINGS, type Decision } from '../state/store.svelte';
 import { waitReason } from '../util/plan';
 
@@ -462,6 +463,35 @@ describe('the MCP servers of the first Claude Lead', () => {
   });
 });
 
+describe('the MCP servers of a Lead you stop', () => {
+  it('are gone with its run, and are reported again when it works again', async () => {
+    const { sim, story } = demo();
+    await until(() => planOf(sim, 'lead')?.status === 'awaiting_approval' && lead(sim)!.status === 'idle');
+    const id = lead(sim)!.id;
+    /** The agent sheet's list: the servers of the Lead's live run (sheet/AgentMcp.svelte). */
+    const servers = () => {
+      const list = sim.log.reduce<McpServer[]>((held, e) => (e.agent_id === id && e.kind.type === 'mcp_server' ? withMcpServer(held, e.kind, e.run_id, e.ts) : held), []);
+      return ofLiveRun(list, lead(sim)!.run_id).map((x) => [x.name, x.status]);
+    };
+    const all = [['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'failed']];
+    expect(servers()).toEqual(all);
+    const first = lead(sim)!.run_id;
+
+    story.interrupt(id, true);
+    // As in the app: the run ended with the process, and the sheet shows the servers of the live run.
+    expect(lead(sim)).toMatchObject({ status: 'offline', run_id: null });
+    expect(servers()).toEqual([]);
+
+    // Your next message starts its process again: a new run, whose CLI says its servers again.
+    story.userChat('lead', 'Is the plan ready?');
+    await until(() => !!lead(sim)!.run_id);
+    expect(lead(sim)!.run_id).not.toBe(first);
+    expect(servers()).toEqual(all);
+    const turn = sim.log.filter((e) => e.agent_id === id && e.kind.type === 'turn_started').pop()!;
+    expect(turn.run_id).toBe(lead(sim)!.run_id);
+  });
+});
+
 describe('the demo states of docs/DEMO.md', () => {
   it('reads each parameter, and a value it does not know starts nothing', () => {
     const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on'));
@@ -656,8 +686,10 @@ describe('a helper and the turn you stop', () => {
 describe('who takes a task', () => {
   it('a task with no worker goes to a free worker: never to a 1:1 agent you hired, never to an agent in a turn', async () => {
     const { sim, story } = demo({ story: { yourRequestFirst: true } });
-    // A 1:1 agent, at rest: the first agent of the office.
+    // Two 1:1 agents, at rest: the first agents of the office. One has the stock name of a Claude agent.
     const solo = story.hire('codex');
+    const eli = story.hire('claude');
+    expect(eli.name).toBe('Eli');
     const start = async (title: string) => {
       const t = story.createTask(title, '');
       story.moveTask(t.id, 'ready');
@@ -665,9 +697,10 @@ describe('who takes a task', () => {
       return sim.agents.get(sim.tasks.get(t.id)!.assignee!)!;
     };
     const first = await start('Sort the imports');
-    expect(first.id).not.toBe(solo.id);
-    expect([first.name, first.role]).toEqual(['Eli', 'worker']);
-    expect(sim.agents.get(solo.id)).toMatchObject({ role: 'solo', task_id: null, status: 'idle' });
+    expect([solo.id, eli.id]).not.toContain(first.id);
+    // The worker started for it gets a name of its own, as a hire does: "Eli" is taken.
+    expect([first.name, first.role, first.worktree]).toEqual(['Eli 2', 'worker', expect.stringMatching(/\/a4-eli-2$/)]);
+    for (const a of [solo, eli]) expect(sim.agents.get(a.id)).toMatchObject({ role: 'solo', task_id: null, status: 'idle' });
 
     // That worker is free again after its task, and takes the next one.
     await until(() => sim.taskByKey('a4')?.status === 'done');
@@ -679,8 +712,11 @@ describe('who takes a task', () => {
     // While it answers you (a turn runs), a new worker is started for the task.
     sim.actor(first.id).inTurn = true;
     const third = await start('Update the changelog');
-    expect([first.id, solo.id]).not.toContain(third.id);
-    expect(third.role).toBe('worker');
+    expect([first.id, solo.id, eli.id]).not.toContain(third.id);
+    expect([third.name, third.role]).toEqual(['Eli 3', 'worker']);
+    // Each name still means one agent.
+    expect(sim.agentByName('Eli')!.id).toBe(eli.id);
+    expect(new Set([...sim.agents.values()].map((a) => a.name)).size).toBe(sim.agents.size);
   });
 
   it('an agent started only to resolve a conflict works in the plan’s worktree, and has none of its own afterwards', async () => {

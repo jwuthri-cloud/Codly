@@ -98,6 +98,8 @@ const NO_TARGET: Target = { path: null, paths: [], command: null, query: null, u
 /** Claude Code and Codex take a message into the turn that runs; the other CLIs run it as the next turn (state/queue.ts). */
 const readsMidTurn = (provider: Provider) => provider === 'claude' || provider === 'codex';
 const quoted = (text: string, max: number) => `“${text.slice(0, max)}${text.length > max ? '…' : ''}”`;
+/** An agent's name as it reads in a path ("Eli 2" → "eli-2"). */
+const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
 /** What the demo's build prints. */
 const BUILD_OUTPUT = [
   '> acme-web@2.4.0 build', '> next build', '', '   ▲ Next.js 16.1.2', '   Creating an optimized production build …', ' ✓ Compiled successfully in 9.4s',
@@ -866,7 +868,7 @@ export class Story {
    */
   private spawnWorker(provider: Provider, name: string, color: number, task: Task | null, model?: string | null, home: string | null = null): Actor {
     const sim = this.sim;
-    const worktree = task ? (task.worktree ?? `${this.worktrees}/${task.key}-${name.toLowerCase()}`) : home;
+    const worktree = task ? (task.worktree ?? `${this.worktrees}/${task.key}-${slug(name)}`) : home;
     const a = sim.putAgent(sim.newAgent({
       name, provider, model: model ?? WORKER_MODELS[provider], role: task ? 'worker' : 'solo', color, billing: provider === 'opencode' ? 'third_party' : 'subscription',
       taskId: task?.id ?? null, worktree,
@@ -894,7 +896,7 @@ export class Story {
 
   private assign(task: Task, act: Actor, branchRoot: string) {
     const sim = this.sim;
-    const worktree = `${this.worktrees}/${task.key}-${act.a.name.toLowerCase()}`;
+    const worktree = `${this.worktrees}/${task.key}-${slug(act.a.name)}`;
     act.set({ task_id: task.id, worktree, role: act.a.role === 'lead' ? 'lead' : 'worker' });
     sim.patchTask(task.id, {
       status: 'running', assignee: act.id, branch: `${branchRoot}/${task.key}`, worktree, attempt: task.attempt + 1, status_reason: null,
@@ -1720,8 +1722,10 @@ export class Story {
     await sim.sleep(700);
     while (tasks().some((t) => t.status !== 'done')) {
       if (cancelled()) return;
-      for (const t of tasks().sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))) {
-        if (started.has(t.id) || t.status === 'done' || t.status === 'cancelled') continue;
+      for (const { id } of tasks().sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))) {
+        // As it is now: this pass waits between two tasks, and you can cancel one meanwhile.
+        const t = sim.tasks.get(id);
+        if (!t || started.has(t.id) || t.status === 'done' || t.status === 'cancelled') continue;
         if (t.depends_on.some((d) => sim.tasks.get(d)?.status !== 'done')) continue;
         started.add(t.id);
         // At work already (billing-api's tasks are, when you open it): not started a second time.
@@ -1730,11 +1734,9 @@ export class Story {
           sim.patchTask(t.id, { status: 'ready', status_reason: 'Dependencies merged; starting' });
           await sim.sleep(900);
         }
-        if (this.held) {
-          await this.notHeld(t.id);
-          // Cancelled, or put back, while it waited: Retry starts it (`moveTask`).
-          if (sim.tasks.get(t.id)?.status !== 'ready') continue;
-        }
+        if (this.held) await this.notHeld(t.id);
+        // Cancelled, or started by you, while it waited: it is not started here (Retry starts it, `moveTask`).
+        if (sim.tasks.get(t.id)?.status !== 'ready') continue;
         this.startPlanned(planId, t.key);
         await sim.sleep(500);
       }
@@ -1868,7 +1870,7 @@ export class Story {
       const ofPlan = [...sim.tasks.values()].filter((t) => t.plan_id === planId && t.assignee).map((t) => sim.agents.get(t.assignee!)).reverse();
       const agent = ofPlan.find(free) ?? [...sim.agents.values()].find(free);
       // (an agent started for this task only starts in the plan's worktree, and has none of its own)
-      const act = agent ? sim.actor(agent.id) : this.spawnWorker('claude', 'Eli', 5, task);
+      const act = agent ? sim.actor(agent.id) : this.spawnWorker('claude', this.freeName('claude'), 5, task);
       const own = agent ? agent.worktree : null;
       act.set({ task_id: taskId, worktree: task.worktree });
       sim.patchTask(taskId, { status: 'running', assignee: act.id, attempt: 1, status_reason: null });
@@ -2095,7 +2097,7 @@ export class Story {
       if (!agent) {
         const used = new Set([...sim.agents.values()].map((a) => a.color));
         const color = [5, 1, 6, 0].find((c) => !used.has(c)) ?? 5;
-        agent = this.spawnWorker('claude', 'Eli', color, task).a;
+        agent = this.spawnWorker('claude', this.freeName('claude'), color, task).a;
       }
       sim.decision('route', 'rule', `${task.key} → ${agent.name}: first free worker (${agent.provider})`, { task: task.key, agent: agent.name }, { agent: agent.id, task: task.id });
     }
@@ -2156,6 +2158,14 @@ export class Story {
     }
   }
 
+  /** A name for a new agent that no agent of the office has: its CLI's stock name, then "Eli 2", "Eli 3"… */
+  private freeName(provider: Provider): string {
+    const names = new Set([...this.sim.agents.values()].map((a) => a.name));
+    let name = WORKER_NAMES[provider];
+    for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
+    return name;
+  }
+
   /**
    * A new 1:1 agent. `named` is the name the hire wizard gave it (checked there to be free);
    * without one it gets its CLI's stock name. `isolate` false: Git isolation is off, so it works
@@ -2163,18 +2173,15 @@ export class Story {
    */
   hire(provider: Provider, model: string | null = null, title: string | null = null, named: string | null = null, isolate = true): Agent {
     const sim = this.sim;
-    const names = new Set([...sim.agents.values()].map((a) => a.name));
-    let name = named ?? WORKER_NAMES[provider];
-    if (!named) for (let i = 2; names.has(name); i++) name = `${WORKER_NAMES[provider]} ${i}`;
+    const name = named ?? this.freeName(provider);
     const used = new Set([...sim.agents.values()].map((a) => a.color));
     const color = [0, 1, 3, 5, 2, 4, 7, 6].find((c) => !used.has(c)) ?? sim.agents.size % 8;
     // Like the core: a 1:1 agent works in a worktree of its own, called after its name. Two
     // names can read the same in a path, so a path that is taken gets a number. Its session
     // starts there: the folder is known before the agent is.
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
     const taken = new Set([...sim.agents.values()].map((a) => a.worktree));
-    let worktree = `${this.worktrees}/${slug}`;
-    for (let i = 2; taken.has(worktree); i++) worktree = `${this.worktrees}/${slug}-${i}`;
+    let worktree = `${this.worktrees}/${slug(name)}`;
+    for (let i = 2; taken.has(worktree); i++) worktree = `${this.worktrees}/${slug(name)}-${i}`;
     const act = this.spawnWorker(provider, name, color, null, model, isolate ? worktree : (sim.workspace?.repo_path ?? REPO));
     act.status('idle');
     return title ? sim.patchAgent(act.a.id, { title }) : act.a;
@@ -2227,8 +2234,9 @@ export class Story {
     }
     if (stop) {
       act.emit({ type: 'exited', code: 0 });
-      act.set({ status: 'offline', activity: null, activity_label: null });
-      demoBackground(sim).gone(agentId);
+      // Like the core: the run ends with the process, and what it left in the background with it
+      // (no list says so). The agent's next turn starts a new run (`Actor.turn`).
+      act.set({ status: 'offline', activity: null, activity_label: null, run_id: null });
     }
   }
 

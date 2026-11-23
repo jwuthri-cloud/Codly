@@ -19,7 +19,8 @@ export class DemoBackground {
 
   private work(agentId: string): Work[] {
     const now = this.listed.get(agentId);
-    // (the list of an earlier run went with that run's process, and an agent that left the office has none)
+    // (the list of a run went with that run's process: a stopped agent has no run, and its next one starts with nothing.
+    // An agent that left the office has none either.)
     return now && now.run === this.sim.agents.get(agentId)?.run_id ? now.work : [];
   }
 
@@ -71,11 +72,6 @@ export class DemoBackground {
     if (helper.open) act.emit({ type: 'tool_completed', call_id: helper.open, ok: false, output: REJECTED, exit_code: null, duration_ms: null, tests_passed: null, tests_failed: null });
     void this.told(act, status === 'completed' ? `The helper is done. ${report ?? ''}`.trim() : 'The helper was stopped before it reported, so I do not have its answer.');
     return true;
-  }
-
-  /** The agent's process is gone: what it had in the background went with it (its `exited` says so, no list does). */
-  gone(agentId: string) {
-    this.listed.delete(agentId);
   }
 
   /**

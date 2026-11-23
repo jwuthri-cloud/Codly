@@ -172,19 +172,44 @@ describe('the demo transport', () => {
       expect(after.tasks.filter((x) => x.status === 'running').map((x) => x.key).sort()).toEqual(['t1', 't1', 't2']);
     });
 
+    /** The tasks of the first plan that a worker has, or had. */
+    const started = async (t: MockTransport) => Object.values(await tasks(t)).filter((x) => x.assignee || !['pending', 'ready', 'cancelled'].includes(x.status)).map((x) => x.key);
+
     it('counts one less when you cancel a waiting task, and ends by itself when none is left', async () => {
       const t = open('?resume=ask');
+      // You read the question first: the plan's coordinator waits for your answer by then.
+      await vi.advanceTimersByTimeAsync(2000);
       const held = await tasks(t);
       // t3 waits for t1: it is cancelled with it. One task still waits.
       await call(t, 'cancel_task_tree', { taskId: held.t1.id });
       expect(await offer(t)).toEqual({ tasks: 1 });
       await call(t, 'move_task', { taskId: held.t2.id, status: 'cancelled' });
       expect(await offer(t)).toBeNull();
+      // The hold is over, and what you cancelled stays cancelled: no worker starts on it.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(Object.values(await tasks(t)).map((x) => x.status)).toEqual(['cancelled', 'cancelled', 'cancelled']);
+      expect(await started(t)).toEqual([]);
+      expect((await snapshot(t)).agents.filter((x) => x.role === 'worker')).toEqual([]);
       // No hold is left: a task you start from here on needs no Resume.
       const task = await call<Task>(t, 'create_task', { title: 'Sort the imports', goal: '' });
       await call(t, 'move_task', { taskId: task.id, status: 'ready' });
       await vi.advanceTimersByTimeAsync(3000);
       expect((await snapshot(t)).tasks.find((x) => x.id === task.id)?.status).toBe('running');
+    });
+
+    it('does not start a waiting task that you cancelled before your Resume', async () => {
+      const t = open('?resume=ask');
+      await vi.advanceTimersByTimeAsync(2000);
+      const held = await tasks(t);
+      await call(t, 'move_task', { taskId: held.t2.id, status: 'cancelled' });
+      expect(await offer(t)).toEqual({ tasks: 1 });
+      expect(await offer(t, true)).toBeNull();
+      await vi.advanceTimersByTimeAsync(5000);
+      // The other one goes on; t3 needs both, so it waits on.
+      const now = await tasks(t);
+      expect([now.t1.status, now.t2.status, now.t3.status]).toEqual(['running', 'cancelled', 'pending']);
+      expect(await started(t)).toEqual(['t1']);
+      expect((await snapshot(t)).agents.filter((x) => x.role === 'worker').map((x) => x.name)).toEqual(['Ada']);
     });
 
     it('holds nothing without the parameter', async () => {

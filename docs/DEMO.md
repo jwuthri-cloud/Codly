@@ -82,12 +82,14 @@ The wallet is one for both offices: XP and coins are the same whichever office i
 - MCP servers: the first Lead of an office (a Claude Code one) reports three when its session
   starts: `codly` is connected, `linear` needs a sign-in, `postgres` did not start. Its sheet shows
   the section "MCP servers". Reconnect connects `postgres` after a second; `linear` still needs
-  its sign-in, and the row says so.
+  its sign-in, and the row says so. Stop the Lead and the section is gone with its process, as in
+  the app; it is back when the Lead works again.
 - A command an agent leaves running in the background: in her first task Ada starts a type check
   (`npx tsc --noEmit --watch`) and stops it before she reports. While it runs, her sheet lists it
   under "In the background" with Stop, and her History has one row for each change of the list.
   Without `?autoplay=1` it stays until you answer her `npm install` request: run the first plan
-  (`?skip=20`), open Ada's sheet, and press Stop.
+  (`?skip=20`), open Ada's sheet, and press Stop. Stop Ada herself and the section is gone: the
+  command ended with her process, as in the app.
 
 ## What the demo cannot show
 

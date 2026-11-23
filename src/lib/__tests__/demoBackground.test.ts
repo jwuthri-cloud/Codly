@@ -6,8 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockControls } from '../demo/controls';
 import { REPO, Sim } from '../demo/sim';
 import { Story } from '../demo/story';
+import type { Agent } from '../gen/Agent';
 import type { EventKind } from '../gen/EventKind';
-import { withBackgroundTasks, type BackgroundWork } from '../state/session';
+import { ofLiveRun, withBackgroundTasks, type BackgroundWork } from '../state/session';
 import { DEFAULT_SETTINGS } from '../state/store.svelte';
 
 const COMMAND = 'npx tsc --noEmit --watch';
@@ -18,6 +19,12 @@ function demo() {
   const sim = new Sim({ speed: 1, skipMs: 0, autoplay: true }, { ...DEFAULT_SETTINGS });
   new Story(sim).openWorkspace(REPO);
   return sim;
+}
+
+/** What the agent's sheet lists under "In the background": the work of its live run (sheet/AgentBackground.svelte). */
+function sheet(sim: Sim, agent: Agent): [string, string][] {
+  const rows = sim.log.reduce<BackgroundWork[]>((held, e) => (e.kind.type === 'background_tasks' && e.agent_id === agent.id ? withBackgroundTasks(held, e.kind, e.run_id, e.ts) : held), []);
+  return ofLiveRun(rows, agent.run_id).map((w) => [w.description, w.status]);
 }
 
 /** Let the script play until `done`, for 400 seconds of its time at most. */
@@ -88,6 +95,24 @@ describe('the demo: a command an agent leaves running in the background', () => 
     // Her own stop before the report finds it over: no third list.
     await until(() => taskDone(sim));
     expect(lists(sim)).toHaveLength(2);
+  });
+
+  it('is gone with her run when you stop Ada: her sheet lists nothing that still runs', async () => {
+    const sim = new Sim({ speed: 1, skipMs: 0, autoplay: true }, { ...DEFAULT_SETTINGS });
+    const story = new Story(sim);
+    story.openWorkspace(REPO);
+    await until(() => lists(sim).length === 1);
+    expect(sheet(sim, ada(sim)!)).toEqual([[COMMAND, 'running']]);
+
+    story.interrupt(ada(sim)!.id, true);
+    // As in the app: the run ended with her process, and the sheet shows the work of the live run only.
+    expect(ada(sim)).toMatchObject({ status: 'offline', run_id: null });
+    expect(sheet(sim, ada(sim)!)).toEqual([]);
+    // Her task lets go of her, and no list comes from a process that is gone.
+    await until(() => sim.taskByKey('t1')?.status === 'blocked');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(lists(sim)).toHaveLength(1);
+    expect(sheet(sim, ada(sim)!)).toEqual([]);
   });
 });
 
@@ -210,11 +235,24 @@ describe('`?background=on`: a 1:1 Claude agent leaves a command and a helper at 
     const { sim, story, controls } = left();
     await until(() => atRest(sim));
     const helper = of(sim, 'background_tasks')[1].tasks[1];
+    expect(sheet(sim, eli(sim))).toEqual([[SERVER, 'running'], [HELPER, 'running']]);
+    const run = eli(sim).run_id;
     story.interrupt(eli(sim).id, true);
+    // As in the app: the run ended with the process, so the sheet has no row of it (none with a timer that runs on).
+    expect(eli(sim).run_id).toBeNull();
+    expect(sheet(sim, eli(sim))).toEqual([]);
     expect(() => controls.stopTask(eli(sim).id, helper.id)).toThrow('Eli is not running');
     // The process is gone: no list, no report and no turn come from it.
     const before = sim.log.length;
     await vi.advanceTimersByTimeAsync(240_000);
     expect(sim.log.slice(before).filter((e) => e.agent_id === eli(sim).id)).toEqual([]);
+
+    // Its next turn starts its process again: a new run, with nothing in the background.
+    await sim.actor(eli(sim).id).turn('Are you there?', async () => {});
+    expect(eli(sim).run_id).toEqual(expect.any(String));
+    expect(eli(sim).run_id).not.toBe(run);
+    expect(sheet(sim, eli(sim))).toEqual([]);
+    expect(of(sim, 'turn_started').pop()).toEqual({ type: 'turn_started', input: 'Are you there?' });
+    expect(sim.log.filter((e) => e.kind.type === 'turn_started' && e.agent_id === eli(sim).id).pop()!.run_id).toBe(eli(sim).run_id);
   });
 });
