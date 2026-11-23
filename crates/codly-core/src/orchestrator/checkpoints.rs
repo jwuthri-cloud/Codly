@@ -697,6 +697,18 @@ impl Inner {
             tracing::warn!("the note about restored files was not cleared: {e:#}");
         }
     }
+
+    /// The agent is let go (`Inner::forget_agent`): no run of it reads a note any more, so
+    /// its notes go, whatever worktree each one is about.
+    pub(super) fn forget_restore_notes(&self, agent_id: &str) {
+        let cleared = self
+            .store
+            .kv_prefixed(&note_key(agent_id, Path::new("")))
+            .and_then(|rows| self.store.kv_write(&rows.into_iter().map(|(key, _)| (key, None)).collect::<Vec<_>>()));
+        if let Err(e) = cleared {
+            tracing::warn!("the notes about restored files were not cleared: {e:#}");
+        }
+    }
 }
 
 impl Core {

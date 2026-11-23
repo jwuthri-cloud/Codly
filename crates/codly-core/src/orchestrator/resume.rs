@@ -393,15 +393,15 @@ impl Inner {
 
     /// An agent is let go: what the store kept about its work goes with it. The result of
     /// its last "Check the work" (`required_checks.rs`), what Codly's commits left out in its
-    /// worktree (`left_out.rs`) and the note about files you put back (`checkpoints.rs`, which
-    /// drops it with `restore_note_read`) are all about a worktree the agent no longer has.
+    /// worktree (`left_out.rs`) and the notes about files you put back (`checkpoints.rs`, which
+    /// drops them with `forget_restore_notes`) are all about a worktree the agent no longer has.
     /// A row that cannot be removed is a leftover, not a reason to keep the agent.
     pub(super) fn forget_agent(&self, agent_id: &str) {
         let forgotten = self.store.kv_write(&[(required_checks::checked_key(agent_id), None)]).and_then(|()| self.forget_left_out(agent_id));
         if let Err(e) = forgotten {
             tracing::warn!("rows of agent {agent_id}, which was let go, stay in the store: {e}");
         }
-        self.restore_note_read(agent_id);
+        self.forget_restore_notes(agent_id);
     }
 
     /// An office is closed: its tasks are all over (`close_office` refuses otherwise), so the
@@ -595,7 +595,7 @@ mod tests {
         let hire = |name: &str| core.inner.create_agent(&ws.id, name, Provider::Claude, Role::Solo, 0, None).unwrap();
         let (ada, bo) = (hire("ada"), hire("bo"));
         // As `required_checks.rs`, `left_out.rs` and `checkpoints.rs` name them.
-        let rows_of = |id: &str| [required_checks::checked_key(id), format!("left_out:{id}:/work/tree"), format!("checkpoint_note:{id}")];
+        let rows_of = |id: &str| [required_checks::checked_key(id), format!("left_out:{id}:/work/tree"), format!("checkpoint_note:{id}:/work/tree")];
         for key in rows_of(&ada.id).iter().chain(&rows_of(&bo.id)) {
             store.kv_set(key, "kept").unwrap();
         }
