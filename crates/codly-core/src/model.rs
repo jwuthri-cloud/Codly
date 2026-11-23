@@ -1116,14 +1116,16 @@ pub struct ApprovalDecision {
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum ApprovalRuleKind {
-    /// The whole command line, as it was asked.
+    /// The whole command line, as it was asked, or the full name of an MCP server's tool.
     Exact,
-    /// One plain command that starts with these words (`cargo test`).
+    /// A command that starts with these words (`cargo test`), alone on its line or with
+    /// commands that only read.
     Prefix,
 }
 
-/// "Always allow in this repo": a command you told Codly not to ask about again, for every
-/// agent of one repo. Kept in Codly's store (`orchestrator/approval_rules.rs`).
+/// "Always allow in this repo": a command, or a tool of an MCP server, you told Codly not to
+/// ask about again, for every agent of one repo. Kept in Codly's store
+/// (`orchestrator/approval_rules.rs`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ApprovalRule {
@@ -1138,9 +1140,10 @@ pub struct ApprovalRule {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ApprovalRuleOffer {
-    /// The command line itself.
+    /// The command line itself, or the full name of an MCP server's tool.
     pub exact: Option<String>,
-    /// Its first words, when it is one plain command of a program that takes a subcommand.
+    /// The first words of the one command on the line that does more than read, when its
+    /// program takes a subcommand.
     pub prefix: Option<String>,
 }
 

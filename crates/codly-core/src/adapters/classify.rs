@@ -6,7 +6,9 @@
 //! type → ACP `kind` → the input's shape → shell argv rules. Anything decided by the first two
 //! is "observed"; heuristics are "inferred".
 
+use std::iter::Peekable;
 use std::path::{Component, Path, PathBuf};
+use std::str::Chars;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -262,6 +264,25 @@ enum Tok {
     Redirect(String),
 }
 
+/// After `>&` or `<&`: the descriptor the redirect copies (`2>&1`, `>&2-`) or closes (`>&-`),
+/// taken off `rest`. None, with nothing taken, when a file name follows: `cmd >&out.log` sends
+/// stdout and stderr to that file, as `cmd &>out.log` does.
+pub(crate) fn fd_copy(rest: &mut Peekable<Chars<'_>>) -> Option<String> {
+    let mut ahead = rest.clone();
+    let mut fd = String::new();
+    while let Some(digit) = ahead.next_if(char::is_ascii_digit) {
+        fd.push(digit);
+    }
+    if let Some(dash) = ahead.next_if_eq(&'-') {
+        fd.push(dash);
+    }
+    let ends = ahead.peek().is_none_or(|c| c.is_whitespace() || ";|&<>()".contains(*c));
+    (!fd.is_empty() && ends).then(|| {
+        *rest = ahead;
+        fd
+    })
+}
+
 /// Small shell tokenizer: quotes, backslashes, `&& || | ; &` and redirections. Not a shell
 /// parser; good enough to find argv[0] and the arguments that look like paths.
 fn tokenize(cmd: &str) -> Vec<Tok> {
@@ -335,10 +356,13 @@ fn tokenize(cmd: &str) -> Vec<Tok> {
                     ('&', Some('&')) => "&&",
                     ('|', Some('|')) => "||",
                     ('&', Some('>')) => {
-                        // `&>file` / `&>>file`
+                        // `&>file` / `&>>file`, and zsh's `&>|file` / `&>!file`
                         chars.next();
                         let append = chars.peek() == Some(&'>');
                         if append {
+                            chars.next();
+                        }
+                        if matches!(chars.peek(), Some('|' | '!')) {
                             chars.next();
                         }
                         out.push(Tok::Redirect(if append { "&>>" } else { "&>" }.into()));
@@ -368,16 +392,15 @@ fn tokenize(cmd: &str) -> Vec<Tok> {
                         break;
                     }
                 }
-                // `2>&1`: the digits after `&` are part of the redirect, not a file
-                if op.ends_with('&') {
-                    while let Some(&n) = chars.peek() {
-                        if n.is_ascii_digit() || n == '-' {
-                            op.push(n);
-                            chars.next();
-                        } else {
-                            break;
-                        }
+                // `2>&1`: the descriptor after `&` is part of the redirect, not a file. Any other
+                // word after `>&` is a file (`cmd >&out.log`): `op` then still ends with `&`.
+                match op.ends_with('&').then(|| fd_copy(&mut chars)).flatten() {
+                    Some(fd) => op.push_str(&fd),
+                    // `>|file` and zsh's `>!file` write the file even where `noclobber` is set.
+                    None if op.contains('>') && matches!(chars.peek(), Some('|' | '!')) => {
+                        chars.next();
                     }
+                    None => {}
                 }
                 out.push(Tok::Redirect(op));
             }
@@ -409,8 +432,8 @@ fn segments(cmd: &str) -> Vec<Seg> {
                 out.push(Seg { piped_in: op == "|", ..Default::default() });
             }
             Tok::Redirect(r) => {
-                // fd duplications (`2>&1`) take no file argument
-                pending_redirect = !r.contains('&') || r.starts_with('&');
+                // A copy of a descriptor (`2>&1`, `>&-`) takes no file; `>&file` and `&>file` do.
+                pending_redirect = !r.contains('&') || r.starts_with('&') || r.ends_with('&');
             }
             Tok::Word(w) => {
                 let seg = out.last_mut().unwrap();
@@ -1007,7 +1030,7 @@ pub(crate) fn long_flag(args: &[String], names: &[&str]) -> bool {
 }
 
 /// Operands (non-option arguments), skipping the value of the short options in `valued`.
-fn operands<'a>(args: &'a [String], valued: &str) -> Vec<&'a str> {
+pub(crate) fn operands<'a>(args: &'a [String], valued: &str) -> Vec<&'a str> {
     let (mut out, mut i, mut done) = (vec![], 0, false);
     while let Some(a) = args.get(i).map(String::as_str) {
         i += 1;
@@ -1462,6 +1485,199 @@ pub(crate) fn uv_run_fetches<S: AsRef<str>>(args: &[S]) -> bool {
         .any(|a| FETCH.iter().any(|f| a.starts_with(f)))
 }
 
+/// A Python interpreter, by any of its names (`python`, `python3`, `python3.12`, `pypy3`).
+fn is_python(prog: &str) -> bool {
+    ["python", "pypy"].iter().any(|name| prog.strip_prefix(name).is_some_and(|version| version.chars().all(|c| c.is_ascii_digit() || c == '.')))
+}
+
+/// What a Python interpreter's own options make it run instead of a script file.
+enum PythonRuns<'a, S> {
+    /// `-c code`
+    Code,
+    /// `-m module args…`
+    Module(&'a str, &'a [S]),
+}
+
+/// Reads Python's options, the words before its script: `-c` and `-m` end them, `-W` and `-X`
+/// take a value, in the same word or the next one.
+fn python_runs<S: AsRef<str>>(args: &[S]) -> Option<PythonRuns<'_, S>> {
+    let mut i = 0;
+    loop {
+        let a: &str = args.get(i)?.as_ref();
+        i += 1;
+        if !a.starts_with('-') || a.starts_with("--") {
+            return None;
+        }
+        for (at, option) in a.char_indices().skip(1) {
+            let glued = &a[at + option.len_utf8()..];
+            match option {
+                'c' => return Some(PythonRuns::Code),
+                'm' if glued.is_empty() => return Some(PythonRuns::Module(args.get(i)?.as_ref(), &args[i + 1..])),
+                'm' => return Some(PythonRuns::Module(glued, &args[i..])),
+                'W' | 'X' => {
+                    i += usize::from(glued.is_empty());
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `python -m pip install x` runs pip: the module a Python interpreter is told to run, with the
+/// module's own arguments.
+pub(crate) fn python_module<'a, S: AsRef<str>>(prog: &str, args: &'a [S]) -> Option<(&'a str, &'a [S])> {
+    if !is_python(prog) {
+        return None;
+    }
+    match python_runs(args)? {
+        PythonRuns::Module(module, rest) => Some((module, rest)),
+        PythonRuns::Code => None,
+    }
+}
+
+/// Interpreters that take code on the command line, each with: its names, its short options
+/// that hold the code (`perl -e`), its short options that take a value in the same word or the
+/// next one (`ruby -r json`), its long options that hold the code, and its long options that
+/// take a value in the next word. Python is read by `python_runs`.
+const INTERPRETERS: &[(&[&str], &str, &str, &[&str], &[&str])] = &[
+    (
+        &["node", "nodejs"],
+        "ep",
+        "rC",
+        &["--eval", "--print"],
+        &["--require", "--import", "--loader", "--experimental-loader", "--conditions", "--env-file", "--input-type"],
+    ),
+    (
+        &["bun"],
+        "ep",
+        "rcdl",
+        &["--eval", "--print"],
+        &["--preload", "--require", "--import", "--cwd", "--config", "--env-file", "--define", "--loader"],
+    ),
+    (&["ruby"], "e", "rICEF", &[], &[]),
+    (&["perl"], "eE", "IMmF", &[], &[]),
+    (&["php"], "rBRE", "dcfzStF", &[], &[]),
+    (&["osascript"], "e", "ls", &[], &[]),
+];
+
+/// A program that runs code in its language: one of `INTERPRETERS`, Python or Deno.
+pub(crate) fn is_interpreter(prog: &str) -> bool {
+    is_python(prog) || prog == "deno" || INTERPRETERS.iter().any(|(names, ..)| names.contains(&prog))
+}
+
+/// What starts a command in awk code that holds no string and no pattern any more
+/// (`awk_code`): `system(…)`, and a `|` with something after it that is not the "or" `||`.
+static AWK_RUNS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\bsystem\s*\(|(?:^|[^|])\|\s*[^|\s]").unwrap());
+
+/// Does a word of an awk line start a command: `system(…)`, or a pipe to or from one
+/// (`print | "sh"`, `print | cmd`, `"date" | getline`, `|&`)? In awk code every single `|`
+/// is such a pipe. A `|` in a string (`" | "`, `FS="|"`) or in a pattern (`/a|b/`) is text,
+/// and `||` is "or": a program that only prints is a text filter.
+fn awk_starts_command(program: &str) -> bool {
+    AWK_RUNS.is_match(&awk_code(program))
+}
+
+/// An awk program without what its strings and patterns hold: each string is left as `""`,
+/// each pattern as `//`. Both end at the first `"` or `/` that no `\` comes before, which is
+/// where every awk ends them or earlier (gawk reads on inside `[…]`), so nothing that runs
+/// is taken out. A comment stays as it is written: a `#` may be in a pattern that this
+/// reading took for a division.
+fn awk_code(program: &str) -> String {
+    let mut code = String::with_capacity(program.len());
+    let mut chars = program.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '/' if c == '"' || awk_pattern_starts(&code) => {
+                while let Some(inside) = chars.next() {
+                    match inside {
+                        '\\' => drop(chars.next()),
+                        end if end == c => break,
+                        _ => {}
+                    }
+                }
+                code.extend([c, c]);
+            }
+            '#' => {
+                code.push(c);
+                code.extend(chars.by_ref().take_while(|x| *x != '\n'));
+                code.push('\n');
+            }
+            // A line that goes on in the next one.
+            '\\' if chars.peek() == Some(&'\n') => drop(chars.next()),
+            _ => code.push(c),
+        }
+    }
+    code
+}
+
+/// Does a `/` after this much awk code start a pattern (`$1 ~ /a|b/`), not a division? As awk
+/// reads it: where a value is expected, which is at the start, after an operator or one of
+/// `( , { } ;`, on a new line, and after a word like `print`. After `++` or `--` it divides
+/// (`i++ / 2`).
+fn awk_pattern_starts(code: &str) -> bool {
+    let before = code.trim_end_matches([' ', '\t']);
+    let Some(last) = before.chars().next_back() else { return true };
+    match last {
+        '+' | '-' => !before[..before.len() - 1].ends_with(last),
+        c if "\n(,{};!~&|=?:*%^<>".contains(c) => true,
+        _ => {
+            let word = before.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+            ["print", "printf", "return", "else", "do", "case", "in"].contains(&word)
+        }
+    }
+}
+
+/// Does the line give an interpreter code to run (`python -c …`, `node -e …`, `perl -pe …`,
+/// `deno eval …`, an awk program that starts a command)? What such code reads, writes or
+/// reaches is not on the command line as a word, so no path check sees it. Only the
+/// interpreter's own options count: after its script or subcommand the words belong to that
+/// script (`python manage.py -c x`, `bun install -p`).
+pub(crate) fn inline_code(prog: &str, args: &[String]) -> bool {
+    if is_python(prog) {
+        return matches!(python_runs(args), Some(PythonRuns::Code));
+    }
+    if prog == "deno" {
+        return first_non_flag(args) == Some("eval");
+    }
+    if matches!(prog, "awk" | "gawk" | "mawk" | "nawk") {
+        // A field separator and a variable's value are text, never code (`-F'|'`, `-v sep='|'`),
+        // in the next word or in the option's own. Every other word may be the program.
+        let text = |a: &str| ["-F", "-v", "--field-separator=", "--assign="].iter().any(|option| a.starts_with(option));
+        let mut words = args.iter().map(String::as_str);
+        while let Some(a) = words.next() {
+            if matches!(a, "-F" | "-v" | "--field-separator" | "--assign") {
+                words.next();
+            } else if !text(a) && awk_starts_command(a) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some(&(_, code, valued, long_code, long_valued)) = INTERPRETERS.iter().find(|(names, ..)| names.contains(&prog)) else { return false };
+    let mut i = 0;
+    while let Some(a) = args.get(i).map(String::as_str).filter(|a| a.starts_with('-') && *a != "-" && *a != "--") {
+        i += 1;
+        if a.starts_with("--") {
+            if long_code.contains(&a.split('=').next().unwrap_or(a)) {
+                return true;
+            }
+            i += usize::from(long_valued.contains(&a));
+            continue;
+        }
+        for (at, option) in a.char_indices().skip(1) {
+            if code.contains(option) {
+                return true;
+            }
+            if valued.contains(option) {
+                i += usize::from(a[at + option.len_utf8()..].is_empty());
+                break;
+            }
+        }
+    }
+    false
+}
+
 /// Inferred risk hints for an approval card: "outside worktree", "deletes files",
 /// "network", "git push", "sudo", "pipes to shell", `AGENT_SETTINGS`, `SECRETS`.
 pub fn risk_hints(command: &str, cwd: Option<&Path>, worktree: &Path) -> Vec<String> {
@@ -1524,7 +1740,9 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
             }
             continue;
         };
-        let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        // `python -m pip install x` is read as pip.
+        let (tool, tool_args) = python_module(a0, &argv[1..]).unwrap_or((a0, &argv[1..]));
+        let args: Vec<&str> = tool_args.iter().map(String::as_str).collect();
         let sub = args.iter().find(|a| !a.starts_with('-')).copied();
         if seg.piped_in && SHELLS.contains(&a0) {
             add("pipes to shell", hints);
@@ -1539,7 +1757,7 @@ fn hints_into(command: &str, cwd: &Path, worktree: &Path, depth: u8, hints: &mut
         {
             hints_into(script, &cur_dir, worktree, depth + 1, hints);
         }
-        match a0 {
+        match tool {
             "rm" | "rmdir" | "unlink" | "shred" | "trash" => add("deletes files", hints),
             "find" if args.contains(&"-delete") => add("deletes files", hints),
             "git" => match git_subcommand(&args) {
@@ -2197,6 +2415,59 @@ mod tests {
         assert_eq!(activity_label(ActivityKind::Execute, &t), "echo $(date)");
     }
 
+    /// `cmd >&file` sends stdout and stderr to the file (`>&2` copies a descriptor); `>|file`
+    /// and zsh's `>!file` write it too. The card names what such a file is.
+    #[test]
+    fn a_file_after_a_redirect_is_a_path_the_line_writes() {
+        let wt = Path::new("/w/tree");
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in [
+            "echo x >&/tmp/out.txt",
+            "echo x >& /tmp/out.txt",
+            "echo x >>&/tmp/out.txt",
+            "echo x 2>&/tmp/out.txt",
+            "echo x >|/tmp/out.txt",
+            "echo x >!/tmp/out.txt",
+            "echo x >&|/tmp/out.txt",
+            "echo x &>|/tmp/out.txt",
+            "echo x &>/tmp/out.txt",
+        ] {
+            assert_eq!(h(c), ["outside worktree"], "{c}");
+        }
+        for c in ["echo '{}' >&.claude/settings.local.json", "echo '{}' >!.mcp.json"] {
+            assert_eq!(h(c), [AGENT_SETTINGS], "{c}");
+        }
+        for c in ["make 2>&1", "make >&2", "make >&-", "make 3>&1-", "make 2>&1 | tail -5", "make 2>&1|tail -5", "make >&out.log", "make >|out.log"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        let read = |c: &str| segments(c).into_iter().map(|s| (s.argv.join(" "), s.redirects.join(" "))).collect::<Vec<_>>();
+        assert_eq!(read("make >&out.log all"), [("make all".to_string(), "out.log".to_string())]);
+        assert_eq!(read("make >&2file"), [("make".to_string(), "2file".to_string())]);
+        assert_eq!(read("make >&2 all"), [("make all".to_string(), String::new())]);
+        assert_eq!(read("make 2>&1|tail -5"), [("make".to_string(), String::new()), ("tail -5".to_string(), String::new())]);
+        assert_eq!(read("make >|out.log | tail -5"), [("make".to_string(), "out.log".to_string()), ("tail -5".to_string(), String::new())]);
+    }
+
+    /// `python -m pip` is pip, on the card too.
+    #[test]
+    fn hints_read_python_m_pip_as_pip() {
+        let wt = Path::new("/w/tree");
+        let h = |c: &str| risk_hints(c, Some(wt), wt);
+        for c in ["python -m pip install requests", "python3 -um pip install requests", "python3.12 -mpip install requests", "python -W ignore -m pip install x"] {
+            assert_eq!(h(c), ["network"], "{c}");
+        }
+        for c in ["python -m pytest -q", "python scripts/tool.py -m pip install", "python -c 'print(1)' -m pip install"] {
+            assert!(h(c).is_empty(), "{c}: {:?}", h(c));
+        }
+        let argv = |c: &str| c.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(python_module("python3", &argv("-m pip install x")), Some(("pip", &argv("install x")[..])));
+        assert_eq!(python_module("python", &argv("-Bmhttp.server 8000")), Some(("http.server", &argv("8000")[..])));
+        assert_eq!(python_module("python", &argv("-m")), None);
+        assert_eq!(python_module("python", &argv("-c code -m pip")), None);
+        assert_eq!(python_module("pythonic", &argv("-m pip")), None);
+        assert_eq!(python_module("node", &argv("-m pip")), None);
+    }
+
     #[test]
     fn labels() {
         use ActivityKind::*;
@@ -2234,5 +2505,59 @@ mod tests {
         assert_eq!(split_model_effort(Some("anthropic.claude-v1:0")), (Some("anthropic.claude-v1:0".into()), None));
         assert_eq!(split_model_effort(Some(":high")), (None, Some("high".into())));
         assert_eq!(split_model_effort(None), (None, None));
+    }
+
+    /// An awk program starts a command with `system(…)` or a pipe in its code. A `|` in a
+    /// string, a pattern, a field separator or a variable's value is text.
+    #[test]
+    fn awk_pipes_are_read_in_the_code_not_in_its_text() {
+        let awk = |args: &[&str]| inline_code("awk", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        for program in [
+            r#"BEGIN { system("id") }"#,
+            r#"{ print | "sh" }"#,
+            r#"{ print $1 | "sort -u" }"#,
+            r#"{ print | cmd }"#,
+            r#"{ print $1/2 | "sh" }"#,
+            r#"BEGIN { "date" | getline d; print d }"#,
+            r#"BEGIN { while ((cmd | getline line) > 0) print line }"#,
+            r#"BEGIN { print "x" |& "cat" }"#,
+            // A string or a pattern before the pipe does not hide it.
+            r#"{ print "a | b" | "sh" }"#,
+            r#"/a|b/ { print | "sh" }"#,
+            r#"/"/ { print | "sh" }"#,
+            r#"{ print /"/ | "sh" }"#,
+            r#"{ n = i++ / 2 | "sh"; m = 1 / 2 }"#,
+            "{ x = 1 # a \" in a comment\n print | \"sh\" }",
+            "{ x = a \\\n / b | \"sh\"; y = c / d }",
+        ] {
+            assert!(awk(&[program, "notes.txt"]), "{program}");
+        }
+        assert!(awk(&["-F", "|", r#"{ print | "sh" }"#]));
+        assert!(awk(&["-v", "n=1", "-e", r#"BEGIN { system("id") }"#]));
+        for args in [
+            &[r#"{print $1 " | " $2}"#, "a.csv"][..],
+            &["-F,", r#"{print $1 " | " $2}"#, "a.csv"],
+            &[r#"BEGIN{FS="|"} {print $2}"#, "t.md"],
+            &[r#"BEGIN{OFS="|"} {$1=$1; print}"#, "f"],
+            &[r#"{n=split($0,a,"|"); print a[2]}"#, "f"],
+            &[r#"{ printf "%s | %s\n", $1, $2 }"#],
+            &[r#"{ print "a \" | \" b" }"#],
+            &["/a|b/ {print}"],
+            &["$1 ~ /^(a|b)$/ && !/c|d/"],
+            &["{ if ($0 ~ /a|b/) print; else print /c|d/ }"],
+            &[r#"{ gsub(/\/|"/, ""); print }"#],
+            &[r#"$1 == "a" || "b" == $2"#],
+            &["{ print $1/2, $2/4 }"],
+            &["-F|", "{print $2}"],
+            &["-F", "|", "{print $2}"],
+            &["-v", "sep=|", "{print $1 sep $2}"],
+            &["-vsep=a|b", "{print $1 sep $2}"],
+            &["--assign=sep=a|b", "{print $1 sep $2}"],
+            &["{print $1 sep $2}", "sep=|", "f"],
+            &["-f", "report.awk", "data/a.csv"],
+        ] {
+            assert!(!awk(args), "{args:?}");
+        }
+        assert_eq!(awk_code(r#"$1 ~ /a|b/ { print "x | y", $2 / 2 }"#), r#"$1 ~ // { print "", $2 / 2 }"#);
     }
 }

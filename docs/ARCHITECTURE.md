@@ -294,7 +294,9 @@ hands the work to a team member or consultant at once).
 **Approval modes** (`orchestrator/approvals.rs`): balanced (rules decide the obvious, else ask you),
 strict (ask for everything), autonomous (allow what shows no risk; the rules read the command line,
 not what a script or program then does, so this is a deny-list and not a sandbox: §6 says which
-agents have an OS sandbox) and **Full access**
+agents have an OS sandbox; a tool of an MCP server that is neither Codly's own nor one of the
+Connections this run was given asks, so a Connection that is off lends its name to no server of the
+user's own setup or of the repo) and **Full access**
 (auto-approve everything, risky commands included, except the hard floors: questions, permission
 changes, changes to the agent's own CLI settings, writes by read-only agents and Codly's own data
 dir still ask; and so does a command that can lose work in the user's own checkout: a history
@@ -304,10 +306,13 @@ from an agent hired with Git isolation off or pointed there from a worktree by i
 
 **Saved rules** (`orchestrator/approval_rules.rs`): "Always allow in this repo" on an approval card
 saves a rule in Codly's store (table `approval_rule`; not in the repo, not in a worktree) that the
-broker follows for every agent of that repo. A rule is the exact command, or the first words of one
-plain command (`cargo test`): a longer line that chains, pipes or substitutes anything never matches
-a prefix, and neither does a second target (`make docs deploy`) or a form that reaches past the
-agent's own worktree and branch (`git checkout -B main`). A rule covers a package download into
+broker follows for every agent of that repo. A rule is the exact command, or the first words of a
+command (`cargo test`). A prefix matches that command alone on its line or with commands that only
+read (`cd web && cargo test 2>&1 | tail -5`); a line with a second command that does more, or one
+that substitutes anything, never matches a prefix, and neither does a second target
+(`make docs deploy`) or a form that reaches past the agent's own worktree and branch
+(`git checkout -B main`). A tool of an MCP server is saved by its full name, when the request shows
+no risk. A rule covers a package download into
 the project and a git command that changes the repository (the exact command also covers other
 network use); deletes, `git push`, `sudo`, a pipe into a shell, secrets, paths outside the
 worktree (an install for the whole machine too: `npm install -g`), a publish, a change to your own

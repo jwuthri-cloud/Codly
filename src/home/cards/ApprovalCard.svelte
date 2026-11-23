@@ -7,7 +7,8 @@
   accept it, or send it back with a note.
   The same command asked by several agents is one card (`twins`): one answer goes to all.
   "Always allow in this repo" saves a rule in Codly for every agent of the repo; the card
-  offers it only when the core says the request can be saved (never for what Codly always asks).
+  offers it only when the core says the request can be saved (never for what Codly always asks):
+  a command, or a tool of an MCP server by its name.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -125,7 +126,7 @@
     return store.decisions.some((d) => d.type === 'approval_policy' && (d.detail as { approval_id?: unknown } | null)?.approval_id === approval.id);
   });
   $effect(() => {
-    if (!pending || subject.kind !== 'command') return;
+    if (!pending || (subject.kind !== 'command' && subject.kind !== 'tool')) return;
     void brokerAsked;
     let stale = false;
     api.approvalRuleOffer(approval.id).then(
@@ -290,7 +291,7 @@
         <div class="always">
           <span class="a-l" data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in Settings → Safety.">Always allow in this repo, for every agent:</span>
           {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={() => saveRule('prefix')}>Commands that start with <code>{rulePrefix}</code></button>{/if}
-          {#if ruleExact}<button class="btn sm" disabled={busy} onclick={() => saveRule('exact')}>This exact command</button>{/if}
+          {#if ruleExact}<button class="btn sm" disabled={busy} onclick={() => saveRule('exact')}>{subject.kind === 'tool' ? 'This tool' : 'This exact command'}</button>{/if}
         </div>
       {/if}
     {/if}

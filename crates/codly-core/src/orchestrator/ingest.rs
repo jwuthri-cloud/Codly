@@ -733,7 +733,17 @@ impl Inner {
         let mode = approvals::with_trust(base, trusts(Rank::Senior));
         // Your project folder: where an agent hired with Git isolation off works, and where any agent can point a command.
         let checkout = ws.and_then(|w| self.store.workspace(w).ok().flatten()).map(|w| std::path::PathBuf::from(w.repo_path));
-        let pctx = PolicyCtx { mode, worktree: cwd.as_deref(), verify: &verify, read_only, edits: trusts(Rank::Junior), checkout: checkout.as_deref() };
+        // Your Connections that this run was given, by name: the rules ask about a tool of any other MCP server.
+        let own_mcp = crate::housekeeping::connections::given(&self.data("runs").join(&ctx.run_id).join("raw.ndjson"));
+        let pctx = PolicyCtx {
+            mode,
+            worktree: cwd.as_deref(),
+            verify: &verify,
+            read_only,
+            edits: trusts(Rank::Junior),
+            checkout: checkout.as_deref(),
+            own_mcp: &own_mcp,
+        };
         let verdict = match approvals::evaluate(approval, &pctx) {
             Verdict::Allow { choice, rule } if mode != base => {
                 Verdict::Allow { choice, rule: format!("{rule} (you trust it to work on its own)") }

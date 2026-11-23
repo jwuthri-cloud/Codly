@@ -5,10 +5,11 @@
  */
 export type ApprovalRuleOffer = { 
 /**
- * The command line itself.
+ * The command line itself, or the full name of an MCP server's tool.
  */
 exact: string | null, 
 /**
- * Its first words, when it is one plain command of a program that takes a subcommand.
+ * The first words of the one command on the line that does more than read, when its
+ * program takes a subcommand.
  */
 prefix: string | null, };

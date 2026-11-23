@@ -2,7 +2,8 @@
 import type { ApprovalRuleKind } from "./ApprovalRuleKind";
 
 /**
- * "Always allow in this repo": a command you told Codly not to ask about again, for every
- * agent of one repo. Kept in Codly's store (`orchestrator/approval_rules.rs`).
+ * "Always allow in this repo": a command, or a tool of an MCP server, you told Codly not to
+ * ask about again, for every agent of one repo. Kept in Codly's store
+ * (`orchestrator/approval_rules.rs`).
  */
 export type ApprovalRule = { id: string, workspace_id: string, kind: ApprovalRuleKind, command: string, created_at: number, };
