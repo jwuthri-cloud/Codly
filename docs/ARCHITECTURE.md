@@ -409,7 +409,9 @@ that are new there are named (the index does not search them).
   that the built-in list (`node_modules`, `.venv`, `venv`, root `.env` files) or the repo's
   `.worktreeinclude` (gitignore syntax) names, never a tracked file, and only a path that the
   worktree's own branch ignores too (`git check-ignore` there before each copy: the snapshot
-  is `git add -A`, and an ignore rule that is not committed is not in the worktree); a block
+  is `git add -A`, and an ignore rule that is not committed is not in the worktree; each copy
+  is also on a record in the worktree's git dir, and on a later branch that does not ignore
+  it, Codly's commit and its checkpoint leave it out: `Git::commit_work`, `left_out.rs`); a block
   of 10 ports in `CODLY_PORT_BASE` (setup script, verify commands, the agent); and the repo's
   `.codly/setup.sh`. That script is code from the repo: it is off until the user turns it on
   in Settings, which shows its text and what the risk rules see in it, and Codly runs only
@@ -533,6 +535,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       runs.rs ingest.rs                   agent runs; the one event pipeline
                       gate.rs rebrief.rs                  commit → verify → scope → review → merge queue; a worker's task
                                                           again after a context compaction
+                      left_out.rs                         every commit of an agent's work says what it did not commit
                       approvals.rs controls.rs ask_me.rs  approval policy, live agent controls, "ask me" cards
                       approval_rules.rs                   "always allow in this repo": saved approval rules
                       breaker.rs breaker_run.rs           circuit breaker: policy and enforcement

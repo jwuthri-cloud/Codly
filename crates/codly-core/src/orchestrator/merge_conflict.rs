@@ -428,7 +428,7 @@ impl Inner {
         detail[BRINGS_IN] = json!(target);
         let text = if files.is_empty() {
             let message = format!("codly: merge {target} into {branch}");
-            if let Some(c) = self.git.commit_all(&wt, &message).await? {
+            if let Some(c) = self.commit_noted(ws_id, None, None, &branch, &wt, &message).await? {
                 self.emit(ws_id, row(None, None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
             }
             self.decide_by(ws_id, None, "merge", "human", format!("you had {target} brought into {branch}; it merged without a conflict"), detail)?;
@@ -576,7 +576,7 @@ impl Inner {
             self.check_resolved(&agent, &wt).await?;
             // What its last turn left uncommitted is the agent's side of the merge.
             let message = format!("codly(solo/{}): before merging {target}", agent.name);
-            if let Some(c) = self.git.commit_all(&wt, &message).await? {
+            if let Some(c) = self.commit_noted(ws_id, Some(agent_id), None, &agent.name, &wt, &message).await? {
                 self.emit(ws_id, row(Some(agent_id), None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
             }
             if self.git.is_ancestor(&wt, &theirs, "HEAD").await? {
@@ -585,7 +585,7 @@ impl Inner {
             let files = self.git.merge_for_resolution(&wt, &theirs).await?;
             if files.is_empty() {
                 let message = format!("codly(solo/{}): merge {target}", agent.name);
-                if let Some(c) = self.git.commit_all(&wt, &message).await? {
+                if let Some(c) = self.commit_noted(ws_id, Some(agent_id), None, &agent.name, &wt, &message).await? {
                     self.emit(ws_id, row(Some(agent_id), None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
                 }
             }

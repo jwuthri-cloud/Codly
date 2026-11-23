@@ -507,7 +507,7 @@ mod tests {
         let branch = format!("codly/{short}/integration");
         inner.git.worktree_add(repo, &wt, &branch, "main").await.unwrap();
         std::fs::write(wt.join(format!("{short}.txt")), "work\n").unwrap();
-        inner.git.commit_all(&wt, "codly(t1): work").await.unwrap().unwrap();
+        inner.git.commit_work(&wt, "codly(t1): work").await.unwrap().commit.unwrap();
         let plan = Plan {
             id: new_id(),
             workspace_id: ws.id.clone(),

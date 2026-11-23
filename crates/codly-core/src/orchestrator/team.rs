@@ -286,7 +286,7 @@ impl Inner {
                     b
                 }
             };
-            if let Some(c) = self.git.commit_all(&wt, &format!("codly(wip): {} leftovers before {key}", agent.name)).await? {
+            if let Some(c) = self.commit_noted(Some(&ws.id), Some(&agent.id), None, &agent.name, &wt, &format!("codly(wip): {} leftovers before {key}", agent.name)).await? {
                 note = Some(format!("Codly committed your uncommitted leftovers on {on} ({}).", &c.sha[..c.sha.len().min(10)]));
             }
         }
@@ -300,7 +300,7 @@ impl Inner {
                 bail!("{branch} is checked out in {}; switch that checkout to another branch", w.path.display());
             }
             self.git.check_worktree(&repo, &w.path).await?;
-            self.git.commit_all(&w.path, &format!("codly(wip): leftovers before {} takes {key}", agent.name)).await?;
+            self.commit_noted(Some(&ws.id), Some(&agent.id), None, key, &w.path, &format!("codly(wip): leftovers before {} takes {key}", agent.name)).await?;
             self.git.detach(&w.path).await?;
         }
         self.git.switch(&wt, branch, &start).await?;

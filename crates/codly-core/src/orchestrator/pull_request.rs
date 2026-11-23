@@ -713,7 +713,7 @@ impl Inner {
                 self.git.check_worktree(&head.repo, wt).await?;
                 self.check_resolved(agent, wt).await?;
                 let message = format!("codly(solo/{}): before pull request", agent.name);
-                if let Some(c) = self.git.commit_all(wt, &message).await? {
+                if let Some(c) = self.commit_noted(ws_id, Some(&agent.id), None, &agent.name, wt, &message).await? {
                     self.emit(ws_id, row(Some(&agent.id), None, None, EventKind::Committed { sha: c.sha, files: c.files, message }))?;
                 }
             }
@@ -1073,7 +1073,7 @@ esac
             let wt = self.bin.with_file_name("integration");
             i.git.worktree_add(&self.repo, &wt, branch, &self.base).await.unwrap();
             std::fs::write(wt.join("hello.txt"), "hello\n").unwrap();
-            i.git.commit_all(&wt, "codly(t1): hello").await.unwrap().unwrap();
+            i.git.commit_work(&wt, "codly(t1): hello").await.unwrap().commit.unwrap();
             let plan: Plan = serde_json::from_value(json!({ "id": "plan-1", "workspace_id": ws.id, "thread": "lead", "request": "Please add a hello file",
                 "summary": "Add a hello file", "assumptions": [], "open_questions": [], "status": "done", "base_commit": self.base, "base_branch": "main",
                 "integration_branch": branch, "integration_worktree": wt, "created_at": now_ms() - 1000, "updated_at": now_ms() }))
@@ -1289,7 +1289,7 @@ esac
         // the merged one on record.
         let wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
         std::fs::write(wt.join("more.txt"), "more\n").unwrap();
-        b.core.inner.git.commit_all(&wt, "codly(t3): more").await.unwrap().unwrap();
+        b.core.inner.git.commit_work(&wt, "codly(t3): more").await.unwrap().commit.unwrap();
         let next = b.core.create_pull_request(&source, &confirm, "Add more", "").await.unwrap();
         assert_eq!(next.state, PrState::Open);
         assert!(next.created_at >= pr.created_at);
@@ -1340,7 +1340,7 @@ esac
         }
         let (agent, wt) = b.solo("Ada").await;
         std::fs::write(wt.join("notes.txt"), "from the agent\n").unwrap();
-        b.core.inner.git.commit_all(&wt, "codly(solo/Ada): notes").await.unwrap().unwrap();
+        b.core.inner.git.commit_work(&wt, "codly(solo/Ada): notes").await.unwrap().commit.unwrap();
         let source = PrSource::Agent(agent.id);
 
         // The checkout is on develop, where the agent started: that is the base, and the

@@ -4,7 +4,10 @@
 //! - copy: the checkout's git-ignored files and folders that the built-in list or the repo's
 //!   `.worktreeinclude` names (gitignore syntax). A path is copied only when git ignores it
 //!   in your checkout and on the worktree's branch too (an ignore rule you did not commit is
-//!   not there), so `git add -A` in the new worktree does not take it into a Codly commit;
+//!   not there), so `git add -A` in the new worktree does not take it into a Codly commit.
+//!   The worktree can later be on a branch that does not ignore it (a team member's goes from
+//!   task to task, an agent edits `.gitignore`): each copy is on the worktree's record
+//!   (`Git::note_copied`), and Codly's commit leaves out what is on it and says so;
 //! - ports: a block of `PORT_BLOCK` ports of its own, in `CODLY_PORT_BASE`, for the setup
 //!   script, the verify commands and the agent;
 //! - setup: the repo's `.codly/setup.sh`, read from your checkout. A script from a repo is
@@ -409,7 +412,8 @@ impl Inner {
     /// worktree has it). Err = not copied, and why: also a path the worktree's branch does
     /// not ignore, which the next `git add -A` there would take into a commit. The copy is
     /// made beside the worktrees and moved in when complete, so a copy that fails or runs out
-    /// of time leaves nothing half-made in the worktree.
+    /// of time leaves nothing half-made in the worktree. It is on the worktree's record
+    /// before it is there: no copy without a record.
     async fn seed_path(&self, repo: &Path, wt: &Path, rel: &str) -> Result<bool> {
         let (src, dst) = (repo.join(rel), wt.join(rel));
         let Ok(meta) = std::fs::symlink_metadata(&src) else { return Ok(false) };
@@ -419,6 +423,7 @@ impl Inner {
         if !self.git.is_ignored(wt, rel, meta.is_dir()).await? {
             bail!("git does not ignore it on the worktree's branch, so a commit there would take it (commit the ignore rule first)");
         }
+        self.git.note_copied(wt, rel).await?;
         let stage = self.data("worktrees").join(".copying").join(new_id());
         tokio::fs::create_dir_all(&stage).await.context("create a folder for the copy")?;
         let moved = async {
@@ -696,6 +701,35 @@ mod tests {
         let problem = said.iter().find(|s| s.starts_with("could not copy")).unwrap_or_else(|| panic!("{said:?}"));
         assert!(problem.contains("config/local.json: git does not ignore it on the worktree's branch"), "{problem}");
         assert!(problem.contains("keys/dev.pem: git does not ignore it on the worktree's branch"), "{problem}");
+        core.shutdown().await;
+    }
+
+    /// A worktree outlives the branch it was made on, and a branch can lose an ignore rule.
+    /// What Codly copied in then stays out of Codly's commit, and the record says so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_copy_stays_out_of_the_commit_on_a_branch_that_does_not_ignore_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = temp_repo(dir.path(), "node_modules/\n.env\n/secrets/\n");
+        write(&repo.join("node_modules/dep/index.js"), "module.exports = 1;\n");
+        write(&repo.join(".env"), "API_URL=http://localhost\n");
+        write(&repo.join("secrets/dev.env"), "TOKEN=dev\n");
+        write(&repo.join(INCLUDE_FILE), "secrets/dev.env\n");
+        let (core, ws) = start(dir.path(), &repo).await;
+        let wt = new_worktree(&core, &ws, "t1").await;
+        core.inner.prepare_worktree(&ws, &wt, None, None).await.unwrap();
+        assert!(wt.join(".env").exists() && wt.join("node_modules/dep/index.js").exists() && wt.join("secrets/dev.env").exists());
+        assert_eq!(sh(&wt, &["status", "--porcelain"]), "");
+
+        // The worktree's next branch has older rules: git no longer hides the copies there.
+        write(&wt.join(".gitignore"), "");
+        write(&wt.join("work.txt"), "work\n");
+        let commit = core.inner.commit_noted(Some(&ws.id), None, None, "t1", &wt, "codly(t1): work").await.unwrap().unwrap();
+        assert_eq!(commit.files, [".gitignore", "work.txt"], "the work, and no copy");
+        assert_eq!(sh(&wt, &["status", "--porcelain", "-uall"]), "?? .env\n?? node_modules/dep/index.js\n?? secrets/dev.env", "the copies stay, untracked");
+        let said = decisions(&core, &ws);
+        let left = "t1: Codly did not commit .env (copied in by Codly), node_modules/ (copied in by Codly), secrets/dev.env (copied in by Codly).";
+        let record = said.iter().find(|s| s.starts_with(left)).unwrap_or_else(|| panic!("{said:?}"));
+        assert!(record.contains("it belongs in .gitignore") && !record.contains("25 MB"), "{record}");
         core.shutdown().await;
     }
 

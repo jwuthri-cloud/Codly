@@ -836,6 +836,51 @@ async fn a_huge_new_folder_is_left_out_of_the_commit_and_the_worker_is_asked_onc
     core.shutdown().await;
 }
 
+/// The dependency folder appears after the worker's turn, and you re-run the task's checks from
+/// its card. That pass has no worker turn to ask in: the task's record says what Codly's commit
+/// left out, the Lead hears it, and the task is merged without the folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_your_own_pass_leaves_out_goes_to_the_lead() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns = Turns::default();
+    // Harmless here, but `rm` is a risk for the approval rules: the task waits for you.
+    let risky = "rm -f stale.txt && grep -q hello hello.txt";
+    let plan = json!({ "summary": "Add a hello file", "tasks": [task("t1", "hello.txt", risky)] });
+    let spawner = FakeSpawner { lead: lead_with(plan), worker: hello_worker(), turns: turns.clone() };
+    let core = start(dir.path(), spawner, Settings { lead_followups: true, ..auto() }).await;
+
+    let t = wait_task(&core, "t1", TaskStatus::Blocked).await;
+    assert!(!decisions(&events(&core).await).iter().any(|d| d.1.contains("did not commit")), "nothing was left out so far");
+    let deps = PathBuf::from(t.worktree.clone().unwrap()).join("node_modules");
+    for i in 0..=codly_core::git::MAX_NEW_FOLDER_FILES {
+        let sub = deps.join(format!("m{}", i % 40));
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(format!("{i}.js")), "x").unwrap();
+    }
+
+    assert!(core.recheck_task(&t.id, vec![risky.into()]).await.unwrap().is_empty());
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_by_key(&core, "t1").await.unwrap().status, TaskStatus::Done);
+    let all = events(&core).await;
+    let said: Vec<_> = decisions(&all).into_iter().filter(|d| d.1.starts_with("t1: Codly did not commit")).collect();
+    assert_eq!(said.len(), 1, "said once in the task: {:?}", decisions(&all));
+    assert_eq!(said[0].2["left_out"], json!(["node_modules/"]));
+    assert_eq!(worker_prompts(&turns).len(), 1, "your own pass asks no worker");
+    let heard = wait_for("the Lead to hear it", 20, async || {
+        let lead: Vec<String> = turns.lock().unwrap().iter().filter(|t| t.0 == Role::Lead && t.2.contains("Codly did not commit")).map(|t| t.2.clone()).collect();
+        (!lead.is_empty()).then_some(lead)
+    })
+    .await;
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert!(heard[0].contains("Task t1 \"Create hello.txt\": Codly did not commit 1 new path(s)") && heard[0].contains("goes on without them"), "{}", heard[0]);
+    assert!(heard[0].contains("node_modules/ (2001 new files)"), "{}", heard[0]);
+    assert_eq!(verified(&all), [(risky.to_string(), true)], "the checks ran, and the pass went on");
+    let branch = core.snapshot().await.unwrap().plans.remove(0).integration_branch.unwrap();
+    let merged = String::from_utf8(git(&dir.path().join("repo"), &["ls-tree", "-r", "--name-only", &branch]).stdout).unwrap();
+    assert!(merged.contains("hello.txt") && !merged.contains("node_modules"), "{merged}");
+    core.shutdown().await;
+}
+
 /// The reviewer approves, the first time only when the test ends that review (`end`); every
 /// other agent is `worker`.
 fn with_held_review(end: Arc<tokio::sync::Notify>, worker: Behavior) -> Behavior {
