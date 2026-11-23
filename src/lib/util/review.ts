@@ -17,7 +17,7 @@ export const FILE_PLACE = 'file';
 export const placeId = (a: Pick<Anchor, 'line' | 'side'>): string => (a.line == null ? FILE_PLACE : `${a.side}:${a.line}`);
 /** One comment per place as you saw it: a line that reads differently by now is another place,
  *  so a new comment there does not replace the one you wrote on the old line. */
-const sameSpot = (a: Anchor, b: Anchor) => a.path === b.path && placeId(a) === placeId(b) && a.quote === b.quote;
+export const sameSpot = (a: Anchor, b: Anchor) => a.path === b.path && placeId(a) === placeId(b) && a.quote === b.quote;
 
 export const fileAnchor = (path: string): Anchor => ({ path, line: null, side: null, quote: null });
 

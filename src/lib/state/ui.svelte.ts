@@ -42,6 +42,9 @@ export const isRequestThread = (thread: string | null | undefined): thread is st
 export const CLOSED_LIST = 'closed:';
 export const isClosedThread = (thread: string): boolean => thread.startsWith(CLOSED_LIST);
 
+/** A request you opened that has no message yet. `kept`: its composer holds text or files you did not send. */
+type DraftRequest = { thread: string; ts: number; kept?: boolean };
+
 /** A short id for a new request thread ("lead:" + shortId()). */
 export function shortId(): string {
   const b = new Uint8Array(6);
@@ -116,7 +119,11 @@ class Ui {
   /** The request you are on (the thread a 1:1 chat returns to). */
   request = $state('lead');
   /** Requests you opened (⌘N) that have no message yet: they show as tabs until you leave them empty. */
-  draftRequests = $state<{ thread: string; ts: number }[]>([]);
+  draftRequests = $state<DraftRequest[]>([]);
+  /** Where you were in each office you left in this session: the request you were on, and its draft requests that hold text. */
+  private left = new Map<string, { request: string; drafts: DraftRequest[] }>();
+  /** Between `leaveOffice` and `enterOffice`: no office's requests are on screen. */
+  private between = false;
   /** Requests you just closed, per office, while Undo is still on offer: not tabs any more, not closed yet. */
   closingRequests = $state<{ office: string | null; thread: string }[]>([]);
   /** Bumped when the core has closed a request: the closed requests' list is read again. */
@@ -167,7 +174,7 @@ class Ui {
   });
 
   /** Composer draft injected by other surfaces (palette "Ask the Lead…", file mentions). */
-  composerSeed = $state<{ thread: string; text: string; keep: boolean; nonce: number } | null>(null);
+  composerSeed = $state<{ thread: string; text: string; keep: boolean; replaces: string | null; nonce: number } | null>(null);
 
   systemDark = $state(mq('(prefers-color-scheme: dark)')?.matches ?? true);
   reducedMotion = $state(mq('(prefers-reduced-motion: reduce)')?.matches ?? false);
@@ -251,8 +258,9 @@ class Ui {
 
   /** Switch to a request thread (its Lead, its plan, its approvals). Empty drafts you leave are dropped. */
   openRequest(thread: string) {
-    // A draft you leave either has a message by now (the chat list carries it) or is dropped.
-    this.draftRequests = this.draftRequests.filter((d) => d.thread === thread);
+    // A draft you leave has a message by now (the chat list carries it), or holds text you did
+    // not send (it stays a tab until you send or close it), or is dropped.
+    this.draftRequests = this.draftRequests.filter((d) => d.thread === thread || d.kept);
     this.request = thread;
     this.thread = thread;
     this.go('home');
@@ -265,6 +273,34 @@ class Ui {
     this.draftRequests = [...this.draftRequests, { thread, ts: wallNow() }];
     this.openRequest(thread);
     this.composerFocus++;
+  }
+
+  /** The composer of a draft request holds text or files (`on`), or none any more: one that does stays a tab when you leave it. */
+  holdDraft(thread: string, on: boolean) {
+    if (this.draftRequests.some((d) => d.thread === thread && !!d.kept !== on)) this.draftRequests = this.draftRequests.map((d) => (d.thread === thread ? { ...d, kept: on } : d));
+  }
+
+  /**
+   * Another office is about to show (`office`: the one on screen, null when none was open).
+   * Where you were is remembered now, while the tabs and the composer are still this office's:
+   * the request you were on, and the draft requests that hold text. A switch that overtakes
+   * another one has nothing to add: the office in between never showed its requests.
+   */
+  leaveOffice(office: string | null) {
+    if (this.between) return;
+    this.between = true;
+    if (office) this.left.set(office, { request: this.request, drafts: this.draftRequests.filter((d) => d.kept) });
+    this.draftRequests = [];
+  }
+
+  /** An office's requests are on screen: its drafts that hold text are tabs again. Returns the
+   *  request you were on when you left it (null: you were not there in this session). */
+  enterOffice(office: string): string | null {
+    this.between = false;
+    const was = this.left.get(office);
+    this.left.delete(office);
+    this.draftRequests = was?.drafts ?? [];
+    return was?.request ?? null;
   }
 
   openDiff(target: DiffTarget) {
@@ -315,11 +351,14 @@ class Ui {
     if (!this.keptPlans.includes(id)) this.keptPlans = [...this.keptPlans, id];
   }
 
-  /** `keep`: a draft being typed there is not replaced (the composer says so). */
-  seedComposer(thread: string, text: string, keep = false) {
+  /** `keep`: a draft being typed there is not replaced (the composer says so). `replaces`: the
+   *  text an earlier seed put there, which this one stands in for (`seedDraft`). */
+  seedComposer(thread: string, text: string, keep = false, replaces: string | null = null) {
     if (isRequestThread(thread)) this.request = thread;
     this.thread = thread;
-    this.composerSeed = { thread, text, keep, nonce: Math.random() };
+    this.composerSeed = { thread, text, keep, replaces, nonce: Math.random() };
+    // A draft request holds this text from now on, also before its composer is on screen.
+    if (text.trim()) this.holdDraft(thread, true);
     this.go('home');
     if (this.mode === 'office') this.mode = 'blend';
   }

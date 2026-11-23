@@ -6,15 +6,16 @@
   sit under Merged, with their tasks.
   It is also where you review: comment on a line or a file, tick files as viewed, open one in
   the editor, and Send back gives all your comments to the agent that did the work (a new
-  request, for work that is merged or finished). A comment on a file that left the diff since
-  stays in the bar above Send back, where you can read and remove it.
+  request, for work that is merged or finished: the comments stay here until you send its
+  message). A comment on a file that left the diff since stays in the bar above Send back,
+  where you can read and remove it.
 -->
 <script lang="ts">
   import { ide } from '../../ide/ide.svelte';
   import { api } from '../../lib/api';
   import type { Agent } from '../../lib/gen/Agent';
   import type { Task } from '../../lib/gen/Task';
-  import { mergePlan, sendBack } from '../../lib/state/actions';
+  import { mergePlan, sendBack, waitingRequest } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
   import { review, reviewKey } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
@@ -177,6 +178,8 @@
   // A task that is not done takes the comments itself; merged or finished work gets a new request.
   const toWorker = $derived(!!targetTask && targetTask.status !== 'done');
   const workerName = $derived((targetTask?.assignee && store.agentMap.get(targetTask.assignee)?.name) || 'its worker');
+  /** Finished work whose comments are in a new request already, not sent yet. */
+  const waiting = $derived(!toWorker && !!waitingRequest(key));
   let sending = $state(false);
   async function send() {
     if (!target || sending) return;
@@ -316,7 +319,7 @@
             </ul>
           {/if}
           <div class="r-row">
-            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {toWorker ? `Send back gives them to ${workerName}; Codly checks the work again after the changes.` : 'This work is finished: Send back opens a new request with your comments, ready to send.'}</p>
+            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {toWorker ? `Send back gives them to ${workerName}; Codly checks the work again after the changes.` : waiting ? 'They are in a new request, ready to send, and stay here until you send its message. Send back opens that request.' : 'This work is finished: Send back opens a new request with your comments, ready to send.'}</p>
             {#if discarding}
               <button class="btn sm danger" onclick={() => review.clear(key)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
               <button class="btn sm ghost" onclick={() => (discarding = false)}>Keep</button>

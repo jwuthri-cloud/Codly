@@ -58,6 +58,9 @@ export async function openWorkspace(path?: string) {
   await flushClosing();
   const ws = await attempt('open the repository', () => api.openWorkspace(repo), 'Pick the folder that contains .git.');
   if (!ws) return;
+  // Requests belong to a repository. Where you were in this one is remembered before the
+  // office changes: from here on the tabs and the composer are the next one's.
+  ui.leaveOffice(store.workspace?.id ?? null);
   store.setWorkspace(ws);
   diffstats.reset();
   // A workspace switch is a reconnect: take a fresh snapshot for the new repo.
@@ -68,10 +71,11 @@ export async function openWorkspace(path?: string) {
   if (memories) store.setMemories(memories);
   if (triples) store.setTriples(triples);
   ui.selection = null;
-  // Requests belong to a repository: start on its first one.
-  ui.draftRequests = [];
   ui.planId = null;
-  ui.openRequest('lead');
+  // You land on the request you last had open here, when it is still one; else on the first.
+  const last = ui.enterOffice(ws.id);
+  const list = requests.list;
+  ui.openRequest((list.find((r) => r.thread === last) ?? list[0])?.thread ?? 'lead');
 }
 
 export async function updateSettings(patch: Partial<Settings>) {
@@ -141,6 +145,9 @@ export function sendChat(thread: string, text: string): boolean {
   const t = text.trim();
   if (!t) return false;
   const id = store.queueOutgoing(thread, t, wallNow());
+  // Review comments that waited in this request's composer and are in this message are sent
+  // now: they leave their diff.
+  review.sent(store.workspace?.id ?? null, thread, t);
   void deliver(id, thread, t);
   return true;
 }
@@ -202,12 +209,14 @@ export async function finishPlan(planId: string) {
 export async function closeRequest(thread: string): Promise<boolean> {
   const list = requests.list;
   const i = list.findIndex((r) => r.thread === thread);
+  const ws = store.workspace?.id ?? null;
   const ok = await attempt('close the request', async () => {
     await api.closeThread(thread);
     return true;
   });
   if (!ok) return false;
   ui.draftRequests = ui.draftRequests.filter((d) => d.thread !== thread);
+  review.unhand(ws, thread); // review comments it held and did not send stay on their diff
   if (ui.request === thread) ui.openRequest((list[i + 1] ?? list[i - 1])?.thread ?? 'lead');
   await store.resync(); // its messages moved out of the thread without events
   return true;
@@ -364,12 +373,22 @@ export async function acceptTask(taskId: string) {
   if (t && store.isOpen(ws)) store.upsertTask(t);
 }
 
+/** The request whose composer holds a diff's comments since Send back (`reviewKey`), while it is still a tab. */
+export function waitingRequest(key: string): string | null {
+  const to = review.handedTo(key);
+  if (!to || !store.isOpen(to.office) || !requests.get(to.thread)) return null;
+  // A new request whose composer was emptied since holds nothing: the comments are not there.
+  return ui.draftRequests.some((d) => d.thread === to.thread && !d.kept) ? null : to.thread;
+}
+
 /**
  * Send back: every comment you wrote on a diff, as one message (file, line, the quoted line, the
  * comment). A task that is not done gets them through the core: its worker reads them and Codly
  * checks the work again. Merged or finished work (a done task, a whole plan) opens a new request
- * with the comments ready to send. `paths`: the diff's files, in order. True: the comments left
- * the diff; false: they stay on it (nothing to send, or the core refused and a toast says why).
+ * with the comments ready to send: they stay on the diff until you send that message, and Send
+ * back again goes to the same request (with the comments as they are now). `paths`: the diff's
+ * files, in order. True: the comments went to the worker, or are in a request's composer; false:
+ * nothing happened (nothing to send, or the core refused and a toast says why).
  */
 export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, paths: string[]): Promise<boolean> {
   const key = reviewKey(target);
@@ -388,9 +407,15 @@ export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, pa
     toast({ kind: 'success', title: `${t.key} sent back to ${who}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
     return true;
   }
-  ui.newRequest();
-  ui.seedComposer(ui.request, followUpRequest(task, plan, list, paths));
-  review.clear(key);
+  const text = followUpRequest(task, plan, list, paths);
+  const waiting = waitingRequest(key);
+  const was = review.handedTo(key)?.text ?? null;
+  if (!waiting) {
+    ui.newRequest();
+    ui.seedComposer(ui.request, text);
+  } else if (was === text) ui.openRequest(waiting);
+  else ui.seedComposer(waiting, text, false, was);
+  review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text, comments: list });
   return true;
 }
 

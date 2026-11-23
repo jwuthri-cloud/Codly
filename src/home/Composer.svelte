@@ -9,7 +9,7 @@
   and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them.
   Esc on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
   draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
-  message does not replace it.
+  message does not replace it. A new request that holds a draft stays a tab when you leave it.
 -->
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
@@ -111,6 +111,20 @@
       });
     }
   });
+
+  // A new request with something in its composer stays a tab when you open another one.
+  $effect(() => {
+    const here = thread;
+    const holds = !!text.trim() || files.length > 0;
+    untrack(() => ui.holdDraft(here, holds));
+  });
+
+  /** The line was emptied by a pick that may leave this conversation in the same moment (/new,
+   *  "@Ada" at the start). The effect above then runs for the next conversation only, so a new
+   *  request is told now that it holds no text: left empty, it is dropped, not kept as a tab. */
+  function emptied() {
+    ui.holdDraft(thread, files.length > 0);
+  }
 
   $effect(() => {
     if (ui.composerFocus) tick().then(() => ta?.focus());
@@ -241,6 +255,7 @@
       // The line was only the action's name: it runs, and nothing is sent.
       mention = null;
       text = '';
+      emptied();
       tick().then(resize);
       o.run();
       return;
@@ -250,6 +265,7 @@
       const rest = text.slice(end).trimStart();
       mention = null;
       text = '';
+      emptied();
       ui.openThread(store.threadOf(o.agentId));
       tick().then(() => {
         text = rest;
