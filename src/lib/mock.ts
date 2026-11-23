@@ -629,7 +629,7 @@ export class MockTransport implements Transport {
       case 'close_office':
         return demoCloseOffice(sim, String(a.workspaceId), this.rest());
       case 'set_agent_model':
-        return null;
+        return this.ctl.setModel(String(a.agentId), (a.model as string | null) ?? null);
       case 'create_task':
         return story.createTask(String(a.title), String(a.goal ?? ''));
       case 'move_task':

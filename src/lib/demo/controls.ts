@@ -152,6 +152,20 @@ export class MockControls {
     return this.sim.patchAgent(id, { permission_mode: mode });
   }
 
+  /** A 1:1 agent's model, as the core answers it (`set_agent_model`): only a 1:1 agent, the same
+   *  model is no change, an agent on a task or in a turn refuses (a live Claude session switches
+   *  in place, so it may be mid-turn), otherwise the agent comes back with the new model. */
+  setModel(id: string, model: string | null): Agent {
+    const a = this.sim.agents.get(id);
+    if (!a) throw new Error('Unknown agent');
+    if (a.role !== 'solo') throw new Error("only a 1:1 agent's model can be changed");
+    if ((a.model ?? null) === model) return a;
+    if (a.task_id) throw new Error(`${a.name} is on a task: its model can change when the task is done`);
+    if (a.provider !== 'claude' && this.sim.actor(id).inTurn) throw new Error(`${a.name} is still working: stop its turn first`);
+    this.note(id, `${a.name} now runs on ${model ?? 'its CLI’s default model'}`);
+    return this.sim.patchAgent(id, { model });
+  }
+
   /** "Compact now", as in the core: a Codex agent between turns and off a task, a Claude agent
    *  between turns (the demo agent's context shrinks to a quarter). */
   compact(id: string): null {
