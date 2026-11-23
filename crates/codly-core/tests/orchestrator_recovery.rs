@@ -698,15 +698,22 @@ async fn after_a_restart_a_task_in_its_checks_is_checked_again_without_a_worker_
             created_at: now_ms(),
         };
         store.upsert_workspace(&ws).unwrap();
+        // "Resume work when Codly opens" is on Always: the work goes on with no question.
+        store.save_settings(&Settings { resume_on_launch: ResumeOnLaunch::Always, ..Default::default() }).unwrap();
         (seed_task_in_checks(&store, &ws, &data, "a1", true), seed_task_in_checks(&store, &ws, &data, "b1", false))
     };
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (starts, script) = works();
     let core = start_core(dir.path(), Fake { seen: seen.clone(), starts, script, plan: json!({}) }).await;
+    assert_eq!(core.resume_offer(), None, "nothing waits for a Resume");
     for (task_id, _) in [&over, &mid] {
         let task = task_ended(&core, task_id).await;
         assert_eq!(task.status, TaskStatus::Done, "{}: {:?}", task.key, task.status_reason);
     }
+    // Each task's history says that it was resumed, and how.
+    let mut resumed: Vec<String> = decisions(&core, "retry").await.into_iter().filter(|d| d.starts_with("Resumed after restart")).collect();
+    resumed.sort();
+    assert_eq!(resumed, ["Resumed after restart: Codly checks its work again", "Resumed after restart: its worker goes on where it stopped"]);
     // The first task never went back to a worker: Running (its gate) and on to Done.
     let went = statuses(&core, &over.0).await;
     assert!(!went.contains(&TaskStatus::Ready), "{went:?}");

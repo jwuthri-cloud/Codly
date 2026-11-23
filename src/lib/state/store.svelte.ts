@@ -90,6 +90,7 @@ export const DEFAULT_SETTINGS: Settings = {
   confirm_quit: true,
   claude_sandbox: false,
   claude_shell_auth: false,
+  resume_on_launch: 'ask',
   world_ambient: false,
   theme: 'system',
   team: [],

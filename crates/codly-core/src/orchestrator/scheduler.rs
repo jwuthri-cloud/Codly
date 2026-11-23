@@ -42,6 +42,9 @@ pub struct SchedInput<'a> {
     /// The agents of `busy` that are in your terminal (takeover.rs): a task for one of them
     /// waits until you give it back, and says so.
     pub in_terminal: &'a HashSet<Id>,
+    /// Blocked tasks whose question to you is still open (`Inner::tasks_asking`): each keeps
+    /// its write-scope lease, also when its worker's process is gone (a restart of Codly).
+    pub asking: &'a HashSet<Id>,
 }
 
 /// Park an account once this fraction of one of its usage windows is spent (C17).
@@ -126,9 +129,12 @@ pub fn is_active(s: TaskStatus) -> bool {
 
 /// A blocked task whose worker (`assignee`) is still live on it keeps its write-scope lease:
 /// the worker asked you something, and no other task may change its files while it waits.
-/// It holds no worker slot: nobody works on it until you answer.
-pub fn held(t: &Task, assignee: Option<&Agent>, busy: &HashSet<Id>) -> bool {
-    t.status == TaskStatus::Blocked && assignee.is_some_and(|a| busy.contains(&a.id) && a.task_id.as_deref() == Some(t.id.as_str()))
+/// So does one whose question is still open (`asking`) after its worker's process is gone: a
+/// restart of Codly does not hand its files to another task. It holds no worker slot: nobody
+/// works on it until you answer.
+pub fn held(t: &Task, assignee: Option<&Agent>, busy: &HashSet<Id>, asking: &HashSet<Id>) -> bool {
+    t.status == TaskStatus::Blocked
+        && (asking.contains(&t.id) || assignee.is_some_and(|a| busy.contains(&a.id) && a.task_id.as_deref() == Some(t.id.as_str())))
 }
 
 /// Installed and not known to be signed out (`logged_in: None` = no cheap status check).
@@ -205,7 +211,7 @@ pub fn schedule(input: &SchedInput) -> Vec<Action> {
     let worker = |t: &Task| t.assignee.as_deref().and_then(|id| agent_by_id.get(id)).copied();
     // Tasks that wait for your answer (`held`): a lease and a busy worker, but no slot.
     let mut asked: HashSet<&str> = HashSet::new();
-    for t in input.tasks.iter().filter(|t| is_active(t.status) || held(t, worker(t), input.busy)) {
+    for t in input.tasks.iter().filter(|t| is_active(t.status) || held(t, worker(t), input.busy, input.asking)) {
         let works = is_active(t.status);
         if works {
             active += 1;
@@ -627,7 +633,7 @@ pub fn stuck_plans(input: &SchedInput, actions: &[Action]) -> Vec<Stuck> {
     for p in input.plans.iter().filter(|p| p.status == PlanStatus::Running) {
         let tasks: Vec<&Task> = input.tasks.iter().filter(|t| t.plan_id.as_deref() == Some(p.id.as_str())).collect();
         let goes_on = |t: &&Task| {
-            t.status == TaskStatus::Ready || is_active(t.status) || held(*t, worker(*t), input.busy) || moving.contains(t.id.as_str())
+            t.status == TaskStatus::Ready || is_active(t.status) || held(*t, worker(*t), input.busy, input.asking) || moving.contains(t.id.as_str())
         };
         if tasks.iter().any(goes_on) {
             continue;

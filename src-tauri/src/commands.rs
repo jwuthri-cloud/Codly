@@ -605,6 +605,17 @@ pub async fn workspace_trust(
     state.core().await?.workspace_trust(set).await.map_err(err)
 }
 
+/// The work that was under way when Codly last closed and waits for your Resume (None:
+/// nothing waits). Pass `go` to let it go on.
+#[tauri::command]
+pub async fn resume_work(state: State<'_, AppState>, go: bool) -> R<Option<codly_core::orchestrator::resume::ResumeOffer>> {
+    let core = state.core().await?;
+    if go {
+        core.resume_work().await.map_err(err)?;
+    }
+    Ok(core.resume_offer())
+}
+
 #[tauri::command]
 pub async fn list_connections(state: State<'_, AppState>) -> R<Vec<codly_core::housekeeping::connections::Connection>> {
     state.core().await?.connections().await.map_err(err)

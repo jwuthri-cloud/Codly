@@ -88,7 +88,16 @@ not work that waits for you: an approval, a paused worker, a budget that is used
 holds `/usr/bin/caffeinate -i -w <pid>` (src-tauri/src/awake.rs, Settings → Long
 runs, on by default): no idle sleep, and the helper ends with Codly; closing the lid still
 sleeps. A quit you ask for while work is under way is questioned once (src-tauri/src/quit.rs,
-same Settings section). After a restart a resumed worker's first prompt says what Codly sees in
+same Settings section). At the next start, work that was under way when Codly closed does not
+go on by itself (`orchestrator/resume.rs`, Settings → Long runs → "Resume work when Codly
+opens": ask, always or never; ask is the default). Until your Resume the scheduler starts no
+task, no plan runs its integration checks and no task is checked again; the app shows one
+question (ask) or only the Resume work button (never). Each task that goes on gets a "Resumed
+after restart" line in its history. A restart also keeps the fix and conflict rounds a task has
+used (in the store), the files of a task that waits for your answer (while its question is
+open), and what you were already told: the shell's notifier starts from the tasks and plans
+that already stood (`Core::standing`).
+After a restart a resumed worker's first prompt says what Codly sees in
 its worktree: the branch, the uncommitted files, Codly's last commit and its last check. When an
 agent's process is gone, what it left in its process group (a dev server, a watcher) is ended
 (`proc::reap`). Git calls have two limits (`git.rs`): 2 min for a status-sized call, 15 min for
@@ -553,6 +562,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       trust.rs                            workspace trust: the repo's own CLI configuration loads once trusted
                       wallet.rs lots.rs snapshot.rs       the game: coins, plots, office export files
                       activity.rs                         the work under way now, for the shell (keep awake, quit question)
+                      resume.rs                           after a restart: the question before work goes on, round counts, what stood
   store/            SQLite: schema.sql, later migrations (m2…m4), typed queries; backup.rs: a copy
                     of the database once a day and before a migration (`<data dir>/backups/`), and
                     the way back from a database that cannot be used (it is moved aside, never deleted;

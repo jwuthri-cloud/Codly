@@ -22,6 +22,7 @@
   import StartFailed from './components/StartFailed.svelte';
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
+  import ResumeWork from './components/ResumeWork.svelte';
   import DragGhost from './components/DragGhost.svelte';
   import { store, installVisibility } from './lib/state/store.svelte';
   import { ui } from './lib/state/ui.svelte';
@@ -29,6 +30,7 @@
   import { installNotifications } from './lib/state/notify';
   import { installNoticeOpener } from './lib/state/openNotice';
   import { installTooltips } from './lib/state/tooltip.svelte';
+  import { resumeWork } from './lib/state/resumeWork.svelte';
 
   // Dev-only handle for debugging and browser tests (stripped from production builds).
   if (import.meta.env.DEV) (window as unknown as { __codly: unknown }).__codly = { store, ui };
@@ -45,6 +47,13 @@
   $effect(() => {
     void openRepo;
     untrack(() => void workspaceTrust.check());
+  });
+
+  // Work that was under way when Codly last closed waits for your answer (the core holds it):
+  // asked once the core is up, and again after a start that had failed.
+  const coreUp = $derived(store.ready && !store.error);
+  $effect(() => {
+    if (coreUp) untrack(() => void resumeWork.check());
   });
 
   // Theme: always resolved onto [data-theme] ("system" follows the OS live).
@@ -99,6 +108,7 @@
 {#if prUi.dialog}<PullRequestDialog />{/if}
 {#if workspaceTrust.asking}<TrustDialog />{/if}
 {#if intakeUi.dialog}<IntakeDialog />{/if}
+<ResumeWork />
 <IdeOverlay />
 <Toasts />
 <TooltipHost />

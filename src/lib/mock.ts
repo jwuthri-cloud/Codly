@@ -132,6 +132,7 @@ const SETTINGS: Settings = {
   confirm_quit: true,
   claude_sandbox: false,
   claude_shell_auth: false,
+  resume_on_launch: 'ask',
   world_ambient: false,
   theme: 'system',
   team: [],
@@ -709,6 +710,9 @@ export class MockTransport implements Transport {
       }
       case 'workspace_trust':
         return this.workspaceTrust.trust((a.set as TrustChoice | null) ?? null);
+      case 'resume_work':
+        // The demo starts new each time: no work of an earlier run waits for a Resume.
+        return null;
       case 'diagnostics':
         // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
         return {

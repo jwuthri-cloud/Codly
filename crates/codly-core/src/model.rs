@@ -1869,6 +1869,25 @@ pub struct Settings {
     /// Settings sheet asks the CLIs again (`redetect_clis`).
     #[serde(default)]
     pub claude_shell_auth: bool,
+    /// Tasks or plans were under way when Codly last closed: ask before they go on (the
+    /// default), let them go on at once, or keep them stopped until you press Resume work
+    /// (`orchestrator::resume`).
+    #[serde(default)]
+    pub resume_on_launch: ResumeOnLaunch,
+}
+
+/// What Codly does at launch with the work that was under way when it last closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ResumeOnLaunch {
+    /// One question at launch. Nothing starts before your answer.
+    #[default]
+    Ask,
+    /// The work goes on at once.
+    Always,
+    /// Nothing starts until you press Resume work.
+    Never,
 }
 
 fn yes() -> bool {
@@ -1922,6 +1941,7 @@ impl Default for Settings {
             confirm_quit: true,
             claude_sandbox: false,
             claude_shell_auth: false,
+            resume_on_launch: ResumeOnLaunch::Ask,
         }
     }
 }

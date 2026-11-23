@@ -116,6 +116,7 @@ struct World {
     not_before: HashMap<Id, i64>,
     hold: Option<String>,
     in_terminal: HashSet<Id>,
+    asking: HashSet<Id>,
 }
 
 impl World {
@@ -133,6 +134,7 @@ impl World {
             not_before: HashMap::new(),
             hold: None,
             in_terminal: HashSet::new(),
+            asking: HashSet::new(),
         }
     }
     fn input(&self) -> SchedInput<'_> {
@@ -149,6 +151,7 @@ impl World {
             not_before: &self.not_before,
             hold: self.hold.as_deref(),
             in_terminal: &self.in_terminal,
+            asking: &self.asking,
         }
     }
     fn run(&self) -> Vec<Action> {
@@ -278,6 +281,32 @@ fn a_task_that_waits_for_your_answer_keeps_its_files_but_no_slot() {
     // Stopped, or its worker gone: a blocked task holds nothing.
     w.busy.clear();
     assert_eq!(starts(&w.run()).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["t2"]);
+}
+
+/// After a restart of Codly the worker's process is gone, but its question is still open: the
+/// task keeps its files and its worker takes no other task, as before the restart.
+#[test]
+fn a_task_whose_question_is_still_open_keeps_its_files_without_a_live_worker() {
+    let mut asked = task("t1", "p", TaskStatus::Blocked, &["a/**"], &[]);
+    asked.assignee = Some("w1".into());
+    let mut next = task("t3", "p", TaskStatus::Ready, &["b/**"], &[]);
+    next.assignee = Some("w1".into());
+    let mut w = World::new(vec![asked, task("t2", "p", TaskStatus::Ready, &["a/ui/**"], &[]), next]);
+    // Not live and on no task: what a restart leaves of the worker.
+    w.agents = vec![agent("w1", "Ada", Provider::Claude, Role::Worker)];
+    w.asking.insert("t1".into());
+    let a = w.run();
+    assert!(starts(&a).is_empty(), "{a:?}");
+    let wt = waits(&a);
+    assert_eq!(wt.len(), 2, "{wt:?}");
+    assert_eq!(wt[0], ("t2".to_string(), "waiting: write scope 'a/ui/**' overlaps task t1 ('a/**'), which waits for your answer".to_string()));
+    assert_eq!(wt[1], ("t3".to_string(), "waiting: Ada (assigned) is busy with t1".to_string()));
+    assert!(w.stuck().is_empty(), "the plan waits for your answer: its card says so");
+    // The question is closed: the files are free again, and nothing waits for t1 any more.
+    w.asking.clear();
+    let a = w.run();
+    assert_eq!(starts(&a)[0].0, "t2");
+    assert!(waits(&a).iter().all(|(_, why)| !why.contains("t1")), "{:?}", waits(&a));
 }
 
 #[test]

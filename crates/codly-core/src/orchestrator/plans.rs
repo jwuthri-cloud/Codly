@@ -433,7 +433,7 @@ impl Inner {
         }) {
             self.release_worker(&a.id, &t.id);
         }
-        lock(&self.fix_rounds).remove(&t.id);
+        self.forget_rounds(&t.id);
     }
 
     // ───────────── scheduling ─────────────
@@ -510,7 +510,11 @@ impl Inner {
         let accounts = self.park_untrusted(ws, &clis, self.account_states()).await;
         let now = now_ms();
         let not_before = lock(&self.retries).holds(now);
-        let hold = self.budget_hold();
+        // No task starts while the work of the last run waits for your Resume (`resume.rs`),
+        // or past a budget.
+        let resume_hold = self.launch_hold();
+        let hold = resume_hold.clone().or_else(|| self.budget_hold());
+        let asking = self.tasks_asking(&ws.id, &tasks)?;
         let input = SchedInput {
             tasks: &tasks,
             plans: &plans,
@@ -524,6 +528,7 @@ impl Inner {
             not_before: &not_before,
             hold: hold.as_deref(),
             in_terminal: &in_terminal,
+            asking: &asking,
         };
         let actions = scheduler::schedule(&input);
         let stuck = scheduler::stuck_plans(&input, &actions);
@@ -559,6 +564,10 @@ impl Inner {
             let ts: Vec<&Task> = tasks.iter().filter(|t| t.plan_id.as_deref() == Some(&p.id)).collect();
             // A task you cancelled doesn't hold the plan open; the rest still has to be done.
             if ts.iter().any(|t| t.status == TaskStatus::Done) && ts.iter().all(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)) {
+                // Its integration checks are work too: they wait for your Resume.
+                if resume_hold.is_some() {
+                    continue;
+                }
                 let me = self.clone();
                 let id = p.id.clone();
                 tokio::spawn(async move { me.complete_plan(&id).await });
@@ -1019,7 +1028,7 @@ impl Inner {
             _ => bail!("cannot move {} from {} to {}", t.key, store::enum_str(&from), store::enum_str(&to)),
         }
         if to == Ready {
-            lock(&self.fix_rounds).remove(task_id); // a retry gets fresh fix rounds
+            self.forget_rounds(task_id); // a retry gets fresh fix rounds
             lock(&self.retries).forget(task_id); // and starts now, with its worker's failures forgotten
         }
         let was = t;
@@ -1096,7 +1105,8 @@ impl Inner {
     /// left running are killed; every pending approval expires; their tasks go back to ready,
     /// keeping the assignee, so the scheduler resumes the same agent with the stored session id.
     /// A task whose worker had finished its turn (Codly was checking, reviewing or merging
-    /// the work) gets no worker turn: its gate runs again.
+    /// the work) gets no worker turn: its gate runs again. Unless Settings say "always", none
+    /// of that work goes on before your Resume (`resume.rs`).
     pub(super) async fn recover(self: &Arc<Self>) {
         match self.recover_inner().await {
             Ok(regate) => {
@@ -1183,8 +1193,12 @@ impl Inner {
             });
             each("approval", &a.id, res.map(drop));
         }
+        // The work goes on by itself only with "always": otherwise it waits for your Resume
+        // (`resume.rs`).
+        let ask = self.settings().resume_on_launch != ResumeOnLaunch::Always;
         let active = [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::Reviewing, TaskStatus::ChangesRequested, TaskStatus::Merging];
         let mut regate = vec![];
+        let mut in_work = vec![];
         for t in self.store.tasks_with_status(&active)? {
             // In its checks, review or merge, with the worker's turn over and its worktree
             // still there: the gate runs again from the work as it is (as Running: the gate
@@ -1192,20 +1206,19 @@ impl Inner {
             let gate_only = matches!(t.status, TaskStatus::Verifying | TaskStatus::Reviewing | TaskStatus::Merging)
                 && t.worktree.as_deref().is_some_and(|w| Path::new(w).is_dir())
                 && self.worker_turn_ended(&t);
-            let res = self.update_task(&t.id, |t| {
+            let res = if ask { self.hold_task(&t) } else { self.resume_task(&t, gate_only) };
+            if res.is_ok() {
+                in_work.push(t.id.clone());
                 if gate_only {
-                    t.status = TaskStatus::Running;
-                    t.status_reason = Some("checking the work again after Codly restarted".into());
-                } else {
-                    t.status = TaskStatus::Ready;
-                    t.status_reason = Some("resuming after Codly restarted".into());
+                    regate.push(t.id.clone());
                 }
-                Ok(())
-            });
-            if gate_only && res.is_ok() {
-                regate.push(t.id.clone());
             }
-            each("task", &t.id, res.map(drop));
+            each("task", &t.id, res);
+        }
+        if ask {
+            // Their gates run when you say Resume, with everything else that waits. Held
+            // from here on, whatever the rest of the recovery finds.
+            self.hold_at_launch(in_work, std::mem::take(&mut regate));
         }
         for a in self.store.all_agents()? {
             let busy = !matches!(a.status, AgentStatus::Idle | AgentStatus::Offline | AgentStatus::Done);
