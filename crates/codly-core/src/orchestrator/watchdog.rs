@@ -16,7 +16,11 @@
 //!
 //! Every adapter event of a run is a life sign, the live deltas too (`Inner::watchdog_seen`,
 //! first thing in the ingest pipeline); an account's usage reading is not, since every agent
-//! of the account gets it. The clock is an `Instant`: a laptop that slept made no turn silent.
+//! of the account gets it. Claude Code says every 30 s that a long command still runs
+//! (`ToolProgress`): such a command is not silent, however long it takes, while a CLI that
+//! hangs in a tool call says nothing and is. The other CLIs, and Claude's other tools, are
+//! not known to give such a sign, so `quiet_tool_secs` stays long.
+//! The clock is an `Instant`: a laptop that slept made no turn silent.
 //! The Lead gets no continue prompt (its turns answer you or a worker): its turn is
 //! interrupted, and the thread says so.
 
@@ -38,7 +42,7 @@ const BEAT: Duration = Duration::from_secs(15);
 /// A run that has been quiet this long is asked whether it waits for you (a store read).
 const ASK_AFTER: Duration = Duration::from_secs(30);
 /// How long a stopped run gets to exit before its work is put back in line (the adapters'
-/// shutdown ladder takes up to ~11 s).
+/// shutdown ladder takes up to ~13 s).
 const EXIT_WAIT: Duration = Duration::from_secs(15);
 /// A worker that went silent is restarted, until its task was started this many times.
 const MAX_STARTS: i64 = 3;
@@ -588,6 +592,26 @@ mod tests {
         assert_eq!(w.last_event, start, "every agent of the account gets this reading");
         w.seen(&EventKind::TextDelta { item_id: "m".into(), text: "x".into() }, later, 0);
         assert_eq!(w.last_event, later, "a live delta counts, although it is never stored");
+    }
+
+    /// A build that runs for hours under Claude Code is never flagged: the CLI's heartbeat for
+    /// the open call (every 30 s) starts the clock again each time, and the call stays open.
+    #[test]
+    fn a_long_command_that_says_it_still_runs_is_not_silent() {
+        let start = Instant::now();
+        let limit = Duration::from_secs(u64::from(WatchdogSettings::default().quiet_tool_secs));
+        let mut w = Watch { last_event: start, ..Watch::new() };
+        let target = Target { command: Some("cargo build".into()), ..Target::default() };
+        w.seen(&EventKind::ToolStarted { call_id: "c1".into(), name: "Bash".into(), activity: ActivityKind::Execute, target, input: json!({}), confidence: "observed".into() }, start, 0);
+        let mut now = start;
+        while now < start + limit * 3 {
+            now += secs(30);
+            assert_eq!(step(now.duration_since(w.last_event), limit, w.flagged, None), Step::Wait);
+            w.seen(&EventKind::ToolProgress { call_id: "c1".into() }, now, 0);
+        }
+        assert_eq!(w.open_tools, 1, "a heartbeat ends no call");
+        // The heartbeats stop (the CLI hangs): flagged one limit later, as before.
+        assert_eq!(step((now + limit).duration_since(w.last_event), limit, w.flagged, None), Step::Flag);
     }
 
     #[test]

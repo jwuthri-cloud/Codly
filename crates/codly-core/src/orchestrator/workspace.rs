@@ -351,7 +351,9 @@ impl Inner {
     /// App exit, in about 6 s at most. Each adapter's shutdown ladder (interrupt ≤ 5 s → close
     /// stdin ≤ 3 s → SIGTERM → SIGKILL) can take ~11 s and Codex's `close()` ~6 s, longer than
     /// the app waits for us; what is still running at the deadline is SIGKILLed, so no agent
-    /// (or the shells and servers it started) outlives the app.
+    /// (or what stayed in its process group) outlives the app. The commands of a Claude Code
+    /// agent are in groups of their own (`proc::command`): one that its CLI did not end before
+    /// the SIGKILL runs on.
     pub(super) async fn shutdown(&self) {
         const RUNS_GRACE: Duration = Duration::from_secs(4);
         const CODEX_GRACE: Duration = Duration::from_millis(1500);
@@ -1033,7 +1035,8 @@ impl Inner {
 
 /// The process groups led by a child of this process: each agent CLI and the Codex
 /// app-server lead their own (`proc::command` spawns with `process_group(0)`), and the group
-/// takes the shells, test runners and dev servers they started along. Shutdown SIGKILLs them.
+/// takes along what they started in it (for Claude Code that is not its commands: see
+/// `proc::command`). Shutdown SIGKILLs them.
 ///
 /// ponytail: adapters do not hand out their child's pid, so this goes by "is our child" rather
 /// than by run (verify commands, also in their own group, go too: fine at exit). Only live

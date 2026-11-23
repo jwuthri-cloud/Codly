@@ -90,8 +90,18 @@ runs, on by default): no idle sleep, and the helper ends with Codly; closing the
 sleeps. A quit you ask for while work is under way is questioned once (src-tauri/src/quit.rs,
 same Settings section). After a restart a resumed worker's first prompt says what Codly sees in
 its worktree: the branch, the uncommitted files, Codly's last commit and its last check. When an
-agent's process is gone, what it left in its process group (a dev server, a watcher) is ended
-(`proc::reap`). Git calls have two limits (`git.rs`): 2 min for a status-sized call, 15 min for
+agent's process is gone, what is left in its process group is ended (`proc::reap`). That is not
+everything an agent started. Claude Code runs each shell command in a process group of its own
+(recorded: docs/research/cli-claude-stream-json-2.1.311-part2.md §7), so a stop goes through the
+CLI: Codly interrupts the turn, has the CLI drop the messages that still wait in it, asks it to
+stop the background commands it tracks (`stop_task`), and closes its input only then; a CLI that
+does not exit gets SIGTERM, at which it ends those commands itself. Two things Codly cannot
+end: a process that a command left behind with `&` (`npm run dev &`) is in no list of the CLI
+and in no group Codly knows, so it runs on until it ends or you end it; and a background
+command of a CLI that was killed outright (SIGKILL: an agent that did not stop within the time
+Codly waits when it quits, or that ignored SIGTERM for 3 s).
+
+Git calls have two limits (`git.rs`): 2 min for a status-sized call, 15 min for
 a checkout, `add -A`, commit, merge or push; one that runs out of time is asked to stop before
 it is killed, and the gate makes its commit or merge once more when the first try found a lock
 file or ran out of time.
@@ -197,7 +207,9 @@ gives no event for 10 minutes (60 with a tool call open; `Settings.watchdog`) is
 task ("stalled: no output for 10 min") and you are notified. At twice that its turn is interrupted
 and the agent is asked to continue, once. Silent for as long again, the run is stopped: a worker's
 task goes back in line (blocked from its third start on), a Lead or a 1:1 agent resumes with your
-next message. A turn that waits for your answer is not silent. A worker that sits between turns
+next message. A turn that waits for your answer is not silent, and neither is a long command
+under Claude Code: the CLI says every 30 s that the call still runs, and that counts as output. A
+worker that sits between turns
 for 2 minutes on a task that still runs (you interrupted it) is flagged as idle; nothing is done
 to it. Below that, each adapter gives Stop a limit: a turn that has not ended 8 s (Claude) or 15 s
 (Codex, ACP agents) after the interrupt request loses its process (or, on the shared Codex server,

@@ -146,6 +146,18 @@ pub fn spawn_json_reader<R: AsyncRead + Unpin + Send + 'static>(r: R, raw: Arc<R
 }
 
 /// A tokio Command with env_clear().envs(env), cwd, piped stdio, own process group, kill_on_drop.
+///
+/// What the own process group holds depends on the child. `killpg()` reaches the child and
+/// what it started in its own group, and nothing else:
+/// - A plain shell (`sh -c`): the commands it runs stay in its group, unless one leaves it.
+/// - Claude Code (recorded on 2.1.311, docs/research/cli-claude-stream-json-2.1.311-part2.md
+///   §7): every Bash call runs in a shell that leads a process group and a session of its own,
+///   so the CLI's group holds the CLI alone. A signal to that group reaches no shell and no
+///   command. The CLI ends the background commands it tracks (`run_in_background`) when it
+///   gets SIGTERM, not when it gets SIGKILL. A process that a command left behind with `&`
+///   keeps the group of its shell, which has exited: the CLI does not track it, and no signal
+///   Codly sends reaches it.
+/// - The other CLIs: not recorded.
 pub fn command(bin: &Path, args: &[String], cwd: &Path, env: &HashMap<String, String>) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
@@ -155,7 +167,8 @@ pub fn command(bin: &Path, args: &[String], cwd: &Path, env: &HashMap<String, St
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Own pgid: killpg() then also reaches the shells and test runners the agent started.
+        // Own pgid: killpg() reaches the child and what stayed in its group (see above), and
+        // a signal to Codly's own group does not reach the child.
         .process_group(0)
         .kill_on_drop(true);
     cmd
@@ -165,6 +178,8 @@ pub fn command(bin: &Path, args: &[String], cwd: &Path, env: &HashMap<String, St
 ///
 /// Returns early once the group is gone. The caller must keep reaping the group leader
 /// (await `Child::wait` on another task): an unreaped zombie still counts as a member.
+/// The grace matters for a CLI that ends its own children at SIGTERM (Claude Code: [`command`]):
+/// the SIGKILL that follows would leave them running.
 pub async fn kill_group(pgid: i32, grace: Duration) {
     if pgid <= 1 {
         return; // 0/1 would signal our own group or init
@@ -187,10 +202,13 @@ pub async fn kill_group(pgid: i32, grace: Duration) {
 const SWEEP_GRACE: Duration = Duration::from_secs(2);
 
 /// Wait for a child that leads its own process group ([`command`]) on a task of its own, and
-/// give its exit code to `on_exit`. Then end what it left running in that group: the dev
-/// servers, watchers and test runners an agent started keep their ports and go on writing to a
-/// worktree that the next run is about to use. Only the child's own group is signalled, and
-/// only once the child itself is gone and reaped.
+/// give its exit code to `on_exit`. Then end what it left running in that group: a process
+/// that outlives its agent keeps its ports and goes on writing to a worktree that the next
+/// run is about to use. Only the child's own group is signalled, and only once the child
+/// itself is gone and reaped. So this ends what stayed in the group, not everything the agent
+/// started: the commands of a Claude Code agent are in groups of their own ([`command`]). The
+/// adapter stops those through the CLI before it lets the CLI go (`adapters::claude`), and a
+/// process left behind with `&` is ended by nothing here.
 pub fn reap<F>(mut child: tokio::process::Child, on_exit: F) -> tokio::task::JoinHandle<()>
 where
     F: FnOnce(Option<i64>) + Send + 'static,
@@ -783,8 +801,8 @@ mod tests {
         assert!(killpg(Pid::from_raw(pgid), None).is_err(), "group still alive");
     }
 
-    /// An agent that exits by itself leaves nothing running: what it started in its group (a
-    /// dev server, a watcher) is ended once the agent is gone, after its exit code is told.
+    /// A child that exits by itself leaves nothing running in its group: what it started
+    /// there is ended once the child is gone, after its exit code is told.
     #[tokio::test]
     async fn reap_ends_what_the_leader_left_running() {
         let env: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string())].into();

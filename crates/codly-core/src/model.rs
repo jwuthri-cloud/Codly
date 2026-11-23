@@ -1427,8 +1427,9 @@ pub enum EventKind {
     TurnStarted {
         input: Option<String>,
     },
-    /// A prompt delivered into the running turn (Codex `turn/steer`): it gets no
-    /// `TurnStarted`/`TurnCompleted` of its own.
+    /// A prompt delivered into the running turn (Codex `turn/steer`; Claude Code takes a
+    /// waiting message in at its next tool boundary): it gets no `TurnStarted`/`TurnCompleted`
+    /// of its own.
     PromptSteered {
         input: String,
     },
@@ -1468,6 +1469,11 @@ pub enum EventKind {
     ToolOutput {
         call_id: String,
         chunk: String,
+    },
+    /// Ephemeral: a tool call that still runs says so, with no output (Claude Code's
+    /// `tool_progress` heartbeat, every 30 s). A life sign for the watchdog.
+    ToolProgress {
+        call_id: String,
     },
     ToolCompleted {
         call_id: String,
@@ -1635,7 +1641,7 @@ impl EventKind {
     pub fn is_ephemeral(&self) -> bool {
         matches!(
             self,
-            EventKind::TextDelta { .. } | EventKind::ReasoningDelta { .. } | EventKind::ToolOutput { .. }
+            EventKind::TextDelta { .. } | EventKind::ReasoningDelta { .. } | EventKind::ToolOutput { .. } | EventKind::ToolProgress { .. }
         )
     }
 
@@ -1651,6 +1657,7 @@ impl EventKind {
             EventKind::Reasoning { .. } => "reasoning",
             EventKind::ToolStarted { .. } => "tool_started",
             EventKind::ToolOutput { .. } => "tool_output",
+            EventKind::ToolProgress { .. } => "tool_progress",
             EventKind::ToolCompleted { .. } => "tool_completed",
             EventKind::FilesChanged { .. } => "files_changed",
             EventKind::PlanUpdated { .. } => "plan_updated",

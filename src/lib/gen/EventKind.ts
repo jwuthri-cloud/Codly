@@ -37,7 +37,7 @@ name: string, activity: ActivityKind, target: Target, input: JsonValue,
 /**
  * "observed" when the provider said what it is; "inferred" when Codly classified it.
  */
-confidence: string, } | { "type": "tool_output", call_id: string, chunk: string, } | { "type": "tool_completed", call_id: string, ok: boolean, 
+confidence: string, } | { "type": "tool_output", call_id: string, chunk: string, } | { "type": "tool_progress", call_id: string, } | { "type": "tool_completed", call_id: string, ok: boolean, 
 /**
  * Truncated (≤ 8 KB head+tail) output.
  */

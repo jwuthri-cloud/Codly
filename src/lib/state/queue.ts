@@ -4,8 +4,9 @@
 // still waiting (from the agent's turns), in order, and says in words where they go.
 //
 // A queued message is delivered by the first later `turn_started` whose prompt contains it
-// (Codly wraps your words, it never rewrites them); a turn with no recorded prompt takes the
-// oldest waiting message. Claude and Codex can take a message into the running turn instead of
+// (Codly wraps your words, it never rewrites them). A turn with no prompt is one the CLI started
+// by itself (a background task ended and woke it): it delivers nothing, and what waits goes on
+// waiting. Claude and Codex can take a message into the running turn instead of
 // starting a new one: the turn's `prompt_steered` delivers it the same way. And once the agent
 // has been idle a few seconds, nothing it was sent is still waiting.
 // When every Lead slot is busy, Codly says so in the thread ("Queued: …", author codly): what
@@ -44,9 +45,9 @@ export function waitingOf(turns: Turn[], sent: Sent[], now: number, slotNote: { 
       if (waiting.length || busyAt(e.msg.ts)) waiting.push(e.msg);
       continue;
     }
-    if (!waiting.length) continue;
-    const input = e.input ? norm(e.input) : '';
-    const i = input ? waiting.findIndex((m) => input.includes(norm(m.text))) : 0;
+    if (!waiting.length || !e.input) continue;
+    const input = norm(e.input);
+    const i = waiting.findIndex((m) => input.includes(norm(m.text)));
     if (i >= 0) waiting = waiting.filter((_, j) => j !== i);
   }
   const last = turns[turns.length - 1];
