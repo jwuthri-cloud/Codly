@@ -1443,8 +1443,8 @@ enum AnswerShape {
     Decisions(Vec<(ApprovalChoice, Value)>),
     /// `{permissions, scope}`
     Permissions(Value),
-    /// `{answers}`
-    UserInput,
+    /// `{answers}`, keyed by the id of each question asked: (id, text).
+    UserInput(Vec<(String, String)>),
     /// `{action, content}`
     Elicitation,
 }
@@ -2177,7 +2177,13 @@ impl CodexNormalizer {
             "item/permissions/requestApproval" => {
                 (ApprovalSubject::Permissions { detail: p.clone() }, AnswerShape::Permissions(p["permissions"].clone()), p["reason"].as_str().map(str::to_owned))
             }
-            "item/tool/requestUserInput" => (ApprovalSubject::Question { questions: p["questions"].clone() }, AnswerShape::UserInput, None),
+            "item/tool/requestUserInput" => {
+                let asked = p["questions"].as_array().into_iter().flatten();
+                let ids = asked
+                    .filter_map(|q| Some((q["id"].as_str()?.to_owned(), q["question"].as_str().unwrap_or_default().to_owned())))
+                    .collect();
+                (ApprovalSubject::Question { questions: p["questions"].clone() }, AnswerShape::UserInput(ids), None)
+            }
             "mcpServer/elicitation/request" => {
                 let reason = p["message"].as_str().map(str::to_owned);
                 (ApprovalSubject::Question { questions: p.clone() }, AnswerShape::Elicitation, reason)
@@ -2191,7 +2197,7 @@ impl CodexNormalizer {
         let choices = match &shape {
             AnswerShape::Decisions(list) => list.iter().map(|(c, _)| *c).collect(),
             AnswerShape::Permissions(_) => vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::Deny],
-            AnswerShape::UserInput => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Cancel],
+            AnswerShape::UserInput(_) => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Cancel],
             AnswerShape::Elicitation => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel],
         };
         // A subagent's request is the agent's to get answered: the card says who asks.
@@ -2235,7 +2241,7 @@ impl CodexNormalizer {
                 ApprovalChoice::AllowSession | ApprovalChoice::AllowAlways => json!({ "permissions": perms, "scope": "session" }),
                 _ => json!({ "permissions": {}, "scope": "turn" }),
             },
-            AnswerShape::UserInput => json!({ "answers": if allow { d.answers.clone().unwrap_or_else(|| json!({})) } else { json!({}) } }),
+            AnswerShape::UserInput(asked) => json!({ "answers": if allow { user_input_answers(&asked, d.answers.as_ref()) } else { json!({}) } }),
             AnswerShape::Elicitation => match d.choice {
                 _ if allow => json!({ "action": "accept", "content": d.answers.clone().unwrap_or(Value::Null) }),
                 ApprovalChoice::Deny => json!({ "action": "decline" }),
@@ -2435,6 +2441,31 @@ fn pick_decision(list: &[(ApprovalChoice, Value)], choice: ApprovalChoice) -> Va
         .unwrap_or_else(|| json!(if matches!(choice, AllowOnce | AllowSession | AllowAlways) { "accept" } else { "decline" }))
 }
 
+/// The `answers` of a `requestUserInput` response: for every question asked (id, text), its
+/// id → `{ answers: [..] }` (`ToolRequestUserInputResponse`, `ToolRequestUserInputAnswer` of
+/// codex-cli 0.166.0; from the generated types, not verified on a live run). The card files an
+/// answer under the question's text, as a string or a list of strings; one filed under the id
+/// is read too, also in Codex's own `{ answers }` form. A question with no answer gets an empty
+/// list, and an answer that names no question asked is dropped.
+fn user_input_answers(asked: &[(String, String)], given: Option<&Value>) -> Value {
+    let strings = |v: &Value| -> Vec<Value> {
+        let picked = match v {
+            Value::Object(o) => o.get("answers").and_then(Value::as_array).cloned().unwrap_or_default(),
+            Value::Array(a) => a.clone(),
+            other => vec![other.clone()],
+        };
+        picked.into_iter().filter(|a| a.as_str().is_some_and(|s| !s.is_empty())).collect()
+    };
+    let out: serde_json::Map<String, Value> = asked
+        .iter()
+        .map(|(id, text)| {
+            let answer = given.and_then(|g| g.get(id.as_str()).or_else(|| g.get(text.as_str())));
+            (id.clone(), json!({ "answers": answer.map(strings).unwrap_or_default() }))
+        })
+        .collect();
+    Value::Object(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2623,6 +2654,55 @@ mod tests {
         let a = approval_of(&ev);
         let ev = norm.on_notification("serverRequest/resolved", &json!({ "threadId": "t", "requestId": 9 }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::ApprovalResolved { approval_id, status: ApprovalStatus::Cancelled, .. } if *approval_id == a.id)));
+    }
+
+    /// The card files your answers under each question's text, as a string or a list. Codex
+    /// reads them under each question's id, as `{ answers: [..] }`. The request and the
+    /// responses are written from the generated types of codex-cli 0.166.0
+    /// (`ToolRequestUserInputParams`, `ToolRequestUserInputResponse`), not from a live run.
+    #[test]
+    fn the_answers_to_a_codex_question_are_filed_under_its_ids() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        let option = |label: &str| json!({ "label": label, "description": "" });
+        let qs = json!([
+            { "id": "db", "header": "DB", "question": "Which database?", "isOther": false, "isSecret": false, "options": [option("sqlite"), option("postgres")] },
+            { "id": "parts", "header": "Parts", "question": "Which parts?", "isOther": false, "isSecret": false, "options": [option("api"), option("ui")] },
+            { "id": "name", "header": "Name", "question": "Its name?", "isOther": true, "isSecret": false, "options": null },
+            { "id": "skip", "header": "More", "question": "Anything else?", "isOther": true, "isSecret": false, "options": null },
+            { "id": "none", "header": "Notes", "question": "Notes?", "isOther": true, "isSecret": false, "options": null },
+        ]);
+        let params = json!({ "threadId": "t", "turnId": "u", "itemId": "i", "questions": qs, "isBlocking": true, "autoResolutionMs": null });
+        let ask = |norm: &mut CodexNormalizer, n: i64| approval_of(&norm.on_request(&json!(n), "item/tool/requestUserInput", &params).0).id;
+
+        // The card's shape: one pick, several picks, a typed answer, an empty one, one not
+        // given, and a key that names no question.
+        let card = json!({
+            "Which database?": "sqlite",
+            "Which parts?": ["api", "ui"],
+            "Its name?": "billing",
+            "Anything else?": "",
+            "Who asked?": "me",
+        });
+        let codex = json!({
+            "db": { "answers": ["sqlite"] },
+            "parts": { "answers": ["api", "ui"] },
+            "name": { "answers": ["billing"] },
+            "skip": { "answers": [] },
+            "none": { "answers": [] },
+        });
+        let id = ask(&mut norm, 1);
+        let (r, _) = norm.answer(&id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: Some(card) }).unwrap();
+        assert_eq!(r["result"]["answers"], codex);
+
+        // Answers filed under the ids, in Codex's own form, mean the same.
+        let id = ask(&mut norm, 2);
+        let (r, _) = norm.answer(&id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: Some(codex.clone()) }).unwrap();
+        assert_eq!(r["result"]["answers"], codex);
+
+        // A cancel answers nothing.
+        let id = ask(&mut norm, 3);
+        let (r, _) = norm.answer(&id, &ApprovalDecision { choice: ApprovalChoice::Cancel, message: None, answers: Some(codex) }).unwrap();
+        assert_eq!(r["result"], json!({ "answers": {} }));
     }
 
     #[test]
@@ -3113,6 +3193,7 @@ mod tests {
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: cmd.map(str::to_owned),
             sandbox_shell: false,
+            max_budget_usd: None,
         };
         let off = spec(&[("CODEX_HOME", "/h")], None);
         assert!(byok_overrides(&off).is_empty());
@@ -3159,6 +3240,7 @@ mod tests {
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
         };
         let (model, effort) = classify::split_model_effort(spec.model.as_deref());
         let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref(), &[], &[]);
@@ -4066,6 +4148,7 @@ mod tests {
             raw_log: cwd.join("raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
             cwd,
         }
     }

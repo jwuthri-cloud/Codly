@@ -216,6 +216,8 @@ impl Inner {
             raw_log,
             byok_command,
             sandbox_shell: self.settings().claude_sandbox,
+            // What is left of your cost budget, as this run's own limit (breaker_run.rs).
+            max_budget_usd: self.run_budget(&run_id, &req.agent.name, provider),
         };
         // A panicking adapter (or a stub) must fail this run, not the caller's task.
         let fut = self.spawner.spawn(spec, self.events_tx.clone());

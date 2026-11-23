@@ -316,7 +316,9 @@ the agent crossed itself. The Lead is exempt: it only talks to you. Cost is what
 (Claude Code: an estimate at list price; Codex and Gemini: none). Every run reports its own cost,
 from zero: an ACP agent (OpenCode) reports a session's running total, so a run that resumes a
 session is told what the earlier runs cost (`SpawnSpec::session_cost_usd`) and the adapter takes
-it off. Codly does not pass a spend cap to the CLIs themselves.
+it off. A Claude Code run, the Lead's too, starts with what is left of the cost budget as its own
+`--max-budget-usd`, so one long turn stops near the budget; Codly then ends that run, and the next
+one starts with what is left then (several agents at once each get the whole rest).
 
 **Parallel requests.** Each request is its own thread (`lead`, `lead:<id>`) with its own Lead
 session ("Lead", "Lead 2"…, at most 3 live; idle ones pause and resume by session id). Plans,

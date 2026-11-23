@@ -651,7 +651,7 @@ impl Core {
     }
 
     pub async fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
-        self.inner.resolve_approval(approval_id, decision, "user")
+        self.inner.answer_approval(approval_id, decision).await
     }
 
     pub async fn interrupt_agent(&self, agent_id: &str) -> anyhow::Result<()> {

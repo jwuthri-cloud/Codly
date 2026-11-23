@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::lead::Said;
 use super::{Inner, guard, lock, merge_conflict, names, prompts, row, scheduler, write};
 use crate::adapters::AgentCmd;
 use crate::adapters::claude::EXIT_PLAN_MODE;
@@ -404,7 +405,31 @@ impl Inner {
 
     // ───────────── approvals ─────────────
 
-    pub(super) fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision, by: &str) -> anyhow::Result<()> {
+    /// Your answer to a request, from the app. A deny with a note, to an agent whose CLI takes
+    /// no note with its answer (every CLI but Claude Code), is followed by the note as your
+    /// message to that agent, the way a chat message reaches it: into its running turn where
+    /// the CLI can take it there, else when that turn ends. It is a refusal, not a request of
+    /// yours: an agent held back after a message from outside Codly stays held (`Said::DenyNote`).
+    /// The note is on record as said once that message went out.
+    pub(super) async fn answer_approval(self: &Arc<Self>, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
+        let Some(asked) = self.resolve_approval(approval_id, decision.clone(), "user")? else { return Ok(()) };
+        let note = decision.message.as_deref().map(str::trim).unwrap_or_default();
+        self.chat_agent_from(&asked.agent_id, Said::DenyNote(note))
+            .await
+            .map_err(|e| e.context("the request was denied, but your note did not reach the agent"))?;
+        if let Some(said) = said_with(&asked, &decision, false, true) {
+            let ws = self.store.agent_workspace(&asked.agent_id).ok().flatten();
+            // The agent has the note by now: a row that cannot be stored does not undo that.
+            if let Err(e) = self.emit(ws.as_deref(), row(Some(&asked.agent_id), asked.task_id.as_deref(), Some(&asked.run_id), said)) {
+                tracing::warn!("the note you sent after denying approval {} is not on record: {e}", asked.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Answer a request. Ok(Some(the request)): a deny with a note that the agent's CLI does
+    /// not take with the answer (`said_with`): the note still has to reach the agent.
+    pub(super) fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision, by: &str) -> anyhow::Result<Option<Approval>> {
         // From the read to the event: of two answers at once, the agent gets the one on record.
         let _g = lock(&RESOLVING);
         let a = self.store.approval(approval_id)?.ok_or_else(|| anyhow!("unknown approval {approval_id}"))?;
@@ -426,7 +451,7 @@ impl Inner {
         };
         // What you said with the answer goes on record just before the answer. Only for an
         // answer that went to the agent: a request that expired heard nothing.
-        if sent && let Some(said) = said_with(&a, &decision, claude) {
+        if sent && let Some(said) = said_with(&a, &decision, claude, claude) {
             // The agent has the answer by now: words that cannot be stored must not keep the
             // answer itself off the record.
             if let Err(e) = self.emit(ws.as_deref(), row(Some(&a.agent_id), a.task_id.as_deref(), Some(&a.run_id), said)) {
@@ -454,7 +479,8 @@ impl Inner {
         if !sent {
             bail!("the agent that asked is no longer running; the request expired");
         }
-        Ok(())
+        let note = decision.message.as_deref().is_some_and(|m| !m.trim().is_empty());
+        Ok((note && !claude && decision.choice == ApprovalChoice::Deny).then_some(a))
     }
 
     // ───────────── diffs & merge ─────────────
@@ -1194,17 +1220,20 @@ fn expand_home(p: &str) -> PathBuf {
 }
 
 /// What goes on record as said with an answer (`EventKind::ApprovalSaid`). None: the answer
-/// carried no words. `claude`: the agent that asked runs Claude Code.
-/// - The note of a "no" (deny, or stop the turn). Only Claude Code hands it to the agent
-///   (`claude.rs`, `answer`). The answers Codex and the ACP agents take have no place for a
-///   note, so for those agents it is not recorded as said: the agent never read it.
+/// carried no words. `claude`: the agent that asked runs Claude Code. `note_sent`: the note of
+/// a "no" reached the agent.
+/// - The note of a "no" (deny, or stop the turn), once it reached the agent. Claude Code takes
+///   it with the answer (`claude.rs`, `answer`). The answers Codex and the ACP agents take have
+///   no place for a note: after a deny it goes to them as your message (`answer_approval`), and
+///   it is on record once that message went out. The note of a "stop the turn" does not reach
+///   them, so it is not recorded as said.
 /// - Your answers to a question, on one line.
 /// - That a plan was accepted with your text: only Claude Code's plan request takes one.
-fn said_with(asked: &Approval, d: &ApprovalDecision, claude: bool) -> Option<EventKind> {
+fn said_with(asked: &Approval, d: &ApprovalDecision, claude: bool, note_sent: bool) -> Option<EventKind> {
     const NOTE_MAX: usize = 2000;
     const ANSWER_MAX: usize = 500;
     let allow = matches!(d.choice, ApprovalChoice::AllowOnce | ApprovalChoice::AllowSession | ApprovalChoice::AllowAlways);
-    let note = d.message.as_deref().map(str::trim).filter(|m| claude && !allow && !m.is_empty()).map(|m| prompts::clip(m, NOTE_MAX));
+    let note = d.message.as_deref().map(str::trim).filter(|m| note_sent && !allow && !m.is_empty()).map(|m| prompts::clip(m, NOTE_MAX));
     let answer = match (&asked.subject, &d.answers) {
         (ApprovalSubject::Question { questions }, Some(answers)) if allow => answer_line(questions, answers).map(|a| prompts::clip(&a, ANSWER_MAX)),
         _ => None,
@@ -1345,9 +1374,14 @@ mod tests {
         ApprovalDecision { choice, message: message.map(String::from), answers }
     }
 
-    /// (note, answer, plan changed) of what goes on record, or None.
+    /// (note, answer, plan changed) of what goes on record with the answer, or None.
     fn said(a: &Approval, d: &ApprovalDecision, claude: bool) -> Option<(Option<String>, Option<String>, bool)> {
-        match said_with(a, d, claude)? {
+        said_sent(a, d, claude, claude)
+    }
+
+    /// `said`, with whether the note reached the agent.
+    fn said_sent(a: &Approval, d: &ApprovalDecision, claude: bool, note_sent: bool) -> Option<(Option<String>, Option<String>, bool)> {
+        match said_with(a, d, claude, note_sent)? {
             EventKind::ApprovalSaid { approval_id, note, answer, plan_changed } => {
                 assert_eq!(approval_id, a.id);
                 Some((note, answer, plan_changed))
@@ -1362,8 +1396,10 @@ mod tests {
         let no = decision(ApprovalChoice::Deny, Some("  use pnpm  "), None);
         assert_eq!(said(&command, &no, true), Some((Some("use pnpm".into()), None, false)));
         assert_eq!(said(&command, &decision(ApprovalChoice::Cancel, Some("stop here"), None), true), Some((Some("stop here".into()), None, false)));
-        // Codex and the ACP agents get the "no" without the note.
+        // Codex and the ACP agents get the "no" without the note: it is on record once it went
+        // to them as your message.
         assert_eq!(said(&command, &no, false), None);
+        assert_eq!(said_sent(&command, &no, false, true), Some((Some("use pnpm".into()), None, false)));
         // An answer with no words, a note of blanks, and a note beside a "yes" (no CLI reads it).
         assert_eq!(said(&command, &decision(ApprovalChoice::Deny, None, None), true), None);
         assert_eq!(said(&command, &decision(ApprovalChoice::Deny, Some("   "), None), true), None);

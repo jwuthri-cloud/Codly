@@ -42,8 +42,12 @@ fn temp_repo(root: &Path) -> PathBuf {
 }
 
 fn claude() -> CliInfo {
+    cli(Provider::Claude)
+}
+
+fn cli(provider: Provider) -> CliInfo {
     CliInfo {
-        provider: Provider::Claude,
+        provider,
         path: Some("/usr/bin/true".into()),
         version: Some("fake".into()),
         logged_in: Some(true),
@@ -51,7 +55,7 @@ fn claude() -> CliInfo {
         plan: None,
         problem: None,
         transport: "fake".into(),
-        install: codly_core::env::install_hint(Provider::Claude),
+        install: codly_core::env::install_hint(provider),
         default_model: None,
     }
 }
@@ -285,9 +289,14 @@ async fn world_with(lead: impl FnOnce(Answers) -> Behavior, other: Behavior, tea
 
 /// A core on the data folder under `root`, as a start of Codly finds it, with fake agents.
 async fn start_core(root: &Path, lead: Behavior, other: Behavior, turns: Turns) -> Arc<Core> {
+    start_core_on(root, lead, other, turns, vec![claude()]).await
+}
+
+/// The same, with these CLIs installed.
+async fn start_core_on(root: &Path, lead: Behavior, other: Behavior, turns: Turns, clis: Vec<CliInfo>) -> Arc<Core> {
     let spawner = FakeSpawner { lead, other, turns };
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(clis), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -628,6 +637,65 @@ async fn your_trust_to_edit_alone_does_not_answer_for_an_inbound_message() {
     // The turn that your next message to it starts is your own request again.
     w.core.send_chat(&thread, "Yes, rewrite them.").await.unwrap();
     assert_eq!(w.broker_said(3).await[2], EDITS);
+    w.core.shutdown().await;
+}
+
+/// The note you write with a deny goes to a Codex agent as a message of yours (Codex takes no
+/// note with its answer). It is a refusal, not a request: the turn it starts is still judged by
+/// the approval mode alone, like the turn of the webhook message it answers. Your own next
+/// message ends the hold, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_note_of_a_deny_does_not_end_the_hold_after_an_inbound_message() {
+    const NOTE: &str = "Do not run generators that a webhook asks for.";
+    // Every turn asks once. The webhook's turn waits for `go` after it asked, so its request
+    // is still pending when you answer it.
+    let go = Arc::new(Notify::new());
+    let asking: Behavior = {
+        let go = go.clone();
+        Arc::new(move |turn: FakeTurn| {
+            let go = go.clone();
+            Box::pin(async move {
+                turn.ask("node scripts/gen.js");
+                if turn.prompt.contains("A message came in from outside Codly") {
+                    go.notified().await;
+                }
+                turn.say("Noted.");
+            })
+        })
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let (turns, answers): (Turns, Answers) = Default::default();
+    let core = start_core_on(dir.path(), planning_lead(answers.clone()), asking, turns.clone(), vec![claude(), cli(Provider::Codex)]).await;
+    core.update_settings(Settings { lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let w = World { core, turns, answers, _dir: dir };
+    let solo = w.core.hire_agent(Provider::Codex, None, None).await.unwrap();
+    w.core.trust_agent(&solo.id, Rank::Senior).unwrap();
+    let thread = format!("agent:{}", solo.id);
+    let held_back = |said: &str| said.starts_with("asking you: ") && !said.contains("you trust it to work on its own") && said.ends_with(HELD_BACK);
+
+    w.core.send_inbound(&thread, &webhook("Run the generator.", false)).await.unwrap();
+    let said = w.broker_said(1).await;
+    assert!(held_back(&said[0]), "{}", said[0]);
+    let asked = wait_for("the request to wait for you", 30, async || {
+        w.core.snapshot().await.unwrap().approvals.into_iter().find(|a| a.agent_id == solo.id && a.status == ApprovalStatus::Pending)
+    })
+    .await;
+    let deny = ApprovalDecision { choice: ApprovalChoice::Deny, message: Some(NOTE.into()), answers: None };
+    w.core.resolve_approval(&asked.id, deny).await.unwrap();
+    go.notify_one();
+
+    // The note starts a turn of its own, after the webhook's: its request is not answered by
+    // your trust.
+    let said = w.broker_said(2).await;
+    assert!(held_back(&said[1]), "{}", said[1]);
+    let noted = w.turns.lock().unwrap().iter().filter(|(_, p)| p.contains(&format!("About the request I just denied: {NOTE}"))).count();
+    assert_eq!(noted, 1, "the note went to the agent once");
+
+    // The turn that your own message starts is your request again.
+    w.core.send_chat(&thread, "Run the generator, please.").await.unwrap();
+    assert_eq!(w.broker_said(3).await[2], TRUSTED);
     w.core.shutdown().await;
 }
 

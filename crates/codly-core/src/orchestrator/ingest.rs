@@ -119,6 +119,8 @@ impl Inner {
         {
             approval.task_id = ctx.task_id.clone(); // adapters do not know Codly's tasks
         }
+        // A turn that reached its run's own cost limit says what is next (breaker_run.rs).
+        self.run_limit_words(&ctx.run_id, ctx.role, ctx.task_id.is_some(), &mut r.kind);
         if r.kind.is_ephemeral() {
             r.workspace_id = ctx.ws.clone();
             let _ = self.bus.send(r);
@@ -142,6 +144,7 @@ impl Inner {
         }
         self.track_live(&ctx, &r.kind);
         self.breaker_observe(&ctx.agent_id, &r.kind);
+        self.run_limit_turn_end(&ctx.agent_id, &ctx.run_id, ctx.role, ctx.task_id.as_deref(), &r.kind);
         match &r.kind {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),

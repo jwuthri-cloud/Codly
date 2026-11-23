@@ -13,8 +13,13 @@
 //! every usage report and saved with it, so the count is the same after a restart. Past a
 //! budget the scheduler starts no task (`budget_hold`), only agents in a turn are steered and
 //! constrained, and you are told once, with the way out: raise the budget or Reset.
+//!
+//! Inside a turn, a Claude run is held by Claude Code itself: it starts with what is left of
+//! the cost budget as its own limit (`run_budget`). A turn that reaches it says why
+//! (`run_limit_words`), and Codly ends that run, which can do no more work
+//! (`run_limit_turn_end`): the next message starts a new one with what is left then.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -25,7 +30,9 @@ use ts_rs::TS;
 
 use super::breaker::{self, Action, BEAT_MS, BreakerConfig, BreakerLevel, Spent, Today, Tracker, Transition, Trip};
 use super::interrupts::Asker;
+use super::retry::Failure;
 use super::{Core, Inner, lock, row, scheduler};
+use crate::adapters::claude;
 use crate::model::*;
 
 const KV_KEY: &str = "breaker";
@@ -47,6 +54,10 @@ pub(super) struct Runtime {
     today: Today,
     /// A budget is used up, and you were told so.
     holding: bool,
+    /// The live Claude runs that started with a limit of their own: run → (agent name, limit).
+    limits: HashMap<Id, (String, f64)>,
+    /// The runs whose turn reached that limit → what that turn says (`run_limit_words`).
+    reached: HashMap<Id, String>,
 }
 
 impl Runtime {
@@ -67,7 +78,7 @@ impl Runtime {
         let cfg = cfg.normalized();
         // Over a budget when you quit: you were told then, and the waiting tasks still say why.
         let holding = breaker::over_budget(&cfg, saved.floor).is_some();
-        Runtime { cfg, tracker: Tracker::resumed(saved.floor), today: saved.today, holding }
+        Runtime { cfg, tracker: Tracker::resumed(saved.floor), today: saved.today, holding, ..Runtime::default() }
     }
 
     fn saved(&self) -> Saved {
@@ -135,6 +146,155 @@ impl Inner {
         breaker::over_budget(&rt.cfg, rt.tracker.floor()).map(|b| b.hold())
     }
 
+    /// The limit of its own a run starts with: for a Claude run, what is left of the cost budget
+    /// (`SpawnSpec::max_budget_usd`). Kept with the run, to know the turn that reaches it.
+    pub(super) fn run_budget(&self, run_id: &str, agent_name: &str, provider: Provider) -> Option<f64> {
+        if provider != Provider::Claude {
+            return None;
+        }
+        let mut rt = lock(&self.breaker);
+        let rest = breaker::rest_usd(&rt.cfg, rt.tracker.floor())?;
+        rt.limits.insert(run_id.to_string(), (agent_name.to_string(), rest));
+        Some(rest)
+    }
+
+    /// The words of a turn that reached its run's own limit (the error it reports, then its
+    /// end), before they are on record. When the team's budget is now used up: that budget and
+    /// the way out. Else what comes next for this run's `role` (`task`: the run works on a
+    /// task): a task's worker and reviewer are not told to send a message, since Codly moves
+    /// their task on (`run_limit_turn_end`), and a Lead's turn may have been started by Codly
+    /// (a worker's question, a follow-up), not by a message of yours. Any other agent: the
+    /// run's own words, which ask you to send your message again.
+    pub(super) fn run_limit_words(&self, run_id: &str, role: Role, task: bool, kind: &mut EventKind) {
+        let said = match kind {
+            EventKind::Error { message, .. } => message,
+            EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some(text), .. } => text,
+            _ => return,
+        };
+        let mut rt = lock(&self.breaker);
+        let Some((agent, limit)) = rt.limits.get(run_id).cloned() else { return };
+        if *said != claude::run_limit_reached(&agent, limit) {
+            return;
+        }
+        // The error and the turn's end say the same, even if the count moved in between.
+        let words = match rt.reached.get(run_id) {
+            Some(words) => words.clone(),
+            None => {
+                let reached = format!("This run of {agent} reached the limit it started with ({limit:.2} USD of your budget were left then).");
+                let words = match (breaker::over_budget(&rt.cfg, rt.tracker.floor()), role) {
+                    (Some(budget), _) => budget.reached(),
+                    (None, Role::Worker) if task => format!("{reached} Codly ends this run; the task's card says what comes next."),
+                    (None, Role::Reviewer) if task => format!("{reached} Its review stops here: re-run the checks of the task to review it again."),
+                    (None, Role::Lead) => format!("{reached} The next message to {agent} starts a new run with what is left now."),
+                    (None, _) => said.clone(),
+                };
+                rt.reached.insert(run_id.to_string(), words.clone());
+                words
+            }
+        };
+        *said = words;
+    }
+
+    /// A turn that reached its run's own limit is over, and the run can do no more work (every
+    /// later turn fails at once): Codly ends it, and moves its task on.
+    /// - A task's worker: its task waits for a new run with what is left then, never for the
+    ///   gate. Past the budget it waits for the budget (`worker_waits_for_budget`), and that
+    ///   stop is no failure of the worker's: only the scheduler's hold bounds its restarts.
+    ///   With budget left (raised while the turn ran) it fails the way a worker does
+    ///   (`worker_failed`), and that counted row stops a restart loop.
+    /// - A task's reviewer: the review stops, and the task waits for you (`review_stopped`).
+    /// - Any other run just ends: the next message starts a new one.
+    pub(super) fn run_limit_turn_end(self: &Arc<Self>, agent_id: &str, run_id: &str, role: Role, task_id: Option<&str>, kind: &EventKind) {
+        if !matches!(kind, EventKind::TurnCompleted { status: TurnStatus::Failed, .. }) {
+            return;
+        }
+        let (limit, over) = {
+            let mut rt = lock(&self.breaker);
+            if rt.reached.remove(run_id).is_none() {
+                return;
+            }
+            let Some((_, limit)) = rt.limits.remove(run_id) else { return };
+            (limit, breaker::over_budget(&rt.cfg, rt.tracker.floor()))
+        };
+        let moved = match (role, task_id, over) {
+            (Role::Worker, Some(task_id), Some(budget)) => self.worker_waits_for_budget(task_id, agent_id, &budget.hold()),
+            (Role::Worker, Some(task_id), None) => {
+                let what = format!("the worker's run reached the limit it started with ({limit:.2} USD of your budget)");
+                self.worker_failed(task_id, agent_id, Failure::Limit(what))
+            }
+            (Role::Reviewer, Some(task_id), _) => {
+                let reason = match over {
+                    Some(budget) => format!("blocked: the review stopped: {}; raise the budget, then re-run the checks", budget.reason()),
+                    None => format!("blocked: the reviewer's run reached the limit it started with ({limit:.2} USD of your budget); re-run the checks to review it again"),
+                };
+                self.review_stopped(task_id, agent_id, run_id, reason)
+            }
+            _ => false,
+        };
+        if !moved {
+            self.stop_run_if(agent_id, |l| l.run_id == run_id);
+        }
+    }
+
+    /// A worker's run stopped at the team's budget: its task goes back to Ready, still its
+    /// worker's (the next run resumes its session), with the budget's hold as its reason, and
+    /// its run ends. False: the task is not this worker's to move any more (you stopped or
+    /// cancelled it, or it is past its worker's part).
+    fn worker_waits_for_budget(self: &Arc<Self>, task_id: &str, agent_id: &str, hold: &str) -> bool {
+        let mut mine = false;
+        let written = self.update_task(task_id, |t| {
+            mine = matches!(t.status, TaskStatus::Running | TaskStatus::ChangesRequested) && t.assignee.as_deref() == Some(agent_id);
+            if mine {
+                t.status = TaskStatus::Ready;
+                t.status_reason = Some(hold.to_string());
+            }
+            Ok(())
+        });
+        if !mine || written.is_err() {
+            return false;
+        }
+        self.release_worker(agent_id, task_id);
+        true
+    }
+
+    /// The reviewer's run of the review under way stopped at its limit, before a verdict: the
+    /// review ends here, and the task waits for you, Blocked with `reason`, its worker and
+    /// reviewer released. Merged without its review, the work would skip the review; nudged,
+    /// the reviewer would find its run ending. False: the task is not in this review any more,
+    /// or the run is not the one of the review under way (an earlier round's run that was
+    /// told to stop).
+    fn review_stopped(self: &Arc<Self>, task_id: &str, reviewer: &str, run_id: &str, reason: String) -> bool {
+        if !lock(&self.live).get(reviewer).is_some_and(|l| l.run_id == run_id && !l.stopping) {
+            return false;
+        }
+        let Ok(task) = self.task(task_id) else { return false };
+        let mut mine = false;
+        let written = self.update_task(task_id, |t| {
+            mine = t.status == TaskStatus::Reviewing;
+            if mine {
+                t.status = TaskStatus::Blocked;
+                t.status_reason = Some(reason.clone());
+            }
+            Ok(())
+        });
+        if !mine || written.is_err() {
+            return false;
+        }
+        let ws = self.store.task_workspace(task_id).ok().flatten();
+        let _ = self.decide(ws.as_deref(), Some(task_id), "review", format!("{}: {reason}", task.key), json!({ "plan_id": task.plan_id }));
+        self.release_worker(reviewer, task_id);
+        if let Some(worker) = task.assignee.as_deref() {
+            self.release_worker(worker, task_id);
+        }
+        if let Some(ws) = ws {
+            let me = self.clone();
+            let (thread, text) = (self.task_thread(&task), format!("Task {} \"{}\" is {reason}.", task.key, task.title));
+            tokio::spawn(async move { me.lead_followup(&ws, &thread, &text).await });
+        }
+        self.kick();
+        true
+    }
+
     /// Say it once when a budget is used up, and once when work goes on again: a line in every
     /// conversation with a running plan (in the open office's first conversation when no plan
     /// runs), and a decision, which the app also shows as a notification.
@@ -184,6 +344,13 @@ impl Inner {
     /// One look at the floor: decide, enforce, record.
     pub(super) async fn breaker_beat(&self) {
         self.budget_announce();
+        // The limits of runs that are over.
+        let runs: HashSet<Id> = lock(&self.live).values().map(|l| l.run_id.clone()).collect();
+        {
+            let mut rt = lock(&self.breaker);
+            rt.limits.retain(|run, _| runs.contains(run));
+            rt.reached.retain(|run, _| runs.contains(run));
+        }
         let leads: HashSet<Id> = lock(&self.live).iter().filter(|(_, l)| l.role == Role::Lead).map(|(id, _)| id.clone()).collect();
         let transitions = {
             let mut rt = lock(&self.breaker);

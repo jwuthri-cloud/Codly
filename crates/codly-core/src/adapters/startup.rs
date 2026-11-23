@@ -224,6 +224,7 @@ mod tests {
             raw_log: "/tmp/raw.ndjson".into(),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
         }
     }
 

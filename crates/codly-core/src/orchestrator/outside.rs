@@ -5,7 +5,10 @@
 //! reads a message from outside Codly may work for what a stranger wrote. From that turn on the
 //! approval broker (ingest.rs) judges the agent's requests by the approval mode alone, whatever
 //! its role, until a turn begins that the user's own chat message started. A message of the
-//! user's that the running turn takes in starts no turn: that turn stays the stranger's.
+//! user's that the running turn takes in starts no turn: that turn stays the stranger's. The
+//! note of a deny that Codly sends for the user (to a CLI that takes no note with its answer,
+//! workspace.rs `answer_approval`) is a refusal of what the agent asked, not a request: the
+//! turn it starts ends no hold either.
 //!
 //! How a turn is told apart: an adapter says what a turn started with, or took in while it ran
 //! (`TurnStarted`, `PromptSteered`), as the text Codly sent. That text holds the chat prompt
@@ -107,24 +110,38 @@ impl Turns {
     }
 }
 
+/// Whose chat prompt goes to an agent (`send_chat_prompt`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Whose {
+    /// The user's own message: the turn it starts ends a hold.
+    Yours,
+    /// A message from outside Codly: the turn that reads it is held back.
+    Outside,
+    /// The note of a deny, sent for the user: it ends no hold, and none begins with it.
+    DenyNote,
+}
+
 impl Inner {
-    /// `send_prompt` for the prompt of a message in an agent's 1:1 chat: the user's own, or one
-    /// from outside Codly (`from_outside`). What it is, is noted before it goes out, so the turn
-    /// that reads it is known. An outside message whose hold cannot be written to the store
-    /// does not go out: that hold would end with the next restart.
-    pub(super) fn send_chat_prompt(&self, agent_id: &str, from_outside: bool, prompt: String) -> Result<()> {
-        if from_outside {
-            if let Err(e) = self.note_outside_turns(agent_id, true, |t| t.sent_outside(&prompt)) {
-                self.chat_prompt_not_sent(agent_id, &prompt);
-                return Err(e.context("the message from outside Codly was not sent"));
+    /// `send_prompt` for the prompt of a message in an agent's 1:1 chat (`Whose`). What it is,
+    /// is noted before it goes out, so the turn that reads it is known. An outside message
+    /// whose hold cannot be written to the store does not go out: that hold would end with the
+    /// next restart. The note of a deny is not noted: the turn that reads it is told apart from
+    /// none, so the hold stays as it was.
+    pub(super) fn send_chat_prompt(&self, agent_id: &str, whose: Whose, prompt: String) -> Result<()> {
+        match whose {
+            Whose::Outside => {
+                if let Err(e) = self.note_outside_turns(agent_id, true, |t| t.sent_outside(&prompt)) {
+                    self.chat_prompt_not_sent(agent_id, &prompt);
+                    return Err(e.context("the message from outside Codly was not sent"));
+                }
             }
-        } else {
             // Nothing to note for an agent that no outside message reached. Your own prompt on
             // its way changes no hold, so nothing is written.
-            self.note_outside_turns(agent_id, false, |t| t.sent_own(&prompt))?;
+            Whose::Yours => self.note_outside_turns(agent_id, false, |t| t.sent_own(&prompt))?,
+            Whose::DenyNote => {}
         }
         let sent = self.send_prompt(agent_id, prompt.clone());
-        if sent.is_err() {
+        if sent.is_err() && whose != Whose::DenyNote {
             self.chat_prompt_not_sent(agent_id, &prompt);
         }
         sent
@@ -273,7 +290,7 @@ mod tests {
         let rows = || inner.store.kv_prefixed(HELD).unwrap().into_iter().map(|(key, _)| key).collect::<Vec<_>>();
 
         // A prompt that cannot go out (no run of that agent) leaves nothing behind.
-        assert!(inner.send_chat_prompt("a1", true, WEBHOOK.to_string()).is_err());
+        assert!(inner.send_chat_prompt("a1", Whose::Outside, WEBHOOK.to_string()).is_err());
         assert!(!inner.works_for_outside("a1") && rows().is_empty());
         // Your own message to an agent that no outside message reached notes nothing.
         inner.note_outside_turns("a1", false, |t| t.sent_own(MINE)).unwrap();
