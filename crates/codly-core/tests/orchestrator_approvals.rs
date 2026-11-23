@@ -255,6 +255,13 @@ fn a_request_offers_its_own_command_and_the_prefix_of_one_plain_command() {
         ("uv run npm install left-pad", None),
         ("pnpm exec git add -A", None),
         ("uv run git add -A", None),
+        // A wrapper or a shell behind a runner starts yet another program: the exact command only.
+        ("uv run env FOO=1 pytest", None),
+        ("poetry run nice pytest", None),
+        ("uv run time pytest", None),
+        ("pnpm exec env CI=1 vitest", None),
+        // A command that `find` runs is not read as `find` alone.
+        ("find . -name '*.rs' -exec wc -l {} +", None),
         // The subcommand behind an option's value: the exact command only.
         ("pnpm --filter web add left-pad", None),
         // Not a program that takes a subcommand, or no plain subcommand: the exact command only.
@@ -412,6 +419,10 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
         "pnpm exec env CI=1 git config user.name me",
         "pnpm exec sh -c 'git config user.name me'",
         "npx npx git config user.name me",
+        // A command that `find` runs for each file.
+        "find . -exec git config user.name x \\;",
+        "find . -name x -execdir npm config set registry http://localhost:4873 \\;",
+        "find . -exec true \\; -exec git config user.name x \\;",
         // Behind another runner, where the command is read by its name.
         "uv run git config user.name me",
         "bundle exec git config user.name me",
@@ -477,37 +488,58 @@ fn what_codly_always_asks_about_is_never_offered_as_a_rule() {
     }
 }
 
-/// Runners that each start the next (`uv run uv run … x`): the command behind each is found
-/// again behind every runner in front of it, and is still read once, so a long line gets its
-/// answer at once. The same for a line for a shell that stands behind many of them.
+/// Runners that each start the next (`uv run uv run … x`): a line whose commands start more
+/// than 24 others is not read to the end. It asks as "runs dynamic code" in every mode but
+/// Full access and offers no rule, and the answer comes at once however long the line is.
 #[test]
-fn a_long_line_of_runners_gets_its_offer_at_once() {
-    let behind = |runner: &str, last: &str| format!("{}{last}", runner.repeat(40));
+fn a_long_line_of_runners_gets_its_answer_at_once() {
+    let behind = |runner: &str, last: &str| format!("{}{last}", runner.repeat(1000));
     let cases = [
-        (behind("uv run ", "true"), true),
+        behind("uv run ", "true"),
         // The word after an option npx does not know is read both ways.
-        (behind("npx --a ", "true"), true),
-        // The command at the end of the line is still read.
-        (behind("uv run ", "git config user.name me"), false),
-        // Each `bun exec` takes the rest of the line as a line for a shell, and that line
-        // holds the next one: each is read once too. Lines so deep inside each other are
-        // not checked, so nothing is offered.
-        (behind("uv run bun exec ", "true"), false),
+        behind("npx --a ", "true"),
+        behind("uv run ", "git config user.name me"),
+        // Each `bun exec` takes the rest of the line as a line for a shell.
+        behind("uv run bun exec ", "true"),
     ];
     let mut late = vec![];
-    for (line, offered) in cases {
+    for line in cases {
         let (done, answer) = std::sync::mpsc::channel();
         let request = cmd(&line);
         std::thread::spawn(move || {
+            let answers = (offer(&request, ApprovalMode::Balanced), eval(&request, ApprovalMode::Autonomous), eval(&request, ApprovalMode::Full));
             // Nobody waits for an answer that comes too late.
-            let _ = done.send(offer(&request, ApprovalMode::Balanced));
+            let _ = done.send(answers);
         });
+        let short = &line[..40];
         match answer.recv_timeout(std::time::Duration::from_secs(10)) {
-            Ok(o) => assert_eq!((o.exact, o.prefix), (offered.then(|| line.clone()), None), "{line}"),
-            Err(_) => late.push(line),
+            Ok((o, autonomous, full)) => {
+                assert!(o.is_empty(), "{short}…: {o:?}");
+                assert!(reason(autonomous).contains("runs dynamic code"), "{short}…");
+                assert!(matches!(full, Verdict::Allow { .. }), "{short}…: {full:?}");
+            }
+            Err(_) => late.push(short.to_string()),
         }
     }
-    assert!(late.is_empty(), "no offer after 10 seconds: {late:#?}");
+    assert!(late.is_empty(), "no answer after 10 seconds: {late:#?}");
+}
+
+/// A line whose commands start 24 others is read to the end, as before; one more is not.
+#[test]
+fn a_line_that_starts_24_commands_is_read_to_the_end() {
+    // The first `uv` starts every `uv` behind it, and the last one starts the command.
+    let line = |runners: usize, last: &str| format!("{}{last}", "uv run ".repeat(runners));
+    let read = line(25, "true");
+    let o = offer(&cmd(&read), ApprovalMode::Balanced);
+    assert_eq!((o.exact.as_deref(), o.prefix), (Some(read.as_str()), None));
+    assert!(allowed(&eval(&cmd(&read), ApprovalMode::Autonomous)));
+    let publish = reason(eval(&cmd(&line(24, "npm publish")), ApprovalMode::Autonomous));
+    assert!(publish.contains("publish") && !publish.contains("runs dynamic code"), "{publish}");
+
+    for too_many in [line(26, "true"), line(25, "npm publish")] {
+        assert!(offer(&cmd(&too_many), ApprovalMode::Balanced).is_empty(), "{too_many}");
+        assert!(reason(eval(&cmd(&too_many), ApprovalMode::Autonomous)).contains("runs dynamic code"), "{too_many}");
+    }
 }
 
 #[test]
