@@ -1,6 +1,7 @@
 // The browser demo's transport (mock.ts) from the outside, as the UI uses it: a URL parameter
 // of docs/DEMO.md starts it in its state, and the commands of that screen are answered.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import resumeRs from '../../../crates/codly-core/src/orchestrator/resume.rs?raw';
 import type { Approval } from '../gen/Approval';
 import type { EventRow } from '../gen/EventRow';
 import type { LotSlot } from '../gen/LotSlot';
@@ -9,8 +10,11 @@ import type { Office } from '../gen/Office';
 import type { Plan } from '../gen/Plan';
 import type { Preview } from '../gen/Preview';
 import type { RequiredChecks } from '../gen/RequiredChecks';
+import type { ResumeOffer } from '../gen/ResumeOffer';
 import type { Snapshot } from '../gen/Snapshot';
+import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
+import { HELD } from '../demo/story';
 import { MockTransport } from '../mock';
 import { intakeUi } from '../state/intake.svelte';
 import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
@@ -64,6 +68,9 @@ describe('the demo transport', () => {
     expect(s.workspace?.name).toBe('acme/web');
     expect(s.chats).toEqual([]);
     expect((await call<RequiredChecks>(t, 'required_checks', { set: null })).on).toBe(true);
+    // "Run plans at once" is on there, so the plan of a request from GitHub is one that waits with its reason.
+    expect(s.settings.auto_run_plans).toBe(true);
+    expect((await snapshot(open(''))).settings.auto_run_plans).toBe(false);
   });
 
   it('`?merge=conflict&preview=running`: a finished plan is not merged until an agent resolved the conflict, and its preview runs', async () => {
@@ -92,13 +99,97 @@ describe('the demo transport', () => {
     expect(await call<string>(t, 'merge_plan', { planId: plan!.id, into: null, unchecked: false })).toMatch(/^[0-9a-f]{40}$/);
   });
 
-  it('answers Close office: a quiet office closes and its plot is free, one with agents at work stays', async () => {
+  it('has two offices, and Close office is refused while one has agents at work or unfinished tasks', async () => {
     const t = open('?ws=1');
-    const docs = (await call<LotSlot[]>(t, 'lots')).find((l) => l.name === 'docs-site')!;
-    await expect(call(t, 'close_office', { workspaceId: 'demo-office-billing' })).rejects.toThrow('is in the middle of a turn in billing-api');
-    const after = await call<LotSlot[]>(t, 'close_office', { workspaceId: docs.workspace_id });
-    expect(after.find((l) => l.id === docs.id)).toMatchObject({ owned: true, workspace_id: null, name: null });
+    const lots = await call<LotSlot[]>(t, 'lots');
+    // No third office: a tab that opened nothing is gone.
+    expect(lots.filter((l) => l.owned).map((l) => l.name).sort()).toEqual(['acme/web', 'billing-api']);
     expect((await call<Office[]>(t, 'offices')).map((o) => o.name)).toEqual(['billing-api']);
+    await expect(call(t, 'close_office', { workspaceId: 'demo-office-billing' })).rejects.toThrow('is in the middle of a turn in billing-api');
+    const home = lots.find((l) => l.name === 'acme/web')!;
+    await expect(call(t, 'close_office', { workspaceId: home.workspace_id })).rejects.toThrow('acme/web still has unfinished work (a1 "Upgrade ESLint to v10"): finish or cancel it first');
+  });
+
+  describe('`?resume=ask`: work was under way when Codly last closed', () => {
+    const offer = (t: MockTransport, go = false) => call<ResumeOffer | null>(t, 'resume_work', { go });
+    /** The first plan's tasks, by key. */
+    const tasks = async (t: MockTransport) => {
+      const s = await snapshot(t);
+      const plan = s.plans.find((p) => p.thread === 'lead')!;
+      return Object.fromEntries(s.tasks.filter((x) => x.plan_id === plan.id).map((x) => [x.key, x])) as Record<string, Task>;
+    };
+
+    it('holds two tasks and their plan when the page loads, and "Resume work" starts them', async () => {
+      const t = open('?resume=ask');
+      expect(await offer(t)).toEqual({ tasks: 2 });
+      // Nothing starts by itself, however long the question is on screen.
+      await vi.advanceTimersByTimeAsync(10_000);
+      const s = await snapshot(t);
+      expect(s.workspace?.name).toBe('acme/web');
+      expect(s.plans.map((p) => p.status)).toEqual(['running']);
+      const held = await tasks(t);
+      // Each says why it waits, in the core's own words.
+      expect(HELD).toBe(/pub const HELD: &str = "([^"]+)";/.exec(resumeRs)?.[1]);
+      expect([held.t1, held.t2].map((x) => [x.status, x.status_reason, x.assignee])).toEqual([['ready', HELD, null], ['ready', HELD, null]]);
+      expect(held.t3.status).toBe('pending');
+
+      // Your Resume: nothing waits any more, the tasks go on, and their history says so.
+      expect(await offer(t, true)).toBeNull();
+      await vi.advanceTimersByTimeAsync(3000);
+      const now = await tasks(t);
+      expect([now.t1.status, now.t2.status]).toEqual(['running', 'running']);
+      const resumed = (await snapshot(t)).events.filter((e) => e.kind.type === 'decision' && e.kind.decision_type === 'retry');
+      expect(resumed.map((e) => [e.task_id, e.kind.type === 'decision' && e.kind.summary])).toEqual([
+        [held.t1.id, 'Resumed after restart: its worker goes on where it stopped'],
+        [held.t2.id, 'Resumed after restart: its worker goes on where it stopped'],
+      ]);
+      expect(await offer(t)).toBeNull();
+    });
+
+    it('keeps the hold after "Not now": nothing starts, also not a plan you run meanwhile', async () => {
+      // ("Not now" sends nothing: the bar keeps its button, and the core is only read)
+      const t = open('?resume=ask');
+      expect(await offer(t)).toEqual({ tasks: 2 });
+      // The second request is planned meanwhile (the script opens it): run its plan.
+      let second: Plan | undefined;
+      for (let i = 0; i < 120 && !second; i++) {
+        await vi.advanceTimersByTimeAsync(1000);
+        second = (await snapshot(t)).plans.find((p) => p.thread !== 'lead' && p.status === 'awaiting_approval');
+      }
+      expect(second, 'the second plan is ready').toBeDefined();
+      await call(t, 'run_plan', { planId: second!.id });
+      await vi.advanceTimersByTimeAsync(20_000);
+      const s = await snapshot(t);
+      expect(s.tasks.filter((x) => ['running', 'verifying', 'merging', 'done'].includes(x.status) && x.plan_id)).toEqual([]);
+      expect(s.agents.filter((a) => a.role === 'worker')).toEqual([]);
+      // Its first task says why it waits, in the core's words; the count is still of the two that were in work.
+      expect(s.tasks.find((x) => x.plan_id === second!.id && x.key === 't1')).toMatchObject({ status: 'ready', status_reason: HELD });
+      expect(await offer(t)).toEqual({ tasks: 2 });
+
+      expect(await offer(t, true)).toBeNull();
+      await vi.advanceTimersByTimeAsync(5000);
+      const after = await snapshot(t);
+      expect(after.tasks.filter((x) => x.status === 'running').map((x) => x.key).sort()).toEqual(['t1', 't1', 't2']);
+    });
+
+    it('counts one less when you cancel a waiting task, and ends by itself when none is left', async () => {
+      const t = open('?resume=ask');
+      const held = await tasks(t);
+      // t3 waits for t1: it is cancelled with it. One task still waits.
+      await call(t, 'cancel_task_tree', { taskId: held.t1.id });
+      expect(await offer(t)).toEqual({ tasks: 1 });
+      await call(t, 'move_task', { taskId: held.t2.id, status: 'cancelled' });
+      expect(await offer(t)).toBeNull();
+      // No hold is left: a task you start from here on needs no Resume.
+      const task = await call<Task>(t, 'create_task', { title: 'Sort the imports', goal: '' });
+      await call(t, 'move_task', { taskId: task.id, status: 'ready' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect((await snapshot(t)).tasks.find((x) => x.id === task.id)?.status).toBe('running');
+    });
+
+    it('holds nothing without the parameter', async () => {
+      expect(await offer(open('?ws=1'))).toBeNull();
+    });
   });
 
   it('opens billing-api as an office of its own, and acme/web is as you left it when you come back', async () => {
@@ -195,6 +286,18 @@ describe('the demo transport', () => {
     expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'connected']]);
   });
 
+  it('`?hour=23.995`: the last minute of today, not the first of tomorrow', () => {
+    const before = Date;
+    const today = new Date().getDate();
+    try {
+      open('?hour=23.995');
+      const now = new Date();
+      expect([now.getDate(), now.getHours(), now.getMinutes()]).toEqual([today, 23, 59]);
+    } finally {
+      globalThis.Date = before;
+    }
+  });
+
   it('`?hour=13.5`: the demo’s clock starts at that hour of the day, and goes on from there', async () => {
     const before = Date;
     try {
@@ -210,5 +313,18 @@ describe('the demo transport', () => {
     } finally {
       globalThis.Date = before;
     }
+  });
+
+  // The last test of this file: the demo's neighbourhood is one for the page, and an office that closed stays closed.
+  it('answers Close office: the open office closes once its tasks are over, and its plot is free', async () => {
+    // (`?intake=issue` opens the repo and starts no scripted request: no agent is in a turn)
+    const t = open('?intake=issue');
+    const s = await snapshot(t);
+    const home = (await call<LotSlot[]>(t, 'lots')).find((l) => l.name === 'acme/web')!;
+    expect(home.workspace_id).toBe(s.workspace!.id);
+    for (const task of s.tasks.filter((x) => x.status !== 'done')) await call(t, 'move_task', { taskId: task.id, status: 'cancelled' });
+    const after = await call<LotSlot[]>(t, 'close_office', { workspaceId: home.workspace_id });
+    expect(after.find((l) => l.id === home.id)).toMatchObject({ owned: true, workspace_id: null });
+    expect(after.find((l) => l.name === 'billing-api')).toMatchObject({ owned: true, workspace_id: 'demo-office-billing' });
   });
 });
