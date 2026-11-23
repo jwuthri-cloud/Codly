@@ -1,10 +1,11 @@
 # Drivers for the Claude Code stream-json recordings
 
-These scripts made the fixtures in `docs/research/fixtures/claude-2.1.311/` and the four documents
+These scripts made the fixtures in `docs/research/fixtures/claude-2.1.311/` and the five documents
 `docs/research/cli-claude-stream-json-2.1.311.md` (part 1, scripts `s*.py`),
 `docs/research/cli-claude-stream-json-2.1.311-part2.md` (part 2, scripts `r4_*.py`),
-`docs/research/cli-claude-stream-json-2.1.311-part3.md` (part 3, scripts `r5_*.py`) and
-`docs/research/cli-claude-stream-json-2.1.311-part4.md` (part 4, scripts `r6_*.py`).
+`docs/research/cli-claude-stream-json-2.1.311-part3.md` (part 3, scripts `r5_*.py`),
+`docs/research/cli-claude-stream-json-2.1.311-part4.md` (part 4, scripts `r6_*.py`) and
+`docs/research/cli-claude-stream-json-2.1.311-part5.md` (part 5, scripts `r7_*.py`).
 Python 3.11 or newer, standard library only. They start the real `claude` CLI with your own login: read
 "Before you run" first.
 
@@ -75,6 +76,29 @@ Part 4 (`r6_*.py`), what is new:
   end. It changes no other file there. The CLI resumes them, so the copies do get lines appended before they go.
 - Sandbox: `r6_d6_network_deny.py` (keep `CAPTURE_DIR` outside the CLI's temp folder, as for part 3).
 
+Part 5 (`r7_*.py`), what is new:
+
+- Cost at list price: 0.050 USD for the committed recordings (about 0.08 USD with the runs that were recorded again).
+- `mcp_toggle` IS SAVED in `~/.claude.json` (part 5, section 1). Every part 5 script that switches a server
+  (`r7_e1`, `r7_e9`) runs with a throw-away HOME, made empty by `r7_lib.home()` at each run. Earlier scripts that
+  switch a server with your real HOME (`r4_e18_mcp_needs_auth.py`, `r5_e10_mcp_reconnect_toggle.py`) leave the entry
+  of their work folder in your `~/.claude.json`; both turn the server on again at the end, so its
+  `disabledMcpServers` list ends empty.
+- TWO RUNS READ YOUR OWN USER SETTINGS with your real login: `r7_e2_untrusted_mcp.py user-login` and
+  `user-local-login`, with the safety of `r6_e8` (see Part 4 above: `disableAllHooks`, claude.ai connectors off, one tool
+  allowed, no `mcp_status`). Your own stdio MCP servers are started by the CLI, as in any session of yours.
+- Throw-away HOME, no login, no cost: `r7_e1`, `r7_e9`, and `r7_e2` (`local-scope-*`, `approval-*`). `r7_e2` runs
+  `claude mcp add --scope local` / `claude mcp remove` with that HOME (they write only its `.claude.json`).
+- `r7_b11_stop_helper_mid_turn.py` reads the session's own transcript under `~/.claude/projects/` after the exit and
+  notes COUNTS of queued task notifications (`r7_lib.queued_notifications`); it copies nothing from it.
+- `r7_b6_tool_progress_http.py` serves an MCP server over HTTP on `127.0.0.1` (a free port) in a thread of the script for the
+  time of the run (`mcp_http_ping_server.py`).
+- Processes: `r7_a4`, `r7_a5`, `r7_b3`, `r7_b11`, `r7_f10` start long `sleep`s through the CLI (`sleep 181`, `191`,
+  `197`, `199`, `41`, `173`, `21.5`, `61.5`) and kill what is left of them, found by their command line as before.
+  `r7_b12` runs short `sleep`s (1 to 14 s) that end by themselves; it kills nothing.
+- `r7_f10_budget_during_call.py` stops when its budget does not fall between the two costs it aims at (the cache moves
+  the cost of a request): run it again.
+
 ## Layout
 
 `CAPTURE_DIR` (default: the folder that holds this folder) gets three sub-folders:
@@ -101,6 +125,7 @@ python3 sanitize.py                           # raw/*.ndjson -> fixtures/*.ndjso
 python3 make_notes_part2.py out.md            # part 2 document from the r4-* fixtures
 python3 make_notes_part3.py out.md            # part 3 document from the r5-* fixtures (it checks its own statements)
 python3 make_notes_part4.py out.md            # part 4 document from the r6-* fixtures (the same)
+python3 make_notes_part5.py out.md            # part 5 document from the r7-* fixtures (the same)
 python3 cost.py                               # list-price cost of everything in raw/
 ```
 
@@ -143,6 +168,9 @@ cd "$CAPTURE_DIR/fixtures"
 | `mcp_ping_server.py` | minimal stdio MCP server used by `r4_e19_project_mcp.py` and the part 3 MCP scripts (options: a label in the answer, a slow tool, a file it needs to start) |
 | `r5_lib.py` | helpers shared by the `r5_*.py` scripts (the `r6_*.py` scripts use them too) |
 | `r6_lib.py` | helpers of the `r6_*.py` scripts: time stamps of lines (not of the driver's waits), a note at the moment the process exits, process helpers |
+| `r7_lib.py` | helpers of the `r7_*.py` scripts: a throw-away HOME, changed files, the folder's entry in `HOME/.claude.json`, counts of queued task notifications in a session's transcript |
+| `mcp_http_ping_server.py` | minimal MCP server over Streamable HTTP on 127.0.0.1, run in a thread of `r7_b6_tool_progress_http.py` (a slow tool) |
+| `make_notes_part5.py` | builds the part 5 document, with the same checks; it also lists the part 4 notes that were written late |
 
 Part 1 scenarios (`s*.py` -> fixtures without prefix): `s00_smoke`, `s01_mid_turn` (plain, uuid, uuid-now,
 uuid-next, uuid-later), `s02_control`, `s03_image`, `s04_subagent`, `s05_background`, `s06_limits`,
@@ -208,12 +236,34 @@ Part 4 scenarios (`r6_*.py` -> fixtures `r6-*`; the number in a script's name is
 | `r6_f10_budget_midturn_resumed.py` | a label (1, 2) | `r6-budget-midturn-<label>-a`, `-b`, `-c1` … | 10 |
 | `r6_e11_mcp_clash_user.py` | clash, strict; then a label (1, 2) | `r6-mcp-user-*` | 11 |
 
+Part 5 scenarios (`r7_*.py` -> fixtures `r7-*`; the number in a script's name is the section of part 5):
+
+| script | variants | fixtures | part 5 section |
+|---|---|---|---|
+| `r7_e1_mcp_toggle_saved.py` | a label (1, 2): three processes each | `r7-mcp-toggle-saved-<label>-a`, `-b`, `-c` | 1 |
+| `r7_e2_untrusted_mcp.py` | user-login, user-local-login (real login, your user settings), local-scope-user, local-scope-user-local, approval-user, approval-user-local; then a label | `r7-untrusted-mcp-*` | 2 |
+| `r7_b3_failed_turn_helper.py` | a label (1, 2) | `r7-failed-turn-helper-*` | 3 |
+| `r7_a4_interrupt_two_helpers.py` | two, model; then a label | `r7-interrupt-two-helpers-*`, `r7-interrupt-helper-model-*` | 4 |
+| `r7_a5_shutdown_helper_and_command.py` | a label (1, 2) | `r7-shutdown-helper-and-command-*` | 5 |
+| `r7_b6_tool_progress_http.py` | the tool's seconds (70, 45); then a label | `r7-tool-progress-http-<secs>-<label>` | 6 |
+| `r7_c7_allow_set_mode.py` | a label (1, 2) | `r7-allow-set-mode-*` | 7 |
+| `r7_c8_effort_null_low_max.py` | low, max; then a label | `r7-effort-null-<level>-<label>` | 8 |
+| `r7_e9_mcp_cannot_start.py` | a label (1, 2) | `r7-mcp-cannot-start-*` | 9 |
+| `r7_f10_budget_during_call.py` | a label (1, 2): a calibration run and one or more tries | `r7-budget-during-call-<label>-calib`, `-t1` … | 10 |
+| `r7_b11_stop_helper_mid_turn.py` | a label (1, 2) | `r7-stop-helper-mid-turn-*` | 11 |
+| `r7_b12_bash_becomes_task.py` | a label (1, 2) | `r7-bash-becomes-task-*` | 12 |
+
 Notes for whoever records again:
 - The `tool_use` line of a Bash call can come seconds before the call's process exists (the first shell start of a
   session is slow, more so on a busy machine). A scenario that stops a RUNNING command must wait for the process
   (`r6_lib.wait_alive`), not for the line: a first set of part 4 recordings stopped calls that had not started yet.
 - Measure times with the stamps of the lines (`r6_lib.stamps`), never around `wait_results()`: that wait looks every
   0.2 s, and part 3 once reported that interval as a latency.
+- A note that lists lines must be written in the same step as the list: make the slow checks (`pgrep`) first, then
+  take the list and write the note under `s.cv` (the driver's lock). Two part 4 notes listed fewer lines than the
+  file has before them (part 5, "Notes of part 4 written late").
+- The CLI streams no partial lines of a helper (no `stream_event` with its `parent_tool_use_id`): a scenario cannot wait
+  for a helper's first text delta.
 - `r6_f10_budget_midturn_resumed.py` tries budgets of 0.5, 0.7 and 0.85 of one turn's cost and stops at the first
   run whose limit came after a tool call had run: how many `-c` fixtures a label has differs from run to run. In a
   try with a very small budget the model may refuse to call a tool at all.
