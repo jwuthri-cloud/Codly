@@ -17,7 +17,7 @@ Parameters go in the URL and can be combined. They are read once, when the page 
 | --- | --- |
 | `?ws=1` | Opens `acme/web` at once. |
 | `?speed=2` | Plays the script faster (`0.5` is slower). |
-| `?skip=90` | Starts 90 seconds into the script. It also opens the repo. |
+| `?skip=90` | Starts 90 seconds into the script. Any value, `0` included, also opens the repo. |
 | `?autoplay=1` | Runs each plan and allows each request by itself. |
 | `?onboard=1` | A machine with no agent CLI installed, to see the first-run quest. |
 
@@ -70,8 +70,9 @@ request of one office is there again when you come back to it.
   agent is in, and gets no turn of its own. With another CLI it waits for the turn's end. The
   wait is about a second: slow the script down (`?speed=0.25`) to see the "Queued" line.
 - "Always allow in this repo": Ada asks before `npm install -D @testing-library/react`. Save the
-  rule for `npm install` on that card, and Cy's later `npm install` is allowed without a question.
-  A command that deletes (`rm -rf dist && npm run build`) offers no rule.
+  rule for `npm install` on that card, and Cy's later `npm install -D @axe-core/playwright` is
+  allowed without a question.
+  A command that deletes (Bo's `rm -rf dist && npm run build`) offers no rule.
 - A 1:1 Claude agent you hire works in its mode: "plan first" shows a plan, "ask for edits" asks
   before the edit, "accept edits" edits without a question.
 - Close office (on the map) refuses while the office has unfinished work or an agent is in a turn.
@@ -84,8 +85,15 @@ request of one office is there again when you come back to it.
 - A command an agent leaves running in the background: in her first task Ada starts a type check
   (`npx tsc --noEmit --watch`) and stops it before she reports. While it runs, her sheet lists it
   under "In the background" with Stop, and her History has one row for each change of the list.
-  Without `?autoplay=1` it stays until you answer her `npm install` request: run the first plan
-  (`?skip=20`), open Ada's sheet, and press Stop.
+  Without `?autoplay=1` it stays until you answer her `npm install` request and then her
+  question about the `localStorage` fallback: run the first plan (`?skip=20`), open Ada's sheet,
+  and press Stop.
+
+## Other demo pages
+
+`office-demo.html` (the office alone) and `character-lab.html` (the characters) read parameters
+of their own: see `src/office/demo.ts`, `src/office/demo/Harness.svelte` and
+`src/office/demo/lab.ts`. They are tools for the office's look, not part of the app's demo.
 
 ## What the demo cannot show
 
