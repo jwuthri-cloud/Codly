@@ -510,7 +510,9 @@
 
 <style>
   .sections { padding-bottom: 16px; }
-  .as { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow-y: auto; scroll-padding-top: 48px; }
+  /* `position: relative`: what is out of flow inside (the screen-reader-only labels) scrolls with
+     the content, and never makes the sheet's frame around it scrollable. */
+  .as { position: relative; display: flex; flex-direction: column; min-height: 0; height: 100%; overflow-y: auto; scroll-padding-top: 48px; }
   /* No height of its own: the bar lies over the top of what scrolls and takes no room. */
   .pin { position: sticky; top: 0; z-index: 1; height: 0; flex-shrink: 0; }
   .pin-bar { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 56px 0 22px; background: var(--glass-solid); box-shadow: 0 1px 0 var(--line); opacity: 0; pointer-events: none; transition: opacity var(--d-2) var(--ease-out); }
