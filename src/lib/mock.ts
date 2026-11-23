@@ -165,7 +165,7 @@ export class MockTransport implements Transport {
   /** The requests closed in the demo, newest first, with what was said in each. */
   private demoClosed: { thread: string; closed_at: number; messages: ChatMessage[]; authors: Record<string, string> }[] = [];
   /** Demo repo: the last merge into main, until it is undone. */
-  private demoMerge: Omit<LastMerge, 'blocked'> | null = null;
+  private demoMerge: Omit<LastMerge, 'blocked' | 'kept'> | null = null;
   /** Demo repo: the pull requests "opened" from the app. */
   private pullRequests = new PullRequestDemo();
   /** Demo repo: the commands "run" to try a plan's or an agent's work. */
@@ -173,7 +173,7 @@ export class MockTransport implements Transport {
   /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
   private demoSync(): RepoSync {
     const pushed = this.demoPushed;
-    const last_merge = this.demoMerge && { ...this.demoMerge, blocked: pushed ? 'the merge is already on origin/main' : null };
+    const last_merge = this.demoMerge && { ...this.demoMerge, blocked: pushed ? 'the merge is already on origin/main' : null, kept: 'refs/codly/before-merge' };
     return { branch: 'main', upstream: 'origin/main', ahead: pushed ? 0 : 2, behind: 0, dirty: [], last_merge };
   }
   private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
@@ -335,7 +335,7 @@ export class MockTransport implements Transport {
         const source = a.source as PrSource;
         const branch = source.kind === 'plan' ? sim.plans.get(source.id)?.integration_branch : mockAgentGit(sim.agents.get(source.id), sim.now()).branch;
         if (!branch) throw new Error(source.kind === 'plan' ? 'the plan never ran, so there is nothing to merge' : 'this agent has no worktree yet, so there is nothing to merge');
-        return { target: 'main', branch, repo: sim.workspace?.repo_path ?? '', conflicts: [], resolving: null, failed_checks: [], checks_not_run: null } satisfies MergeState;
+        return { target: 'main', branch, repo: sim.workspace?.repo_path ?? '', conflicts: [], resolving: null, failed_checks: [], checks_not_run: null, behind: 0 } satisfies MergeState;
       }
       case 'stop_resolving_merge':
         throw new Error(`${sim.agents.get(String(a.agentId))?.name ?? 'This agent'} is not resolving a merge`); // the demo never starts one

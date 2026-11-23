@@ -48,6 +48,12 @@ fn last_merge_key(ws_id: &str) -> String {
     format!("last_merge:{ws_id}")
 }
 
+/// Where the user's branch was before the last merge Codly made into it: a ref in their own
+/// repository, set before the merge writes anything, and kept until the next merge or an undo.
+/// It is on record without Codly too: `git log refs/codly/before-merge` shows the branch as it
+/// was.
+const BEFORE_MERGE: &str = "refs/codly/before-merge";
+
 impl Inner {
     // ───────────── workspace ─────────────
 
@@ -711,7 +717,7 @@ impl Inner {
         self.check_dirty_overlap(&repo, &branch, base.as_deref(), &format!("{}'s branch", agent.name)).await?;
         let before = self.git.head(&repo).await?;
         let msg = format!("Merge {}'s work ({branch})", agent.name);
-        let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
+        let sha = match self.merge_with_way_back(&repo, before.as_deref(), &branch, &msg).await? {
             MergeOutcome::Merged { sha } => {
                 self.record_merge(&ws.id, &sha, before.as_deref(), &target, &branch, None, Some(agent_id))?;
                 sha
@@ -750,11 +756,37 @@ impl Inner {
         let last_merge = match self.last_merge(&ws.id)? {
             Some(m) => {
                 let blocked = self.git.undo_merge_blocker(&repo, &m.branch, &m.sha, &m.before, &m.source).await?;
-                Some(LastMerge { sha: m.sha, branch: m.branch, plan_id: m.plan_id, agent_id: m.agent_id, blocked })
+                // Named only while it is of this merge (not of one made before Codly kept a ref).
+                let kept = self.git.rev_parse(&repo, BEFORE_MERGE).await?.filter(|at| *at == m.before).map(|_| BEFORE_MERGE.to_string());
+                Some(LastMerge { sha: m.sha, branch: m.branch, plan_id: m.plan_id, agent_id: m.agent_id, blocked, kept })
             }
             None => None,
         };
         Ok(RepoSync { branch, upstream, ahead, behind, dirty, last_merge })
+    }
+
+    /// Merge `source` into the user's checked-out branch, which is at `before`, with a way
+    /// back that needs no Codly: `BEFORE_MERGE` keeps that commit before the merge writes
+    /// anything. A merge that is not made (a conflict, nothing to merge, a hook that stopped
+    /// it) puts the ref back on the merge before this one, or removes it.
+    async fn merge_with_way_back(&self, repo: &Path, before: Option<&str>, source: &str, message: &str) -> anyhow::Result<MergeOutcome> {
+        // A branch without a commit has nothing to go back to.
+        let Some(before) = before else { return self.git.merge(repo, source, message, false).await };
+        let earlier = self.git.rev_parse(repo, BEFORE_MERGE).await?;
+        self.git.set_ref(repo, BEFORE_MERGE, before).await?;
+        let merged = self.git.merge(repo, source, message, false).await;
+        if !matches!(merged, Ok(MergeOutcome::Merged { .. })) {
+            let put_back = match &earlier {
+                Some(sha) => self.git.set_ref(repo, BEFORE_MERGE, sha).await,
+                None => self.git.delete_ref(repo, BEFORE_MERGE).await,
+            };
+            // The merge's own outcome is what the user must read. A ref left on the branch as
+            // it is says nothing wrong, and `repo_sync` names it only for the merge it is of.
+            if let Err(e) = put_back {
+                tracing::warn!("{BEFORE_MERGE} was not put back after a merge that was not made: {e:#}");
+            }
+        }
+        merged
     }
 
     fn last_merge(&self, ws_id: &str) -> anyhow::Result<Option<MergeRecord>> {
@@ -792,6 +824,13 @@ impl Inner {
             .ok_or_else(|| anyhow!("that is not the last merge Codly made into your branch, so it cannot be undone here"))?;
         let restored = self.git.undo_merge(&repo, &m.branch, &m.sha, &m.before, &m.source).await?;
         self.store.kv_write(&[(last_merge_key(&ws.id), None)])?;
+        // The branch is where the ref says it was: nothing is left to keep. (The undo is made:
+        // a ref that could not be removed is no reason to say it failed.)
+        if matches!(self.git.rev_parse(&repo, BEFORE_MERGE).await, Ok(Some(_)))
+            && let Err(e) = self.git.delete_ref(&repo, BEFORE_MERGE).await
+        {
+            tracing::warn!("{BEFORE_MERGE} was not removed after the undo: {e:#}");
+        }
         let back = format!("{} is back at {}", m.branch, &m.before[..m.before.len().min(10)]);
         let kept = if restored {
             format!("Its branch {} had been deleted, so Codly put it back; you can merge it again.", m.source)
@@ -971,7 +1010,7 @@ impl Inner {
             bail!("{target} or the plan's branch changed while the checks ran, so they say nothing about this merge; nothing was merged. Merge again.");
         }
         let msg = format!("Merge Codly plan: {}", prompts::clip(&p.summary, 72));
-        let sha = match self.git.merge(&repo, &branch, &msg, false).await? {
+        let sha = match self.merge_with_way_back(&repo, before.as_deref(), &branch, &msg).await? {
             MergeOutcome::Merged { sha } => {
                 self.record_merge(&ws.id, &sha, before.as_deref(), &target, &branch, Some(&p.id), None)?;
                 sha

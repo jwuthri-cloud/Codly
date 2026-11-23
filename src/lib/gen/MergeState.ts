@@ -21,8 +21,9 @@ repo: string,
  */
 conflicts: Array<string>, 
 /**
- * Who resolves the conflicts now: the plan's task, while it is not finished; the solo
- * agent, while the merge Codly started is open in its worktree.
+ * Who works on it now: the plan's task that resolves the conflicts (or makes the plan's
+ * checks pass on the merge), while it is not finished; the solo agent, while the merge
+ * Codly started is open in its worktree.
  */
 resolving: string | null, 
 /**
@@ -35,4 +36,10 @@ failed_checks: Array<string>,
  * was tried (the worktree for them could not be set up; the merge was not made). None
  * once either branch moved.
  */
-checks_not_run: string | null, };
+checks_not_run: string | null, 
+/**
+ * How many commits the checked-out branch has that the Codly branch was not built on: it
+ * is behind by that many, and the merge brings the two together. 0 when the Codly branch
+ * has nothing to merge: it is merged already, or it has no commit of its own.
+ */
+behind: number, };

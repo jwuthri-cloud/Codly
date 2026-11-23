@@ -441,13 +441,10 @@ impl Inner {
             return self.wait_for_turn(task_id);
         }
 
-        // 6. Optional cross-vendor review; it resumes the gate from review_done().
+        // 6. Optional cross-vendor review; it resumes the gate from review_done(). (For a task
+        // that resolved a merge with your branch, of the resolution only: `start_review`.)
         let staff = self.agent(&worker).is_ok_and(|a| crate::career::trusts(&a.career, Rank::Staff));
-        if self.settings().review_gate && !files.is_empty() && in_place {
-            // Its diff is mostly your own commits. The plan's checks, run above and again when
-            // the plan finishes, judge the result.
-            self.decide(ws, Some(task_id), "gate", format!("{}: no review, it resolves a merge with your branch", task.key), json!({ "plan_id": task.plan_id }))?;
-        } else if self.settings().review_gate && !files.is_empty() && staff {
+        if self.settings().review_gate && !files.is_empty() && staff {
             self.decide(ws, Some(task_id), "gate", format!("{}: no review, you trust its worker to merge without one", task.key), json!({ "plan_id": task.plan_id }))?;
         } else if self.settings().review_gate && !files.is_empty() {
             let notes = report["notes_for_reviewer"].as_str().map(String::from);
@@ -975,6 +972,14 @@ impl Inner {
         notes: Option<&str>,
     ) -> Result<()> {
         let ws = self.store.workspace(ws_id)?.ok_or_else(|| anyhow!("unknown workspace"))?;
+        // A task that resolved a merge with your branch: its reviewer reads what was changed
+        // by hand, not your own commits that the merge brought in. Nothing by hand: no review.
+        let resolution = self.resolution_diff(task, Path::new(&ws.repo_path), base_ref).await?;
+        if resolution.as_deref().is_some_and(|diff| diff.trim().is_empty()) {
+            let summary = format!("{}: no review, nothing was changed by hand in the merge with your branch", task.key);
+            self.decide(Some(ws_id), Some(&task.id), "review", summary, json!({ "plan_id": task.plan_id }))?;
+            return self.merge_task(&task.id, 0).await;
+        }
         let agents = self.store.agents(ws_id)?;
         let worker_provider = task.assignee.as_deref().and_then(|a| agents.iter().find(|x| x.id == a)).map(|a| a.provider);
         let settings = self.settings();
@@ -1047,7 +1052,10 @@ impl Inner {
             None => hire()?,
         };
         let branch = task.branch.clone().ok_or_else(|| anyhow!("the task has no branch"))?;
-        let diff = self.git.diff(Path::new(&ws.repo_path), base_ref, &branch).await?;
+        let diff = match &resolution {
+            Some(by_hand) => by_hand.clone(),
+            None => self.git.diff(Path::new(&ws.repo_path), base_ref, &branch).await?,
+        };
         // A new round: no reviewer run has it yet, so what a run of an earlier round still
         // reports from here on is not this round's verdict (`review_done_inner`).
         lock(&self.fix_rounds).entry(task.id.clone()).or_default().review = None;
@@ -1119,13 +1127,16 @@ impl Inner {
             }
         };
         lock(&self.fix_rounds).entry(task.id.clone()).or_default().review = Some(run);
-        let brief = prompts::review_brief(&prompts::ReviewBrief {
+        let mut brief = prompts::review_brief(&prompts::ReviewBrief {
             task,
             diff: &diff,
             verify: results,
             worker_notes: notes,
             scope_exceptions: declared,
         });
+        if resolution.is_some() {
+            brief.push_str(merge_conflict::REVIEW_NOTE);
+        }
         self.send_prompt(&reviewer.id, brief)
     }
 

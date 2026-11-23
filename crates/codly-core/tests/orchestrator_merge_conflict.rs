@@ -15,7 +15,14 @@
 //!   resolution, not the finished plan; a restart of Codly keeps the open merge, and a Retry
 //!   starts it again after its rounds ran out;
 //! - a plan that started from another branch is resolved only after the user confirms it; a
-//!   merge whose checks could not run, or whose branches moved while they ran, is not made.
+//!   merge whose checks could not run, or whose branches moved while they ran, is not made;
+//! - with reviews on, the task that resolved a conflict is reviewed, and its reviewer reads the
+//!   resolution only, not the user's commits that the merge brought in;
+//! - checks that fail on the merge result with no conflict can go to an agent: one more task
+//!   of the plan makes them pass, and one that does not finish takes the merge back;
+//! - a resolution that does not finish takes its worker's new files out of the plan's worktree;
+//! - before a merge writes to the user's branch, a ref keeps the branch as it was, until the
+//!   next merge or the undo; the state says how far the Codly branch is behind the user's.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,6 +60,15 @@ fn commit(repo: &Path, file: &str, content: &str) -> String {
 
 fn in_merge(wt: &Path) -> bool {
     git(wt, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).status.success()
+}
+
+/// The ref that keeps your branch as it was before the last merge Codly made into it.
+const BEFORE_MERGE: &str = "refs/codly/before-merge";
+
+/// The commit `BEFORE_MERGE` keeps, if the ref is there.
+fn kept_before_merge(repo: &Path) -> Option<String> {
+    let out = git(repo, &["rev-parse", "-q", "--verify", BEFORE_MERGE]);
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn temp_repo(root: &Path) -> PathBuf {
@@ -260,6 +276,18 @@ async fn verified(core: &Core) -> Vec<(Option<Id>, String, bool)> {
         .collect()
 }
 
+/// What Codly put on record, oldest first.
+async fn decisions(core: &Core) -> Vec<String> {
+    let mut all = core.events(None, None, 4000).await.unwrap();
+    all.sort_by_key(|e| e.id);
+    all.iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Decision { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Where a merge check would make its scratch worktree, per office.
 fn scratch_dirs(root: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(root.join("data").join("worktrees")).unwrap().map(|office| office.unwrap().path().join("merge-check")).collect()
@@ -313,11 +341,13 @@ async fn an_agent_resolves_a_plans_conflict_with_your_branch_and_the_merge_goes_
     let state = core.merge_state(&source).await.unwrap();
     assert_eq!((state.target.as_str(), state.branch.as_str(), state.conflicts.len(), state.resolving, state.failed_checks.len()), ("main", branch.as_str(), 0, None, 0));
     assert_eq!(Path::new(&state.repo), std::fs::canonicalize(&repo).unwrap());
+    assert_eq!(state.behind, 0, "the plan is built on main as it is");
 
     // You kept working on main: the same line, and a file the plan never touched.
     std::fs::write(repo.join("README.md"), "# demo\nmine\n").unwrap();
     let mine = commit(&repo, "greeting.txt", "hello from main\n");
-    assert_eq!(core.merge_state(&source).await.unwrap().conflicts, ["greeting.txt"]);
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((&state.conflicts[..], state.behind), (&["greeting.txt".to_string()][..], 1), "behind main by your one commit, which conflicts");
 
     // Merge: refused, with the files and both ways out; your checkout is as it was.
     let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
@@ -325,6 +355,10 @@ async fn an_agent_resolves_a_plans_conflict_with_your_branch_and_the_merge_goes_
     assert!(err.contains("An agent (on the plan's card) can resolve it") && err.ends_with(&format!("git merge {branch}")), "{err}");
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (mine.clone(), String::new()));
     no_scratch_left(dir.path());
+    // Without the checks first, git itself finds the conflict: no merge, and no ref of one.
+    let err = core.merge_plan_unchecked(&plan.id, None).await.unwrap_err().to_string();
+    assert!(err.contains("merging into main conflicts in greeting.txt"), "{err}");
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (mine.clone(), None));
 
     // Have an agent resolve it: the plan runs again with one more task, in its own worktree.
     let state = core.resolve_merge_conflict(&source).await.unwrap();
@@ -356,7 +390,11 @@ async fn an_agent_resolves_a_plans_conflict_with_your_branch_and_the_merge_goes_
     let runs = verified(&core).await;
     let for_task: Vec<&str> = runs.iter().filter(|(t, _, ok)| t.as_deref() == Some(task.id.as_str()) && *ok).map(|(_, c, _)| c.as_str()).collect();
     assert_eq!(for_task, ["grep -q plan greeting.txt", "test -f greeting.txt"]);
-    assert_eq!(runs.iter().filter(|(t, c, ok)| t.is_none() && c == "test -f greeting.txt" && *ok).count(), 2, "the integration check ran when the plan finished, both times");
+    // The task ran the integration check on the plan's branch as it is: the plan, when it
+    // finished again, did not run it a second time, and the record says why.
+    assert_eq!(runs.iter().filter(|(t, c, ok)| t.is_none() && c == "test -f greeting.txt" && *ok).count(), 1, "for the plan, only when it first finished");
+    let skipped = "`grep -q plan greeting.txt`, `test -f greeting.txt` passed in task resolve on the plan's branch as it is: the plan does not run them a second time";
+    assert!(decisions(&core).await.iter().any(|d| d == skipped), "{:?}", decisions(&core).await);
     // All along, your checkout was not touched.
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (mine.clone(), String::new()));
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from main\n");
@@ -370,16 +408,19 @@ async fn an_agent_resolves_a_plans_conflict_with_your_branch_and_the_merge_goes_
 
     // Nothing conflicts any more: the merge goes through, and can still be undone.
     let state = core.merge_state(&source).await.unwrap();
-    assert_eq!((state.conflicts.len(), state.resolving), (0, None));
+    assert_eq!((state.conflicts.len(), state.resolving, state.behind), (0, None, 0));
     let sha = core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
     assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "# demo\nmine\n");
     assert!(!integ_wt.exists(), "the integration worktree is cleaned up once merged");
+    // main as it was before the merge is kept under a ref of its own, and Undo names it.
+    assert_eq!(kept_before_merge(&repo).as_deref(), Some(mine.as_str()));
     let last = core.repo_sync().await.unwrap().last_merge.unwrap();
-    assert_eq!((last.sha.as_str(), last.plan_id.as_deref(), last.blocked), (sha.as_str(), Some(plan.id.as_str()), None));
+    assert_eq!((last.sha.as_str(), last.plan_id.as_deref(), last.blocked, last.kept.as_deref()), (sha.as_str(), Some(plan.id.as_str()), None, Some(BEFORE_MERGE)));
     core.undo_merge(&sha).await.unwrap();
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), mine);
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from main\n");
+    assert_eq!(kept_before_merge(&repo), None, "main is back there: nothing is left to keep");
     core.shutdown().await;
 }
 
@@ -461,7 +502,8 @@ async fn the_plans_checks_run_on_the_merge_result_before_your_branch_moves() {
 
     // You changed a file the plan does not touch: no conflict, but its check fails with it.
     let bad = commit(&repo, "mode.txt", "bad\n");
-    assert!(core.merge_state(&source).await.unwrap().conflicts.is_empty());
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((state.conflicts.len(), state.behind), (0, 1), "behind main by one commit that merges by itself");
     let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
     assert_eq!(err, format!("with the plan merged into main, `{check}` failed, so nothing was merged and main is unchanged"));
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (bad.clone(), String::new()));
@@ -478,13 +520,15 @@ async fn the_plans_checks_run_on_the_merge_result_before_your_branch_moves() {
     let lines = said(&core, "lead").await;
     assert!(lines.last().unwrap().ends_with("You merged it without the plan's checks on the merge result."), "{lines:?}");
     assert!(core.merge_state(&source).await.unwrap().failed_checks.is_empty());
+    assert_eq!(kept_before_merge(&repo).as_deref(), Some(bad.as_str()), "main as it was is kept before the merge");
     core.undo_merge(&sha).await.unwrap();
-    assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), bad);
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (bad.clone(), None));
 
     // You fix your side: the check passes on the merge result, the merge is made, and Codly says what ran.
-    commit(&repo, "mode.txt", "good again\n");
+    let fixed = commit(&repo, "mode.txt", "good again\n");
     let sha = core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), sha);
+    assert_eq!(kept_before_merge(&repo).as_deref(), Some(fixed.as_str()), "the ref is of the last merge");
     assert_eq!(std::fs::read_to_string(repo.join("feature.txt")).unwrap(), "on\n");
     no_scratch_left(dir.path());
     assert_eq!(verified(&core).await.last().unwrap(), &(None, check.to_string(), true));
@@ -492,10 +536,21 @@ async fn the_plans_checks_run_on_the_merge_result_before_your_branch_moves() {
     let told = format!(" main had changed since the plan was checked. Codly ran the plan's checks on the merge result first: `{check}` passed.");
     assert!(lines.last().unwrap().starts_with("Merged \"Change the greeting\" into main (") && lines.last().unwrap().ends_with(&told), "{lines:?}");
 
-    // Merged already: nothing is checked or merged twice.
+    // Merged already: nothing is checked or merged twice, and the ref stays on that merge.
     let runs = verified(&core).await.len();
     assert_eq!(core.merge_plan(&plan.id).await.unwrap(), sha);
     assert_eq!(verified(&core).await.len(), runs);
+    assert_eq!(kept_before_merge(&repo).as_deref(), Some(fixed.as_str()));
+
+    // You commit on top of the merge: Undo refuses, main is not moved, and the ref still
+    // says where main was before the merge.
+    let yours = commit(&repo, "README.md", "# demo\nafter the merge\n");
+    let last = core.repo_sync().await.unwrap().last_merge.unwrap();
+    assert!(last.blocked.as_deref().is_some_and(|why| why.starts_with("main has changed since this merge")), "{:?}", last.blocked);
+    assert_eq!(last.kept.as_deref(), Some(BEFORE_MERGE));
+    let err = core.undo_merge(&sha).await.unwrap_err().to_string();
+    assert!(err.starts_with("the merge cannot be undone: main has changed since this merge"), "{err}");
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (yours, Some(fixed)));
     core.shutdown().await;
 }
 
@@ -525,6 +580,9 @@ async fn a_solo_agent_resolves_the_conflict_of_its_own_branch() {
     let wt = PathBuf::from(solo.worktree.clone().unwrap());
     std::fs::write(wt.join("greeting.txt"), "hello from the agent\n").unwrap();
     let mine = commit(&repo, "greeting.txt", "hello from main\n");
+    // Its branch has no commit of its own yet: there is nothing to merge, so it is not "behind".
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((state.conflicts.len(), state.behind), (0, 0));
 
     // Merge: refused, with the file and both ways out.
     let err = core.merge_agent(&solo.id).await.unwrap_err().to_string();
@@ -534,6 +592,7 @@ async fn a_solo_agent_resolves_the_conflict_of_its_own_branch() {
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), mine);
     let state = core.merge_state(&source).await.unwrap();
     assert_eq!((state.target.as_str(), state.branch.as_str(), &state.conflicts), ("main", branch.as_str(), &vec!["greeting.txt".to_string()]));
+    assert_eq!(state.behind, 1, "its work is committed now, and main has your one commit that it was not built on");
 
     // Have the agent resolve it: the merge is started in its own worktree and it is asked in its conversation.
     core.resolve_merge_conflict(&source).await.unwrap();
@@ -579,6 +638,11 @@ async fn a_solo_agent_resolves_the_conflict_of_its_own_branch() {
     .await;
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), sha);
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from main and the agent\n");
+    // Merged: main has the merge commit, which the agent's branch does not have, but there is
+    // nothing left to merge, so its Git tab does not say "behind".
+    assert_ne!(sh(&repo, &["rev-parse", &branch]), sha);
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((state.conflicts.len(), state.resolving, state.behind), (0, None, 0));
     core.shutdown().await;
 }
 
@@ -958,5 +1022,240 @@ async fn you_can_stop_a_solo_agents_resolution() {
     assert_eq!(std::fs::read_to_string(wt.join("greeting.txt")).unwrap(), "hello from the agent\n");
     let lines = said(&core, &thread).await;
     assert!(lines.last().unwrap().starts_with("You stopped the conflict resolution. Codly took the merge out of"), "{lines:?}");
+    core.shutdown().await;
+}
+
+/// `worker` for every task, and a reviewer that approves what it is given.
+fn with_reviewer(worker: Behavior) -> Behavior {
+    Arc::new(move |turn: FakeTurn| {
+        let worker = worker.clone();
+        Box::pin(async move {
+            if turn.spec.role != Role::Reviewer {
+                return worker(turn).await;
+            }
+            let reply = turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": [], "issues": [] })).await;
+            assert_eq!(reply["ok"], true, "{reply}");
+        })
+    })
+}
+
+/// With reviews on, the task that resolved a conflict is reviewed like every task. Its
+/// reviewer reads the resolution only: the conflict as git left it against what the worker
+/// made of it, and none of your own commits that the merge brought in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_reviewer_of_a_resolution_reads_the_resolution_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let lead = lead_with("greeting.txt", "grep -q plan greeting.txt", &[]);
+    let (core, repo) = start(dir.path(), lead, with_reviewer(plan_worker()), turns.clone()).await;
+    core.update_settings(Settings { review_gate: true, ..core.settings() }).await.unwrap();
+    core.send_chat("lead", "Please change the greeting").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    // You kept working on main: the same line, and a file the plan never touched.
+    std::fs::write(repo.join("README.md"), "# demo\nmine\n").unwrap();
+    commit(&repo, "greeting.txt", "hello from main\n");
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_with(&core, "resolve", TaskStatus::Done).await.summary.as_deref(), Some("Did it."));
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "resolve: review verdict approve"), "the resolution was reviewed: {record:?}");
+
+    let briefs: Vec<String> = turns.lock().unwrap().iter().filter(|(role, _, _)| *role == Role::Reviewer).map(|(_, _, prompt)| prompt.clone()).collect();
+    assert_eq!(briefs.len(), 2, "t1 and the resolution each got one review");
+    // t1: its whole change, as for every task.
+    assert!(briefs[0].contains("[Codly] Review task t1:") && briefs[0].contains("+hello from the plan") && !briefs[0].contains("About the diff:"), "{}", briefs[0]);
+    // The resolution: both sides of the conflict, what the worker made of it, and a word on what the diff is.
+    let brief = &briefs[1];
+    assert!(brief.contains("[Codly] Review task resolve: Resolve conflicts with main"), "{brief}");
+    assert!(brief.contains("\n-<<<<<<<") && brief.contains("\n-hello from the plan\n") && brief.contains("\n-hello from main\n") && brief.contains("\n+hello from main and the plan\n"), "{brief}");
+    assert!(!brief.contains("mine") && !brief.contains("README.md"), "your own commit merged by itself: it is not for review: {brief}");
+    assert!(brief.contains("About the diff: this task worked on a merge of the plan's branch with the user's branch.") && brief.contains("Check that each resolution keeps what both sides changed."), "{brief}");
+    core.shutdown().await;
+}
+
+/// mode.txt as the task that fixes the checks leaves it: written from the plan's feature.txt
+/// and main's mode.txt, which it finds merged in its worktree.
+const FIXED: &str = "good with the feature on\nand mode bad\n";
+
+/// A plan's worker for a check that fails once main moved: t1 adds the feature, and the task
+/// that fixes the checks makes mode.txt good again. `fixes` = false: that task gives up.
+fn feature_worker(fixes: bool) -> Behavior {
+    Arc::new(move |turn: FakeTurn| {
+        Box::pin(async move {
+            if !turn.prompt.contains("Task fix-checks") {
+                turn.write("feature.txt", "on\n");
+            } else if fixes {
+                // What it finds there: the plan's work and main's change, merged.
+                turn.write("mode.txt", &format!("good with the feature {}and mode {}", turn.read("feature.txt"), turn.read("mode.txt")));
+            } else {
+                turn.write("attempt.txt", "half an idea\n");
+                turn.tool("codly_submit_report", json!({ "status": "blocked", "summary": "I cannot tell which mode you want." })).await;
+                return;
+            }
+            turn.done().await;
+        })
+    })
+}
+
+/// Your branch and the plan merge without a conflict, but a check of the plan fails on the
+/// result. "Have an agent fix it": Codly brings your branch into the plan's branch in its own
+/// worktree, one more task of the plan makes the check pass there, and the merge goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_fixes_checks_that_fail_on_the_merge_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let check = "grep -q good mode.txt";
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", check, &[]), feature_worker(true), turns.clone()).await;
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    let bad = commit(&repo, "mode.txt", "bad\n");
+
+    // Nothing conflicts, and no check is known to fail yet: an agent has nothing to do, and
+    // main is not brought into the plan's branch behind the checks of the merge.
+    let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
+    assert_eq!(err, format!("{branch} and main merge without a conflict now, so there is nothing to resolve; merge the plan (Codly runs its checks on the result first)"));
+    assert_eq!(sh(&repo, &["rev-parse", &branch]), tip);
+    assert_eq!(core.snapshot().await.unwrap().plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Done);
+
+    core.merge_plan(&plan.id).await.unwrap_err();
+    assert_eq!(core.merge_state(&source).await.unwrap().failed_checks, [check]);
+    let lines = said(&core, "lead").await;
+    assert!(lines.last().unwrap().ends_with("have an agent fix it (on the plan's card), or merge anyway if you know why it fails."), "{lines:?}");
+
+    // Have an agent fix it: main comes into the plan's branch, and a task works on the result.
+    let state = core.resolve_merge_conflict(&source).await.unwrap();
+    let s = core.snapshot().await.unwrap();
+    let task = s.tasks.iter().find(|t| t.key == "fix-checks").expect("a task that fixes the checks").clone();
+    assert_eq!((state.conflicts.len(), state.resolving.as_deref(), state.failed_checks.len(), state.behind), (0, Some(task.id.as_str()), 0, 0));
+    assert_eq!((task.title.as_str(), task.branch.as_deref(), task.worktree.as_deref()), ("Fix the checks with main merged in", Some(branch.as_str()), plan.integration_worktree.as_deref()));
+    assert_eq!((&task.write_scope, &task.verify), (&vec!["feature.txt".to_string()], &vec![check.to_string()]));
+    assert_eq!(s.plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Running);
+    let lines = said(&core, "lead").await;
+    assert!(lines.iter().any(|l| l.starts_with(&format!("main and this plan merge without a conflict, but `{check}` failed on the result. Codly brought main into the plan's branch"))), "{lines:?}");
+
+    // The task goes through the gate with the plan's check, and the plan finishes again.
+    let again = wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(task_with(&core, "fix-checks", TaskStatus::Done).await.id, task.id);
+    assert_eq!(std::fs::read_to_string(integ_wt.join("mode.txt")).unwrap(), FIXED, "it worked on the merge of the plan with main");
+    assert_eq!((again.base_commit.as_deref(), again.base_branch.as_deref()), (Some(bad.as_str()), Some("main")));
+    {
+        let turns = turns.lock().unwrap();
+        let (_, cwd, brief) = turns.iter().find(|(role, _, prompt)| *role == Role::Worker && prompt.contains("Task fix-checks")).expect("the fixing task's brief");
+        assert_eq!(std::fs::canonicalize(cwd).unwrap(), std::fs::canonicalize(&integ_wt).unwrap());
+        assert!(brief.contains(&format!("these checks fail: `{check}`")) && brief.contains("Codly merged main into this worktree"), "{brief}");
+    }
+    let runs = verified(&core).await;
+    assert_eq!(runs.last().unwrap(), &(Some(task.id.clone()), check.to_string(), true), "the check passed in the task's gate, on the merge");
+    // All along, your checkout was not touched.
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (bad.clone(), String::new()));
+
+    // main is in the plan's branch now: the merge is made, with no check to run again.
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((state.conflicts.len(), state.resolving, state.failed_checks.len(), state.behind), (0, None, 0, 0));
+    let sha = core.merge_plan(&plan.id).await.unwrap();
+    assert_eq!(verified(&core).await.len(), runs.len());
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (sha, Some(bad)));
+    assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
+    assert_eq!(std::fs::read_to_string(repo.join("feature.txt")).unwrap(), "on\n");
+    core.shutdown().await;
+}
+
+/// The agent cannot make the check pass and you cancel its task: the merge of your branch is
+/// taken off the plan's branch, the file the agent left in the plan's worktree goes, and the
+/// plan is done as it was, with the same choice as before. A new file that was in the plan's
+/// worktree before (a check's output) is not in the merge Codly commits, and it stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fix_of_the_checks_that_does_not_finish_takes_the_merge_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let check = "grep -q good mode.txt";
+    let (core, repo) = start(dir.path(), lead_with("feature.txt", check, &[]), feature_worker(false), Default::default()).await;
+    core.send_chat("lead", "Please add the feature").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let branch = plan.integration_branch.clone().unwrap();
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let tip = sh(&repo, &["rev-parse", &branch]);
+    // In the plan's worktree before the fix: what a check left there.
+    std::fs::write(integ_wt.join("junit.xml"), "<testsuite/>\n").unwrap();
+    let bad = commit(&repo, "mode.txt", "bad\n");
+    core.merge_plan(&plan.id).await.unwrap_err();
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    let task = task_with(&core, "fix-checks", TaskStatus::Blocked).await;
+    assert!(git(&repo, &["merge-base", "--is-ancestor", &bad, &branch]).status.success(), "the merge of main is on the plan's branch");
+    assert!(integ_wt.join("attempt.txt").exists());
+    // The merge is committed as git made it: the plan's tip and main, and no file of the worktree.
+    assert_eq!(sh(&repo, &["rev-parse", &format!("{branch}^1"), &format!("{branch}^2")]), format!("{tip}\n{bad}"));
+    assert_eq!(sh(&repo, &["ls-tree", "--name-only", &branch, "junit.xml"]), "", "the check's output is not in the merge commit");
+    assert_eq!(sh(&integ_wt, &["status", "--porcelain", "--", "junit.xml"]), "?? junit.xml");
+    let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
+    assert!(err.contains("the plan is still running"), "{err}");
+
+    core.move_task(&task.id, TaskStatus::Cancelled).await.unwrap();
+    let again = wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!(sh(&repo, &["rev-parse", &branch]), tip, "the plan's branch is back where it was");
+    assert_eq!((&again.base_commit, &again.base_branch), (&plan.base_commit, &plan.base_branch));
+    assert_eq!(sh(&integ_wt, &["status", "--porcelain"]), "?? junit.xml", "the file the agent left is gone with the merge, the one from before is still there");
+    assert_eq!(std::fs::read_to_string(integ_wt.join("junit.xml")).unwrap(), "<testsuite/>\n");
+    assert_eq!(std::fs::read_to_string(integ_wt.join("mode.txt")).unwrap(), "good\n");
+    let lines = said(&core, "lead").await;
+    assert!(lines.iter().any(|l| l.starts_with("The plan's checks still fail with your branch merged in. Codly took that merge back")), "{lines:?}");
+
+    // Where you were: the check still fails on this merge, and both ways on are there again.
+    let state = core.merge_state(&source).await.unwrap();
+    assert_eq!((&state.failed_checks, state.resolving, state.behind), (&vec![check.to_string()], None, 1));
+    assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (bad, String::new()));
+    core.shutdown().await;
+}
+
+/// A resolution that does not finish takes the new files of its worker out of the plan's
+/// worktree: they are on no branch, and the plan's checks must not see them. What was there
+/// before the task started (worktree setup, a check's output) stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_new_files_of_a_resolution_that_did_not_finish_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let worker: Behavior = Arc::new(|turn: FakeTurn| {
+        Box::pin(async move {
+            if turn.read("greeting.txt").contains("<<<<<<<") {
+                // Notes and a scratch folder, and then it gives up.
+                std::fs::create_dir_all(turn.spec.cwd.join("scratch/deep")).unwrap();
+                turn.write("scratch/deep/try.txt", "one try\n");
+                turn.write("notes.txt", "what I found\n");
+                turn.tool("codly_submit_report", json!({ "status": "blocked", "summary": "I cannot tell which greeting you want." })).await;
+                return;
+            }
+            turn.write("greeting.txt", "hello from the plan\n");
+            turn.done().await;
+        })
+    });
+    let lead = lead_with("greeting.txt", "grep -q plan greeting.txt", &[]);
+    let (core, repo) = start(dir.path(), lead, worker, Default::default()).await;
+    core.send_chat("lead", "Please change the greeting").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let source = PrSource::Plan(plan.id.clone());
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    // In the plan's worktree before any resolution: what setup or a check left there.
+    std::fs::create_dir_all(integ_wt.join("cache")).unwrap();
+    std::fs::write(integ_wt.join("cache/built.txt"), "from a check\n").unwrap();
+    std::fs::write(integ_wt.join("local.env"), "PORT=1\n").unwrap();
+    commit(&repo, "greeting.txt", "hello from main\n");
+
+    core.resolve_merge_conflict(&source).await.unwrap();
+    let task = task_with(&core, "resolve", TaskStatus::Blocked).await;
+    assert!(integ_wt.join("notes.txt").exists() && integ_wt.join("scratch/deep/try.txt").exists());
+
+    core.move_task(&task.id, TaskStatus::Cancelled).await.unwrap();
+    wait_plan(&core, PlanStatus::Done).await;
+    assert!(!integ_wt.join("notes.txt").exists() && !integ_wt.join("scratch").exists(), "the worker's new files are gone");
+    assert_eq!(std::fs::read_to_string(integ_wt.join("cache/built.txt")).unwrap(), "from a check\n");
+    assert_eq!(std::fs::read_to_string(integ_wt.join("local.env")).unwrap(), "PORT=1\n");
+    assert_eq!(sh(&integ_wt, &["status", "--porcelain"]), "?? cache/\n?? local.env".to_string());
+    assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), "hello from the plan\n");
     core.shutdown().await;
 }

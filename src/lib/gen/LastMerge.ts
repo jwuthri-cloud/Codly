@@ -23,4 +23,10 @@ agent_id: string | null,
 /**
  * Why it cannot be undone right now (None: it can).
  */
-blocked: string | null, };
+blocked: string | null, 
+/**
+ * The ref in the user's repository that keeps the branch as it was before this merge
+ * (`refs/codly/before-merge`), while it does: until the next merge or the undo. None
+ * for a merge made before Codly kept one.
+ */
+kept: string | null, };

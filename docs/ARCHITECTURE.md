@@ -177,6 +177,9 @@ one the plan started from. The last merge Codly made there can be taken back wit
 (`git reset --keep` to the commit before it) while that loses nothing: the branch is still at
 that merge commit, no remote branch has it, and no tracked file has uncommitted changes. The
 merged work always stays on a branch: if its branch was deleted since, the undo puts it back.
+Before a merge writes to the branch, Codly points `refs/codly/before-merge` at the commit the
+branch is at; the ref stays until the next merge or the undo, so the branch as it was is on
+record in the user's own repository also when Undo merge can no longer take the merge back.
 
 **Try it before you merge.** A finished plan's card and a solo agent's Git tab have Run… and Open
 in terminal (`preview.rs`). Run… runs a command the user typed, in the plan's integration worktree
@@ -549,7 +552,14 @@ that are new there are named (the index does not search them).
   goes back to where it was before the user's branch came in (`settle_resolution`), and a solo
   agent's open merge can be taken out of its worktree (`stop_resolving_merge`). A plan that
   did not start from the checked-out branch is resolved only after the user confirms that
-  branch, like the merge itself.
+  branch, like the merge itself. `merge_state` also says how many commits the Codly branch is
+  behind the checked-out one. When the plan's checks fail on the merge result and nothing
+  conflicts, `resolve_merge_conflict` gives the plan a task that makes them pass, on the merge
+  Codly committed in the integration worktree. Such a task is reviewed like every task, but its
+  reviewer reads only what was changed by hand (`git log --remerge-diff`: each conflict as git
+  left it against its resolution, then the later commits), not the user's commits; the checks
+  its gate ran on the plan's branch as it is are not run again when the plan finishes; and one
+  that does not finish also takes its worker's new files out of the integration worktree.
 - The workspace IDE saves files where its agent works (`ide_write`, `ide_create`): in the
   agent's worktree, or in the user's checkout when the agent has none (the Lead, or an agent
   hired with Git isolation off). It never commits.

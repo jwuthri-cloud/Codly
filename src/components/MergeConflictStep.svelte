@@ -4,13 +4,15 @@
   own worktree (your checkout is not touched) and an agent resolves the conflict there; "I
   resolve it myself" shows the branch and the git commands to run in your project. While a solo
   agent is on it, "Stop resolving" takes the merge out of its worktree. For a plan, also the
-  checks that failed (or could not run) on the merge result, with Merge anyway. Shows nothing
-  when the branch merges cleanly.
+  checks that failed (or could not run) on the merge result, with Merge anyway, and for checks
+  that failed "Have an agent fix it": a task of the plan makes them pass in Codly's own
+  worktree. Before any of that, one line says how far the Codly branch is behind yours. Shows
+  nothing when the branch is built on yours as it is.
 -->
 <script lang="ts">
   import type { PrSource } from '../lib/gen/PrSource';
   import { copyText } from '../lib/state/actions';
-  import { fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../lib/state/mergeState.svelte';
+  import { behindLine, fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../lib/state/mergeState.svelte';
   import Icon from './Icon.svelte';
 
   interface Props {
@@ -54,8 +56,11 @@
   }
 </script>
 
-{#if merge && (merge.conflicts.length || merge.failed_checks.length || merge.checks_not_run)}
+{#if merge && (merge.behind || merge.conflicts.length || merge.failed_checks.length || merge.checks_not_run)}
   <div class="mc">
+    {#if merge.behind}
+      <p class="what"><Icon name="branch" size={12} /><span>{behindLine(merge, who)}</span></p>
+    {/if}
     {#if merge.conflicts.length}
       <p class="what"><Icon name="merge" size={12} /><span><code>{merge.target}</code> and {who ? `${who}’s branch` : 'this plan'} both changed {fileList(merge.conflicts)}. Nothing can be merged until that conflict is resolved.</span></p>
       {#if agentOnIt}
@@ -78,6 +83,7 @@
     {#if merge.failed_checks.length}
       <div class="row">
         <span class="what grow"><Icon name="merge" size={12} /><span>With this plan merged into <code>{merge.target}</code>, {#each merge.failed_checks as c, i (c)}{i ? ', ' : ''}<code>{c}</code>{/each} failed, so nothing was merged. <code>{merge.target}</code> has commits the plan was never checked with.</span></span>
+        <button class="btn sm primary" disabled={busy} data-tip={`Codly brings ${merge.target} into its own worktree, and a task of the plan makes the checks pass there. Your checkout is not touched.`} onclick={resolve}>Have an agent fix it</button>
         {#if onunchecked}<button class="btn sm" onclick={onunchecked}>Merge anyway</button>{/if}
       </div>
     {/if}
