@@ -210,7 +210,7 @@ struct Live {
     self_started: bool,
     /// What it has at work beside its own turns, and the gate's wait for it (background.rs).
     background: background::Background,
-    /// Its MCP servers and running background commands, for a snapshot (live_session.rs).
+    /// Its MCP servers and its last list of background tasks, for a snapshot (live_session.rs).
     session_rows: live_session::SessionRows,
 }
 
@@ -289,6 +289,8 @@ struct Inner {
     /// How long the gate waits for a worker's background work before Codly stops it
     /// (`background::WAIT`; tests shorten it).
     background_wait: RwLock<Duration>,
+    /// Where each agent's MCP servers stood in their last rows on record (`live_session.rs`).
+    mcp_recorded: Mutex<live_session::McpRecorded>,
     /// Workers that failed lately: failures in a row per task, and when each starts again.
     retries: Mutex<retry::Retries>,
     /// The stuck plans Codly told you about: plan → the tasks that stopped it (`stuck.rs`).
@@ -478,6 +480,7 @@ impl Core {
             breaker,
             turn_retry_waits: RwLock::new(ingest::TURN_RETRY_WAITS.to_vec()),
             background_wait: RwLock::new(background::WAIT),
+            mcp_recorded: Mutex::new(HashMap::new()),
             retries: Mutex::new(retry::Retries::default()),
             stuck_told: Mutex::new(HashMap::new()),
             merge_looks: Mutex::new(HashMap::new()),

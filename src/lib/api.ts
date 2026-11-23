@@ -295,7 +295,7 @@ export const api = {
   agentContextUsage: (agentId: string) => call<ContextUsage>('agent_context_usage', { agentId }),
   /** Try again to connect one MCP server of a live Claude agent. Rejects with Claude Code's own reason when it still does not connect. */
   reconnectAgentMcp: (agentId: string, server: string) => call<void>('reconnect_agent_mcp', { agentId, server }),
-  /** Stop a command a live Claude agent left running in the background. Its `background_command` event says that it was stopped. */
+  /** Stop a command a live Claude agent left running in the background. Its next `background_tasks` event says that it was stopped. */
   stopAgentTask: (agentId: string, taskId: string) => call<void>('stop_agent_task', { agentId, taskId }),
   /** "Open in my terminal" (agent sheet). Is the agent in your terminal, and if not, may it go there now? */
   agentTakeover: (agentId: string) => call<TakeoverState>('agent_takeover', { agentId }),

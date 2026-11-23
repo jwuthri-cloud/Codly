@@ -1,11 +1,13 @@
 <!--
-  The commands the agent left running in the background in its live run (Claude Code's
-  `run_in_background`): they go on after the turn that started them. "Stop" ends one
-  (orchestrator/live_session.rs); the command then shows as stopped, in Claude Code's own word.
+  What the agent left at work in the background in its live run, as Claude Code lists it: the
+  commands it started with `run_in_background` and its helpers. They go on after the turn that
+  started them. "Stop" ends a command (orchestrator/live_session.rs); Claude Code's next list
+  no longer names it, and the row shows how it ended, in Claude Code's own word. A helper has no
+  "Stop": Claude Code's request is known to stop a command only.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
-  import { backgroundSummary, ofLiveRun, stopBackgroundCommand } from '../lib/state/session';
+  import { backgroundKind, backgroundSummary, canStop, ofLiveRun, stopBackgroundTask } from '../lib/state/session';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { dur, timer } from '../lib/util/format';
@@ -19,38 +21,42 @@
   }
   let { agent }: Props = $props();
 
-  const commands = $derived.by(() => {
+  const work = $derived.by(() => {
     void store.revBy.get(agent.id);
     return ofLiveRun(store.live[agent.id]?.background ?? [], agent.run_id);
   });
-  const running = $derived(commands.filter((c) => c.status === 'running'));
-  const ended = $derived(commands.filter((c) => c.status !== 'running'));
+  const running = $derived(work.filter((w) => w.status === 'running'));
+  const ended = $derived(work.filter((w) => w.status !== 'running'));
   /** The commands a stop is on its way for (by the CLI's task id), until Claude Code answered. Its
-   *  answer does not say whether the command ended: the command's own event does, and moves the row. */
+   *  answer does not say whether the command ended: its next list does, and moves the row. */
   let stopping = $state<string[]>([]);
   async function stop(taskId: string) {
     stopping = [...stopping, taskId];
-    await stopBackgroundCommand(agent.id, taskId);
+    await stopBackgroundTask(agent.id, taskId);
     stopping = stopping.filter((id) => id !== taskId);
   }
 </script>
 
-{#if commands.length}
-  <Section id="background" title="Background commands" summary={backgroundSummary(commands)}>
+{#if work.length}
+  <Section id="background" title="In the background" summary={backgroundSummary(work)}>
     <ul class="cmds">
-      {#each running as c (c.taskId)}
+      {#each running as w (w.id)}
+        {@const kind = backgroundKind(w)}
         <li>
           <span class="dot on" aria-hidden="true"></span>
-          <code class="what truncate selectable" data-tip={clean(c.description)}>{clean(c.description)}</code>
-          <span class="meta num">{timer(ui.now - c.startedAt)}</span>
-          <button class="btn sm ghost" disabled={stopping.includes(c.taskId)} onclick={() => stop(c.taskId)}><Icon name="stop" size={12} />{stopping.includes(c.taskId) ? 'Stopping…' : 'Stop'}</button>
+          <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
+          <span class="meta num">{kind ? `${kind} · ` : ''}{w.startedAt == null ? 'running' : timer(ui.now - w.startedAt)}</span>
+          {#if canStop(w)}
+            <button class="btn sm ghost" disabled={stopping.includes(w.id)} onclick={() => stop(w.id)}><Icon name="stop" size={12} />{stopping.includes(w.id) ? 'Stopping…' : 'Stop'}</button>
+          {/if}
         </li>
       {/each}
-      {#each ended as c (c.taskId)}
+      {#each ended as w (w.id)}
+        {@const kind = backgroundKind(w)}
         <li class="fin">
-          <Icon name={c.status === 'completed' ? 'check' : 'x-circle'} size={13} />
-          <code class="what truncate selectable" data-tip={clean(c.description)}>{clean(c.description)}</code>
-          <span class="meta num">{c.status} · {dur(c.ts - c.startedAt)}</span>
+          <Icon name={w.status === 'completed' ? 'check' : 'x-circle'} size={13} />
+          <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
+          <span class="meta num">{kind ? `${kind} · ` : ''}{w.status}{w.startedAt != null && w.endedAt != null ? ` · ${dur(w.endedAt - w.startedAt)}` : ''}</span>
         </li>
       {/each}
     </ul>

@@ -270,15 +270,17 @@ impl Inner {
             self.lead_followup(&ws_id, &self.task_thread(&task), &prompts::worker_stopped(&task, reported, &who, &summary)).await;
             return Ok(());
         }
+        // The worker's run still has a background command or a helper at work: what that
+        // writes next would miss the commit, and the checks would run under it. The pass
+        // waits for it (background.rs). (Your own pass has no worker run.) This comes before
+        // the question about a missing report: a worker that waits for its own command gets
+        // a turn when the command ends, and that turn may be the one that reports.
+        if pass == Pass::Turn && self.hold_for_background(&task, &worker, ws)? {
+            return Ok(());
+        }
         // No report at all: the turn may not be the worker's finish. Asked once; the end of
         // the turn that answers is checked as it is, with or without a report.
         if pass == Pass::Turn && report.is_null() && self.ask_for_report(&task, &worker, ws)? {
-            return Ok(());
-        }
-        // The worker's run still has a background command or a helper at work: what that
-        // writes next would miss the commit, and the checks would run under it. The pass
-        // waits for it (background.rs). (Your own pass has no worker run.)
-        if pass == Pass::Turn && self.hold_for_background(&task, &worker, ws)? {
             return Ok(());
         }
 

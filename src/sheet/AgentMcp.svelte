@@ -21,6 +21,8 @@
 
   const servers = $derived.by(() => {
     void store.revBy.get(agent.id);
+    // (a server that stands where an earlier run recorded it comes as a live event, in no log)
+    void store.liveRevBy.get(agent.id);
     return ofLiveRun(store.live[agent.id]?.mcp ?? [], agent.run_id);
   });
   /** A server of this run (the sheet shows one agent after another). */

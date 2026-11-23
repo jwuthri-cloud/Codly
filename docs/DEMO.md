@@ -50,6 +50,11 @@ Each of these opens `acme/web` at once, except `?trust=ask`.
 - Close office (on the map) refuses while the office has unfinished work or an agent is in a turn.
   In the demo, `billing-api` has agents at work, `docs-site` closes, and `acme/web` closes once its
   open tasks are done or cancelled.
+- A command an agent leaves running in the background: in her first task Ada starts a type check
+  (`npx tsc --noEmit --watch`) and stops it before she reports. While it runs, her sheet lists it
+  under "In the background" with Stop, and her History has one row for each change of the list.
+  Without `?autoplay=1` it stays until you answer her `npm install` request: run the first plan
+  (`?skip=20`), open Ada's sheet, and press Stop.
 
 ## What the demo cannot show
 

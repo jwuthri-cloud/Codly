@@ -25,6 +25,7 @@ import type { TaskStatus } from '../gen/TaskStatus';
 import type { Workspace } from '../gen/Workspace';
 import { describeRule, MockApprovalRules, PACKAGE_INSTALL } from './approvalRules';
 import { bytesOf, contrastCsv, contrastSvg, ILLUSTRATION_PROMPT, illustrationPng, SETTINGS_API_MD, TOGGLE_PREVIEW_HTML } from './artifacts';
+import { demoBackground } from './background';
 import { ChecksDemo } from './checks';
 import { MODE_LABEL } from './controls';
 import { diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
@@ -678,6 +679,8 @@ export class Story {
       if (act.a.status !== 'offline') act.status('idle');
     } finally {
       this.running.delete(act.id);
+      // (a command the agent still had in the background ends with its work on the task)
+      for (const left of demoBackground(sim).of(act.id)) demoBackground(sim).end(act.id, left.id, 'stopped');
     }
   }
 
@@ -906,6 +909,15 @@ export class Story {
     act.emit({ type: 'tool_completed', call_id: call, ok: true, output: result, exit_code: null, duration_ms: sim.now() - started, tests_passed: null, tests_failed: null });
   }
 
+  /**
+   * A command a Claude Code agent starts with `run_in_background`: the call returns at once, and
+   * the CLI lists the command until it is over (demo/background.ts). Returns the CLI's id of it.
+   */
+  private async inBackground(act: Actor, command: string): Promise<string> {
+    await act.tool({ name: 'Bash', activity: 'execute', target: { command }, input: { command, run_in_background: true }, ms: 400, output: 'Command running in background' });
+    return demoBackground(this.sim).start(act, command);
+  }
+
   /** codly_ask_lead: a worker asks its plan's Lead (in that request's thread) and waits for the answer. */
   private async askLead(asker: Actor, question: string, answer: string) {
     const sim = this.sim;
@@ -965,6 +977,9 @@ export class Story {
         await ada.tool({ name: 'Read', activity: 'read', target: { path }, ms: 650 });
       await ada.say('Tokens already have a dark palette under `.dark`; switching them to `[data-theme]` and adding a provider that resolves the system preference.', { phase: 'commentary' });
       ada.plan([['Find where tokens and theme classes live', 'completed'], ['Add ThemeProvider with a system default', 'in_progress'], ['Wire the provider into the root layout', 'pending'], ['Unit tests for resolution and persistence', 'pending']]);
+      // A type check she leaves running in the background while she writes: her sheet lists it
+      // under "In the background", with Stop, until she stops it before her report.
+      const typeCheck = await this.inBackground(ada, 'npx tsc --noEmit --watch');
       await ada.tool({ name: 'Write', activity: 'create', target: { path: files[0] }, ms: 2600, files: [files[0]], taskKey: 't1' });
       await ada.tool({ name: 'Write', activity: 'create', target: { path: files[1] }, ms: 1200, files: [files[1]], taskKey: 't1' });
       await ada.tool({ name: 'Edit', activity: 'edit', target: { path: files[2] }, ms: 1500, files: [files[2]], taskKey: 't1' });
@@ -994,6 +1009,7 @@ export class Story {
       await ada.tool({ name: 'mcp__codly__codly_memory_write', activity: 'memory', target: { server: 'codly', tool: 'codly_memory_write' }, ms: 500 });
       sim.memory('Theme tokens key on `[data-theme]` on <html>. Use `setTheme()` from `useTheme()`; never toggle a `.dark` class.', 'project', 'lesson', ada.id, { importance: 0.75, sourceEvent: sim.lastId, title: 'Theme tokens key on data-theme', refs: ['concept:theming'] });
       sim.triple(`agent:${ada.id}`, 'created', `file:${files[0]}`, 'observed', { agent: ada.id });
+      demoBackground(sim).end(ada.id, typeCheck, 'stopped'); // (over already when you stopped it from her sheet)
       await ada.say('Added `ThemeProvider` and `useTheme()`. Tokens now key on `[data-theme]`, the root layout wraps the app, and an explicit choice persists until t2’s API lands. 12 tests pass.');
     });
     await this.gate(ada, task, {

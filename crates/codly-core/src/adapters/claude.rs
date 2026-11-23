@@ -57,7 +57,7 @@ use super::classify::{self, OUTPUT_MAX};
 use super::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SessionReply, SessionRequest, SpawnSpec, attachments, startup};
 use crate::housekeeping::connections::{self, ReadyMcp};
 use crate::model::{
-    ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, BackgroundTask, Billing,
+    ActivityKind, AgentStatus, Approval, ApprovalChoice, ApprovalDecision, ApprovalStatus, ApprovalSubject, BackgroundEnded, BackgroundTask, Billing,
     EventKind, Id, McpServerStatus, MessagePhase, PermissionMode, PlanStep, Provider, Role, TurnStatus, Usage, new_id, now_ms,
 };
 use crate::proc::{self, Inbound, RawLog, StderrTail};
@@ -386,7 +386,6 @@ pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>)
         left_in_cli: false,
         lifecycle: false,
         cancels_queued: false,
-        background: Vec::new(),
         turn_active: false,
         next_req: 0,
         session_replies: HashMap::new(),
@@ -509,9 +508,6 @@ struct Actor {
     /// An interrupt can tell the CLI to drop the prompts that wait in it
     /// (`interrupt_cancel_queued_v1` in `system/init`).
     cancels_queued: bool,
-    /// The background commands the CLI tracks now, by task id: the `local_bash` entries of its
-    /// last `system/background_tasks_changed` line.
-    background: Vec<String>,
     turn_active: bool,
     next_req: u64,
     /// Session requests the CLI has not answered yet, by control request id.
@@ -677,13 +673,15 @@ impl Actor {
             }
             return;
         }
-        // Followed in every stage: a stop waits for this list to be empty (`wind_down`).
-        if v["type"] == "system" && v["subtype"] == "background_tasks_changed" {
-            self.on_background_tasks(&v);
-        }
+        let listed = v["type"] == "system" && v["subtype"] == "background_tasks_changed";
         // The agent is being stopped and its turn is over. What the CLI does from here (a turn
         // for a prompt it still held, a turn of its own) is not shown as this agent's work.
+        // Its list of background tasks is still followed: the stop waits for it (`wind_down`).
         if self.stage != Stage::Running && !self.turn_active {
+            if listed {
+                self.norm.on_background_tasks(&v["tasks"], &mut Vec::new());
+                self.on_background_tasks();
+            }
             return;
         }
         if v["type"] == "command_lifecycle" {
@@ -708,6 +706,9 @@ impl Actor {
         }
         for reply in std::mem::take(&mut self.norm.outbox) {
             self.write(&reply).await;
+        }
+        if listed {
+            self.on_background_tasks();
         }
         if turn_done {
             self.turn_active = false;
@@ -787,14 +788,11 @@ impl Actor {
         self.take_back(gone.into_iter().map(|(_, text)| text).collect()).await;
     }
 
-    /// `system/background_tasks_changed`: the full list of what runs in the background now
-    /// (part 2 §6). Kept: the commands (`local_bash`), which a stop of the agent ends with
-    /// `stop_task`. A background subagent is in the list too; what `stop_task` does to one is
-    /// not recorded, so it is left to the later steps of the stop.
-    fn on_background_tasks(&mut self, v: &Value) {
-        let tasks = v["tasks"].as_array().into_iter().flatten();
-        self.background = tasks.filter(|t| t["task_type"] == "local_bash").filter_map(|t| t["task_id"].as_str().map(str::to_owned)).collect();
-        if self.stage == Stage::StoppingTasks && self.background.is_empty() {
+    /// The CLI said its list of background tasks again (`system/background_tasks_changed`,
+    /// part 2 §6; the normalizer holds the list). A stop of the agent that waits for its
+    /// commands to end goes on when none is left.
+    fn on_background_tasks(&mut self) {
+        if self.stage == Stage::StoppingTasks && self.norm.commands_in_background().is_empty() {
             self.close_stdin();
         }
     }
@@ -1014,15 +1012,24 @@ impl Actor {
     /// The stopped agent's turn is over, or none ran: end the background commands the CLI
     /// still tracks, then close stdin. With one of them open the CLI does not exit when stdin
     /// closes: it waits for the command and then runs a turn (recorded: 43 s, part 2 §7).
-    /// `stop_task` ends a running command at once and starts no turn (part 2 §6).
+    /// `stop_task` ends a running command at once and starts no turn (part 2 §6). The commands
+    /// are the ones of the CLI's last list; what `stop_task` does to a background subagent is
+    /// not recorded, so that one is left to the later steps of the stop.
     async fn wind_down(&mut self) {
         self.drop_unsent();
+        let commands = self.norm.commands_in_background();
         // (A CLI that still holds a prompt is not asked for anything more: its process is ended.)
-        if self.left_in_cli || self.background.is_empty() || self.stdin.is_none() {
+        if self.left_in_cli || commands.is_empty() || self.stdin.is_none() {
             return self.close_stdin();
         }
-        for task_id in self.background.clone() {
+        for task_id in commands {
             self.control("stop_task", json!({ "task_id": task_id })).await;
+        }
+        // A request that could not be written (`write` gave stdin up): the CLI did not get
+        // it, so no list will say that its command is gone. With stdin closed the CLI would
+        // wait for that command; at SIGTERM it ends it.
+        if self.stdin.is_none() {
+            return self.kill();
         }
         self.stage = Stage::StoppingTasks;
         self.deadline = Some(tokio::time::Instant::now() + STOP_TASKS_TIMEOUT);
@@ -1111,6 +1118,9 @@ struct Helper {
     name: Option<String>,
     /// It works on after its `Agent` call returned, also past the end of the turn.
     background: bool,
+    /// The CLI's id of it as a task, once its `task_started` line said it: the id that the
+    /// list of background tasks names.
+    task_id: Option<String>,
     done: bool,
 }
 
@@ -1279,8 +1289,11 @@ pub struct ClaudeNormalizer {
     /// The user's MCP servers as the CLI last gave them, by name: its `status` word and its
     /// reason. A server is reported when one of the two changes.
     mcp: HashMap<String, (String, Option<String>)>,
-    /// The commands that run in the background, by the CLI's task id: what each one is.
-    background: HashMap<String, String>,
+    /// What runs in the background, as the CLI last listed it (`background_tasks_changed`).
+    background: Vec<BackgroundTask>,
+    /// How a listed task ended, by its id, in the word of its `task_notification` line: kept
+    /// until the list line that follows no longer names the task.
+    background_ended: HashMap<String, String>,
     plan: Vec<PlanItem>,
     pending_creates: HashMap<String, String>,
     approvals: HashMap<Id, PendingApproval>,
@@ -1331,7 +1344,8 @@ impl ClaudeNormalizer {
             helpers: HashMap::new(),
             mcp_failed: Vec::new(),
             mcp: HashMap::new(),
-            background: HashMap::new(),
+            background: Vec::new(),
+            background_ended: HashMap::new(),
             plan: Vec::new(),
             pending_creates: HashMap::new(),
             approvals: HashMap::new(),
@@ -1560,7 +1574,7 @@ impl ClaudeNormalizer {
             | "post_turn_summary" | "task_updated" | "vcs_state_changed" => {}
             // The whole list of what the CLI still runs in the background, said at every change
             // (cli-claude-stream-json-2.1.311-part2 §6). No request reads it: Codly keeps the last one.
-            "background_tasks_changed" => out.push(EventKind::BackgroundTasks { tasks: background_tasks(&v["tasks"]) }),
+            "background_tasks_changed" => self.on_background_tasks(&v["tasks"], out),
             "compact_boundary" => {
                 let m = &v["compact_metadata"];
                 out.push(EventKind::Compacting { pre_tokens: m["pre_tokens"].as_i64(), post_tokens: m["post_tokens"].as_i64() });
@@ -1755,10 +1769,16 @@ impl ClaudeNormalizer {
     /// `system/task_started`, `task_progress` and `task_notification`: the life of something
     /// that runs beside the agent's own calls. A subagent (`task_type: "local_agent"`) gets
     /// its events. A command (`local_bash`) already is a tool call; one that is left running
-    /// in the background is said too, when it starts and when it is over.
+    /// in the background is in the CLI's list of background tasks (`on_background_tasks`),
+    /// and the word of its `task_notification` says there how it ended.
     fn on_task(&mut self, subtype: &str, v: &Value, out: &mut Vec<EventKind>) {
+        if subtype == "task_notification"
+            && let (Some(task_id), Some(word)) = (v["task_id"].as_str(), v["status"].as_str())
+            && self.background.iter().any(|t| t.id == task_id)
+        {
+            self.background_ended.insert(task_id.to_string(), word.to_string());
+        }
         let Some(call_id) = v["tool_use_id"].as_str() else { return };
-        self.on_background_command(subtype, call_id, v, out);
         if subtype == "task_started" && v["task_type"] == "local_agent" && !self.helpers.contains_key(call_id) {
             // (its `Agent` call was in no line Codly saw: the subagent starts here)
             self.helper_started(call_id, v["description"].as_str().unwrap_or(""), out);
@@ -1768,7 +1788,10 @@ impl ClaudeNormalizer {
         let (tool_uses, tokens) = (v["usage"]["tool_uses"].as_i64(), v["usage"]["total_tokens"].as_i64());
         let text = |key: &str| v[key].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
         match subtype {
-            "task_started" => helper.background = v["is_backgrounded"] == true,
+            "task_started" => {
+                helper.background = v["is_backgrounded"] == true;
+                helper.task_id = v["task_id"].as_str().map(str::to_owned);
+            }
             "task_progress" => {
                 let step = text("description");
                 out.push(EventKind::SubAgentProgress { call_id: call_id.into(), name: None, step, tool_call_id: None, tool_uses, tokens, report: None });
@@ -1784,29 +1807,47 @@ impl ClaudeNormalizer {
         }
     }
 
-    /// A command the agent left running in the background (`task_type: "local_bash"` with
-    /// `is_backgrounded`; part 2 §6): its `task_started` line, and the `task_notification`
-    /// that ends it, whether it ended by itself ("completed") or was stopped ("stopped").
-    /// `task_id` is the id the CLI's `stop_task` request takes.
-    fn on_background_command(&mut self, subtype: &str, call_id: &str, v: &Value, out: &mut Vec<EventKind>) {
-        let Some(task_id) = v["task_id"].as_str() else { return };
-        let (description, status) = match subtype {
-            "task_started" if v["task_type"] == "local_bash" && v["is_backgrounded"] == true => {
-                let description = v["description"].as_str().unwrap_or("").to_string();
-                self.background.insert(task_id.to_string(), description.clone());
-                (description, "running".to_string())
+    /// `system/background_tasks_changed`: the CLI's whole list of what runs in the background
+    /// (part 2 §6: a command left running with `run_in_background`, a subagent), said at
+    /// every change. The event carries the list and what left it since the last one, each
+    /// with the word of its `task_notification` line (recorded: that line comes before the
+    /// list line, when a task ends by itself, at `stop_task` and at SIGTERM), or "ended" when
+    /// none came. The list is the whole truth each time, so a line that was missed leaves
+    /// nothing open.
+    fn on_background_tasks(&mut self, tasks: &Value, out: &mut Vec<EventKind>) {
+        let tasks = background_tasks(tasks);
+        let gone: Vec<BackgroundTask> = self.background.iter().filter(|t| !tasks.iter().any(|now| now.id == t.id)).cloned().collect();
+        // A background subagent that left the list with no `task_notification`: its row is
+        // closed here, or it would say "running" for good. (A subagent that never was in a
+        // list is left as it is: a foreground one in the list is not recorded.)
+        for (call_id, helper) in &mut self.helpers {
+            let listed = |t: &BackgroundTask| helper.task_id.as_deref() == Some(t.id.as_str());
+            if helper.background && !helper.done && gone.iter().any(listed) {
+                helper.done = true;
+                out.push(EventKind::SubAgent { call_id: call_id.clone(), description: helper.description.clone(), status: "stopped".into() });
             }
-            "task_notification" => {
-                let Some(description) = self.background.remove(task_id) else { return };
-                (description, v["status"].as_str().unwrap_or("completed").to_string())
-            }
-            _ => return,
-        };
-        out.push(EventKind::BackgroundCommand { task_id: task_id.to_string(), call_id: call_id.to_string(), description, status });
+        }
+        let ended = gone
+            .into_iter()
+            .map(|t| {
+                let status = self.background_ended.remove(&t.id).unwrap_or_else(|| "ended".into());
+                BackgroundEnded { id: t.id, kind: t.kind, description: t.description, status }
+            })
+            .collect();
+        self.background_ended.retain(|id, _| tasks.iter().any(|t| t.id == *id));
+        self.background.clone_from(&tasks);
+        out.push(EventKind::BackgroundTasks { tasks, ended });
+    }
+
+    /// The commands of the CLI's last list of background tasks, by the id that its
+    /// `stop_task` request takes.
+    fn commands_in_background(&self) -> Vec<String> {
+        self.background.iter().filter(|t| t.kind == "command").map(|t| t.id.clone()).collect()
     }
 
     fn helper_started(&mut self, call_id: &str, description: &str, out: &mut Vec<EventKind>) {
-        self.helpers.insert(call_id.to_string(), Helper { description: description.to_string(), name: None, background: false, done: false });
+        let helper = Helper { description: description.to_string(), name: None, background: false, task_id: None, done: false };
+        self.helpers.insert(call_id.to_string(), helper);
         out.push(EventKind::SubAgent { call_id: call_id.to_string(), description: description.to_string(), status: "running".into() });
     }
 
@@ -3717,29 +3758,114 @@ mod tests {
         }
     }
 
-    /// Recordings `r4-background-life` and `subagent`: the CLI says its whole list of
-    /// background tasks at every change, a command and a subagent alike, and an empty list
-    /// when the last one ended (by itself, or stopped by the host).
+    /// The `BackgroundTasks` events, one line each: "<what runs> | <what ended>", a task as
+    /// "<id> <kind>: <description>", an ended one with the word of its end after its kind.
+    fn background_lines(events: &[EventKind]) -> Vec<String> {
+        let or_none = |said: Vec<String>| if said.is_empty() { "-".to_string() } else { said.join(", ") };
+        events
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::BackgroundTasks { tasks, ended } => {
+                    let runs = tasks.iter().map(|t| format!("{} {}: {}", t.id, t.kind, t.description)).collect();
+                    let ended = ended.iter().map(|t| format!("{} {} {}: {}", t.id, t.kind, t.status, t.description)).collect();
+                    Some(format!("{} | {}", or_none(runs), or_none(ended)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `system/background_tasks_changed` line with these tasks. Written here, in the
+    /// recorded shape: the tests that use it say what no recording has.
+    fn list_line(tasks: Value) -> Value {
+        json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks })
+    }
+
+    /// Recordings `r4-background-life`, `subagent` and `r4-background-and-queue-*`: the CLI
+    /// says its whole list of background tasks at every change, a command and a subagent
+    /// alike, and an empty list when the last one ended. Each event says the list and what
+    /// left it, in the CLI's own word: "completed" for one that ended by itself, "stopped"
+    /// for one the host stopped with `stop_task`.
     #[test]
-    fn the_list_of_background_tasks_is_told_at_every_change() {
-        let lists = |name: &str| -> Vec<Vec<BackgroundTask>> {
+    fn the_list_of_background_tasks_is_told_at_every_change_with_what_ended() {
+        let said = |name: &str| {
             let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
             let mut events = norm.turn_started("go");
             events.extend(replay(&mut norm, &recorded(name)));
-            events.into_iter().filter_map(|e| if let EventKind::BackgroundTasks { tasks } = e { Some(tasks) } else { None }).collect()
+            (background_lines(&events), subagent_lines(&events))
         };
-        let task = |id: &str, kind: &str, description: &str| vec![BackgroundTask { id: id.into(), kind: kind.into(), description: description.into() }];
+        let (lines, helpers) = said("r4-background-life");
         assert_eq!(
-            lists("r4-background-life"),
-            [task("tid-1", "command", "sleep 8; echo woke"), vec![], task("tid-2", "command", "sleep 127; echo late"), vec![]]
+            lines,
+            [
+                "tid-1 command: sleep 8; echo woke | -",
+                "- | tid-1 command completed: sleep 8; echo woke",
+                "tid-2 command: sleep 127; echo late | -",
+                "- | tid-2 command stopped: sleep 127; echo late",
+            ]
         );
-        assert_eq!(lists("subagent"), [task("tid-1", "helper", "Run echo hi via Bash"), vec![]]);
-        // A kind of task Codly has no name for is still listed; an entry with no id is not.
-        // (A line written here, not a recorded one: no recording has another `task_type`.)
-        let tasks = json!([{ "task_id": "tid-9", "task_type": "remote", "description": "x" }, { "description": "y" }]);
-        let odd = json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks });
+        assert_eq!(helpers, Vec::<String>::new(), "a command is no subagent");
+        assert_eq!(said("subagent").0, ["tid-1 helper: Run echo hi via Bash | -", "- | tid-1 helper completed: Run echo hi via Bash"]);
+        // A command the agent waits for (`is_backgrounded: false`) runs meanwhile: it is in
+        // no list, and its own `task_notification` ends nothing here.
+        for name in ["r4-background-and-queue-fold", "r4-background-and-queue-later"] {
+            assert!(recorded(name).iter().any(|l| l["subtype"] == "task_started" && l["is_backgrounded"] == false), "{name}");
+            assert_eq!(said(name).0, ["tid-1 command: sleep 12; echo woke | -", "- | tid-1 command completed: sleep 12; echo woke"], "{name}");
+        }
+        // A command the agent waits for, alone (`r4-tool-progress`): no list at all.
+        assert_eq!(said("r4-tool-progress").0, Vec::<String>::new());
+    }
+
+    /// What no recording has: a kind of task Codly has no name for, an entry with no id, and
+    /// a task that leaves the list with no `task_notification` before (a line that was
+    /// missed). The list is the whole list each time, so nothing stays open.
+    #[test]
+    fn a_task_that_leaves_the_list_with_no_word_of_its_end_is_said_as_ended() {
         let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
-        assert!(matches!(&norm.on_message(&odd)[..], [EventKind::BackgroundTasks { tasks }] if *tasks == task("tid-9", "task", "x")));
+        let command = json!({ "task_id": "tid-1", "task_type": "local_bash", "description": "npm run dev" });
+        let odd = json!({ "task_id": "tid-9", "task_type": "remote", "description": "x" });
+        let first = norm.on_message(&list_line(json!([command, odd, { "description": "no id" }])));
+        assert_eq!(background_lines(&first), ["tid-1 command: npm run dev, tid-9 task: x | -"]);
+        assert_eq!(norm.commands_in_background(), ["tid-1"], "what a stop of the agent ends with `stop_task`");
+        // The word of an end is kept for a task of the list only, until the list drops it.
+        let ended = |task: &str| json!({ "type": "system", "subtype": "task_notification", "task_id": task, "tool_use_id": "toolu-1", "status": "completed" });
+        assert!(norm.on_message(&ended("tid-9")).is_empty() && norm.on_message(&ended("tid-7")).is_empty());
+        let second = norm.on_message(&list_line(json!([])));
+        assert_eq!(background_lines(&second), ["- | tid-1 command ended: npm run dev, tid-9 task completed: x"]);
+        assert!(norm.commands_in_background().is_empty() && norm.background_ended.is_empty());
+        // Nothing left the list: nothing ended.
+        assert_eq!(background_lines(&norm.on_message(&list_line(json!([])))), ["- | -"]);
+    }
+
+    /// Recording `subagent`, cut after the subagent started, then a list line written here
+    /// that no longer names it. (The order task line, list line is recorded; a subagent
+    /// that leaves the list with no `task_notification` is not.) Its row is closed, so it
+    /// does not say "running" for good. A subagent that never was in a list keeps its row.
+    #[test]
+    fn a_background_subagent_that_leaves_the_list_with_no_end_line_is_closed() {
+        let lines = recorded("subagent");
+        let cut = lines.iter().position(|l| l["subtype"] == "task_started").unwrap() + 1;
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let mut events = norm.turn_started("go");
+        events.extend(replay(&mut norm, &lines[..cut]));
+        assert_eq!(subagent_lines(&events), ["toolu-1 running: Run echo hi via Bash", "toolu-1 name=general-purpose"]);
+        let gone = norm.on_message(&list_line(json!([])));
+        assert_eq!(subagent_lines(&gone), ["toolu-1 stopped: Run echo hi via Bash"]);
+        assert_eq!(background_lines(&gone), ["- | tid-1 helper ended: Run echo hi via Bash"]);
+        assert!(subagent_lines(&norm.on_message(&list_line(json!([])))).is_empty(), "closed once");
+
+        // As recorded, its `task_notification` comes before the list drops it: one end, in
+        // the CLI's word (`a_background_subagent_is_followed_past_the_turn_that_started_it`).
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        let all = subagent_lines(&replay(&mut norm, &lines));
+        assert_eq!(all.iter().filter(|l| l.contains("stopped") || l.contains("completed")).collect::<Vec<_>>(), ["toolu-1 completed: Run echo hi via Bash"]);
+
+        // The same lines without the CLI's lists: the subagent was in no list Codly saw, so
+        // a list that does not name it says nothing about it.
+        let unlisted: Vec<Value> = lines[..cut].iter().filter(|l| l["subtype"] != "background_tasks_changed").cloned().collect();
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
+        replay(&mut norm, &unlisted);
+        assert!(subagent_lines(&norm.on_message(&list_line(json!([])))).is_empty());
     }
 
     /// Recording `broken-mcp`: two servers that cannot start. The init line names them; the
@@ -3833,46 +3959,6 @@ mod tests {
         assert_eq!(mcp_states(&norm.on_message(init)), [("ping-project", Connected, None)]);
         assert!(norm.outbox.is_empty());
         assert!(mcp_states(&norm.on_message(init)).is_empty());
-    }
-
-    /// The background command events, as "task call status: description".
-    fn background_lines(events: &[EventKind]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|e| match e {
-                EventKind::BackgroundCommand { task_id, call_id, description, status } => Some(format!("{task_id} {call_id} {status}: {description}")),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Recording `r4-background-life`: one background command ends by itself, the next one is
-    /// stopped with `stop_task`. Each is said when it starts and when it is over, with the id
-    /// that `stop_task` takes.
-    #[test]
-    fn a_background_command_is_said_when_it_starts_and_when_it_is_over() {
-        let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
-        let mut events = norm.turn_started("go");
-        events.extend(replay(&mut norm, &recorded("r4-background-life")));
-        assert_eq!(
-            background_lines(&events),
-            [
-                "tid-1 toolu-1 running: sleep 8; echo woke",
-                "tid-1 toolu-1 completed: sleep 8; echo woke",
-                "tid-2 toolu-2 running: sleep 127; echo late",
-                "tid-2 toolu-2 stopped: sleep 127; echo late",
-            ]
-        );
-        assert_eq!(subagent_lines(&events), Vec::<String>::new(), "a command is no subagent");
-
-        // A command the agent waits for (`r4-tool-progress`: `is_backgrounded: false`) is its
-        // tool call and nothing more, and so is a subagent that works in the background.
-        for name in ["r4-tool-progress", "subagent"] {
-            let lines = recorded(name);
-            assert!(lines.iter().any(|l| l["subtype"] == "task_started"), "{name} has task lines");
-            let mut norm = ClaudeNormalizer::new(&spec(Role::Worker, false), "sess-1".into());
-            assert_eq!(background_lines(&replay(&mut norm, &lines)), Vec::<String>::new(), "{name}");
-        }
     }
 
     /// Recordings `limits-max-turns` and `limits-max-budget`.
@@ -3995,7 +4081,6 @@ mod tests {
             left_in_cli: false,
             lifecycle: false,
             cancels_queued: false,
-            background: Vec::new(),
             turn_active: false,
             next_req: 0,
             session_replies: HashMap::new(),
@@ -4433,12 +4518,12 @@ mod tests {
         let mut cli = Replay::of("r4-background-and-queue-fold");
         let kinds = cli.play(|l| l["_sent"]["uuid"] == "user-msg-3").await;
         assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start:Run"]);
-        assert_eq!(cli.actor.background, ["tid-1"], "the command of the first turn still runs");
+        assert_eq!(cli.actor.norm.commands_in_background(), ["tid-1"], "the command of the first turn still runs");
         assert_eq!(cli.actor.waiting.len(), 1);
 
         let kinds = cli.play(|_| false).await;
         assert_eq!(turns(&kinds), ["steer:Reply", "end:Completed"]);
-        assert!(cli.actor.background.is_empty());
+        assert!(cli.actor.norm.commands_in_background().is_empty());
         assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.queue.is_empty());
 
         // The CLI made the message wait for the turn's end (`priority: "later"`, which Codly
@@ -4447,7 +4532,7 @@ mod tests {
         let mut cli = Replay::of("r4-background-and-queue-later");
         let kinds = cli.play(|_| false).await;
         assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start:Run", "end:Completed", "start:Reply", "end:Completed"]);
-        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.background.is_empty());
+        assert!(!cli.actor.turn_active && cli.actor.waiting.is_empty() && cli.actor.norm.commands_in_background().is_empty());
     }
 
     /// Stop while the actor counts a message as waiting in the CLI, and the CLI's answer names
@@ -4602,7 +4687,7 @@ mod tests {
         // itself when the first command ends. The driver stops the second command 2 s later.
         let kinds = cli.play(|l| l["_sent"]["request"] == json!({ "subtype": "stop_task", "task_id": "tid-2" })).await;
         assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start", "end:Completed", "start:Run", "end:Completed"]);
-        assert_eq!(cli.actor.background, ["tid-2"]);
+        assert_eq!(cli.actor.norm.commands_in_background(), ["tid-2"]);
 
         cli.in_place_of_the_drivers_request(AgentCmd::Shutdown).await;
         assert!(cli.actor.stage == Stage::StoppingTasks && cli.actor.stdin.is_some() && cli.actor.deadline.is_some(), "{:?}", cli.actor.stage);
@@ -4610,7 +4695,7 @@ mod tests {
         // `task_updated` (killed), `task_notification` (stopped), then the empty list
         let kinds = cli.play(|l| l["subtype"] == "background_tasks_changed").await;
         assert!(kinds.is_empty(), "not shown as this agent's work: {kinds:?}");
-        assert!(cli.actor.background.is_empty());
+        assert!(cli.actor.norm.commands_in_background().is_empty());
         assert!(cli.actor.stage == Stage::Closing && cli.actor.stdin.is_none() && cli.actor.deadline.is_some(), "{:?}", cli.actor.stage);
     }
 
@@ -4633,7 +4718,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut actor, _events, _child) = silent_actor(dir.path());
         actor.on_json(tasks.clone(), "codly-0", &mut None).await;
-        assert_eq!(actor.background, ["tid-1"], "the command; `stop_task` on a subagent is not recorded");
+        assert_eq!(actor.norm.commands_in_background(), ["tid-1"], "the command; `stop_task` on a subagent is not recorded");
         actor.on_cmd(AgentCmd::Shutdown).await;
         assert_eq!(stops_sent(dir.path()), [json!("tid-1")]);
         assert_eq!(actor.stage, Stage::StoppingTasks);
@@ -4650,6 +4735,25 @@ mod tests {
         actor.on_json(json!({ "type": "result", "subtype": "error_during_execution", "is_error": true, "duration_ms": 5 }), "codly-0", &mut None).await;
         assert!(actor.stage == Stage::Killing && actor.stdin.is_none(), "{:?}", actor.stage);
         assert!(stops_sent(dir.path()).is_empty(), "SIGTERM makes the CLI end what it tracks");
+    }
+
+    /// A stop whose `stop_task` request cannot be written: the CLI did not get it, so no
+    /// list will say that the command is gone. The stop does not wait for that list: it
+    /// goes straight to SIGTERM, at which the CLI ends the command.
+    #[tokio::test]
+    async fn a_stop_that_cannot_reach_the_cli_does_not_wait_for_its_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _events, _child) = silent_actor(dir.path());
+        actor.on_json(list_line(json!([{ "task_id": "tid-1", "task_type": "local_bash", "description": "npm run dev" }])), "codly-0", &mut None).await;
+        assert_eq!(actor.norm.commands_in_background(), ["tid-1"]);
+        // The other end of the actor's pipe is closed: it was the stdin of a process that is gone.
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let mut gone = proc::command(Path::new("/bin/sh"), &["-c".into(), "exit 0".into()], dir.path(), &env).spawn().unwrap();
+        actor.stdin = gone.stdin.take();
+        gone.wait().await.unwrap();
+
+        actor.on_cmd(AgentCmd::Shutdown).await;
+        assert!(actor.stage == Stage::Killing && actor.stdin.is_none() && actor.deadline.is_none(), "no wait for a list: {:?}", actor.stage);
     }
 
     /// A `result` never ends a turn that is not open: one that comes with no turn announced

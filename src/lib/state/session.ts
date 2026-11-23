@@ -1,29 +1,32 @@
 // What runs beside a live agent's own calls, as its CLI reports it: its MCP servers
-// (`mcp_server` events) and the commands it left running in the background
-// (`background_command` events). Both belong to one run of the agent: the process that holds
-// the servers and runs the commands. The store keeps them per agent (store.svelte.ts feeds
-// these functions); the agent sheet shows the ones of the agent's live run, with "Reconnect"
-// and "Stop" (requests to the live Claude session).
+// (`mcp_server` events) and what it left at work in the background: commands and helpers
+// (`background_tasks` events, the CLI's whole list at every change, with what left the list).
+// Both belong to one run of the agent: the process that holds the servers and runs the
+// commands. The store keeps them per agent (store.svelte.ts feeds these functions); the agent
+// sheet shows the ones of the agent's live run, with "Reconnect" and "Stop" (requests to the
+// live Claude session).
 import { api } from '../api';
 import type { EventKind } from '../gen/EventKind';
 import type { McpServerStatus } from '../gen/McpServerStatus';
-import { plural } from '../util/format';
 import { toast } from './toasts.svelte';
 
 /** One MCP server of an agent's run, as the CLI last gave it. `error` is the CLI's own reason. */
 export type McpServer = { name: string; status: McpServerStatus; error: string | null; runId: string | null; ts: number };
 
 /**
- * A command the agent left running in the background. `taskId` is the CLI's id of it (what
- * "Stop" names), `callId` the tool call that started it. `status` is "running", then the
- * CLI's word when it is over ("completed", "stopped").
+ * One piece of work of an agent's run in the background: a command it left running ("command":
+ * "Stop" names it by `id`, the CLI's id of it), a helper ("helper"), or another task of the CLI.
+ * `status` is "running", then the CLI's word for how it ended ("completed", "stopped"; "ended"
+ * when the CLI did not say). `startedAt`: when the first list of the run that names it came,
+ * as far back as the events at hand go (null: it was never seen running). `endedAt`: when the
+ * list that no longer names it came.
  */
-export type BackgroundCommand = { taskId: string; callId: string; description: string; status: string; runId: string | null; startedAt: number; ts: number };
+export type BackgroundWork = { id: string; kind: string; description: string; status: string; runId: string | null; startedAt: number | null; endedAt: number | null };
 
 type McpEvent = Extract<EventKind, { type: 'mcp_server' }>;
-type CommandEvent = Extract<EventKind, { type: 'background_command' }>;
+type TasksEvent = Extract<EventKind, { type: 'background_tasks' }>;
 
-/** Ended commands kept per agent, beside the ones that still run. */
+/** Ended work kept per agent, beside what still runs. */
 const ENDED_KEPT = 8;
 
 /**
@@ -37,15 +40,28 @@ export function withMcpServer(list: McpServer[], k: McpEvent, runId: string | nu
   return same.some((s) => s.name === k.name) ? same.map((s) => (s.name === k.name ? next : s)) : [...same, next];
 }
 
-/** The commands after one more `background_command` event: the ones of this run, the oldest ended ones dropped. */
-export function withBackgroundCommand(list: BackgroundCommand[], k: CommandEvent, runId: string | null, ts: number): BackgroundCommand[] {
-  const same = list.filter((c) => c.runId === runId);
-  const prev = same.find((c) => c.taskId === k.task_id);
-  const next: BackgroundCommand = { taskId: k.task_id, callId: k.call_id, description: k.description, status: k.status, runId, startedAt: prev?.startedAt ?? ts, ts };
-  const all = prev ? same.map((c) => (c === prev ? next : c)) : [...same, next];
-  const ended = all.filter((c) => c.status !== 'running');
-  const drop = new Set(ended.slice(0, Math.max(0, ended.length - ENDED_KEPT)));
-  return all.filter((c) => !drop.has(c));
+/**
+ * The background work after one more `background_tasks` event: what the CLI lists now runs
+ * (each keeps the start time it had), and what left the list is over, with the CLI's word for
+ * its end. The list is the whole list each time, so work that ran and is in neither part of
+ * the event is over too (the event of its end is not at hand: "ended"). The work of an earlier
+ * run is gone with that run's process. Of the ended work the last ones are kept.
+ */
+export function withBackgroundTasks(list: BackgroundWork[], k: TasksEvent, runId: string | null, ts: number): BackgroundWork[] {
+  const same = list.filter((w) => w.runId === runId);
+  const ran = new Map(same.filter((w) => w.status === 'running').map((w) => [w.id, w]));
+  // One row per id, in each part: the rows are keyed by it.
+  const running = new Map<string, BackgroundWork>();
+  for (const t of k.tasks) running.set(t.id, { id: t.id, kind: t.kind, description: t.description, status: 'running', runId, startedAt: ran.get(t.id)?.startedAt ?? ts, endedAt: null });
+  const said = new Set([...k.tasks, ...k.ended].map((t) => t.id));
+  const lost = [...ran.values()].filter((w) => !said.has(w.id)).map((w): BackgroundWork => ({ ...w, status: 'ended', endedAt: ts }));
+  const ended = k.ended.map((e): BackgroundWork => ({ id: e.id, kind: e.kind, description: e.description, status: e.status, runId, startedAt: ran.get(e.id)?.startedAt ?? null, endedAt: ts }));
+  const over = new Map<string, BackgroundWork>();
+  for (const w of [...same.filter((w) => w.status !== 'running'), ...lost, ...ended]) {
+    over.delete(w.id); // (an end that is said again moves to the end of the list, with its last word)
+    over.set(w.id, w);
+  }
+  return [...running.values(), ...[...over.values()].slice(-ENDED_KEPT)];
 }
 
 /** What belongs to the agent's live run (nothing when it has none: its process is gone). */
@@ -104,10 +120,16 @@ export function mcpSummary(list: McpServer[]): string {
 }
 
 /** The section's line when it is closed: "2 running", else "3 ended". */
-export function backgroundSummary(list: BackgroundCommand[]): string {
-  const running = list.filter((c) => c.status === 'running').length;
-  return running ? `${running} running` : `${plural(list.length, 'command')} ended`;
+export function backgroundSummary(list: BackgroundWork[]): string {
+  const running = list.filter((w) => w.status === 'running').length;
+  return running ? `${running} running` : `${list.length} ended`;
 }
+
+/** What a row calls its piece of work, when it is no command: "helper", "task". */
+export const backgroundKind = (w: BackgroundWork): string | null => (w.kind === 'command' ? null : w.kind === 'helper' ? 'helper' : 'task');
+
+/** "Stop" is Claude Code's `stop_task` request, which is recorded for a command only. */
+export const canStop = (w: BackgroundWork) => w.status === 'running' && w.kind === 'command';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : typeof e === 'string' ? e : 'Unknown error');
 
@@ -124,8 +146,8 @@ export async function reconnectMcp(agentId: string, server: string): Promise<str
   }
 }
 
-/** Stop a background command. Returns whether Claude Code took the request; the command's event says that it stopped. */
-export async function stopBackgroundCommand(agentId: string, taskId: string): Promise<boolean> {
+/** Stop a background command. Returns whether Claude Code took the request; its next list of background tasks says that the command stopped. */
+export async function stopBackgroundTask(agentId: string, taskId: string): Promise<boolean> {
   try {
     await api.stopAgentTask(agentId, taskId);
     return true;

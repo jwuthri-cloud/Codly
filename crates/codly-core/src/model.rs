@@ -1067,6 +1067,19 @@ pub struct BackgroundTask {
     pub description: String,
 }
 
+/// Something that left the list of a run's background work (`EventKind::BackgroundTasks`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundEnded {
+    /// As in `BackgroundTask`.
+    pub id: String,
+    pub kind: String,
+    pub description: String,
+    /// How it ended, in the CLI's own word ("completed", "stopped"); "ended" when the CLI
+    /// did not say.
+    pub status: String,
+}
+
 // ───────────────────────────── approvals ─────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1601,15 +1614,6 @@ pub enum EventKind {
         status: McpServerStatus,
         error: Option<String>,
     },
-    /// A command the agent left running in the background (Claude Code `run_in_background`).
-    /// `task_id` is the CLI's id of it, `call_id` the tool call that started it. `status` is
-    /// "running", then the CLI's word when it is over ("completed", "stopped").
-    BackgroundCommand {
-        task_id: String,
-        call_id: String,
-        description: String,
-        status: String,
-    },
     Compacting {
         pre_tokens: Option<i64>,
         post_tokens: Option<i64>,
@@ -1637,8 +1641,12 @@ pub enum EventKind {
     },
     /// What the run has at work in the background, as its CLI lists it: the whole list at
     /// every change, empty when nothing is left (Claude Code's `background_tasks_changed`).
+    /// `ended`: what left the list since the run's last event of this kind. This is the one
+    /// record of a run's background work: the gate waits on `tasks`, the agent sheet shows both.
     BackgroundTasks {
         tasks: Vec<BackgroundTask>,
+        #[serde(default)]
+        ended: Vec<BackgroundEnded>,
     },
 
     // ── Codly domain events (from the orchestrator) ──
@@ -1744,7 +1752,6 @@ impl EventKind {
             EventKind::SubAgent { .. } => "sub_agent",
             EventKind::SubAgentProgress { .. } => "sub_agent_progress",
             EventKind::McpServer { .. } => "mcp_server",
-            EventKind::BackgroundCommand { .. } => "background_command",
             EventKind::Compacting { .. } => "compacting",
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::Error { .. } => "error",
@@ -2101,9 +2108,10 @@ pub struct Snapshot {
     pub artifacts: Vec<Artifact>,
     /// Most recent persisted events (for timeline, inspector and world replay).
     pub events: Vec<EventRow>,
-    /// What runs beside the live runs and is older than `events`: the last `mcp_server` event
-    /// of each of their servers, and the `background_command` event of each command that
-    /// still runs. Oldest first.
+    /// What runs beside the live runs and is not in `events`: the last `mcp_server` event of
+    /// each of their servers, and each run's last `background_tasks` event. Oldest first. A
+    /// row with id 0 is a server that stands where an earlier run of its agent recorded it:
+    /// the log has no row of it for this run.
     pub session_events: Vec<EventRow>,
 }
 

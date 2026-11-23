@@ -356,8 +356,9 @@ impl Inner {
         Ok(())
     }
 
-    /// App exit, in about 6 s at most. Each adapter's shutdown ladder (interrupt ≤ 5 s → close
-    /// stdin ≤ 3 s → SIGTERM → SIGKILL) can take ~11 s and Codex's `close()` ~6 s, longer than
+    /// App exit, in about 6 s at most. Each adapter's shutdown ladder (Claude Code: interrupt
+    /// ≤ 5 s → stop the background commands ≤ 2 s → close stdin ≤ 3 s → SIGTERM → SIGKILL
+    /// 3 s later) can take up to ~13 s and Codex's `close()` ~6 s, longer than
     /// the app waits for us; what is still running at the deadline is SIGKILLed, so no agent
     /// (or what stayed in its process group) outlives the app. The commands of a Claude Code
     /// agent are in groups of their own (`proc::command`): one that its CLI did not end before
