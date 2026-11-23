@@ -20,7 +20,7 @@
   import { sendChat, setRequestPrefs, stopThread, stopThreadByEsc } from '../lib/state/actions';
   import { intakeUi } from '../lib/state/intake.svelte';
   import { toast } from '../lib/state/toasts.svelte';
-import { cyclesMode, nextPermissionMode, setPermissionMode } from '../lib/state/control.svelte';
+  import { cyclesMode, nextPermissionMode, setPermissionMode } from '../lib/state/control.svelte';
   import { busy, busyHint, stoppedHint, waitingHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
