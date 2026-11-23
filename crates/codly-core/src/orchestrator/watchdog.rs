@@ -1,7 +1,8 @@
 //! The watchdog: no agent sits "running" without end. Every `BEAT` it looks at each live run.
 //!
 //! - **A silent turn.** A run that is in a turn (or was sent a prompt that no turn took) and
-//!   gave no event for `quiet_secs` (`quiet_tool_secs` while a tool call is open) is flagged:
+//!   gave no event for `quiet_secs` (`quiet_tool_secs` while a tool call is open that gives
+//!   no heartbeat: `Watch::limit_secs`) is flagged:
 //!   "stalled: no output for N min" on its task, and a `Decision` the app notifies you of.
 //!   Still silent at twice the limit, its turn is interrupted and it is asked to continue,
 //!   once. Silent for one more limit after that, the run is stopped: a worker's task goes
@@ -16,10 +17,14 @@
 //!
 //! Every adapter event of a run is a life sign, the live deltas too (`Inner::watchdog_seen`,
 //! first thing in the ingest pipeline); an account's usage reading is not, since every agent
-//! of the account gets it. Claude Code says every 30 s that a long command still runs
-//! (`ToolProgress`): such a command is not silent, however long it takes, while a CLI that
-//! hangs in a tool call says nothing and is. The other CLIs, and Claude's other tools, are
-//! not known to give such a sign, so `quiet_tool_secs` stays long.
+//! of the account gets it. Claude Code says every 30 s that a tool call still runs
+//! (`ToolProgress`): such a call is not silent, however long it takes, while a CLI that hangs
+//! in it says nothing and is. That heartbeat is recorded for a Bash call, a tool of an MCP
+//! server and the `Agent` call that waits for a helper (`has_heartbeat`). So a Claude run
+//! whose open calls are all of these kinds is silent after `quiet_secs`, like a turn with no
+//! call open: 20 heartbeats that did not come. With any other tool open (WebFetch and
+//! WebSearch are not recorded), and for every other CLI, which is not known to give such a
+//! sign, the limit is the long `quiet_tool_secs`.
 //! The clock is an `Instant`: a laptop that slept made no turn silent.
 //! The Lead gets no continue prompt (its turns answer you or a worker): its turn is
 //! interrupted, and the thread says so.
@@ -84,13 +89,32 @@ impl Flag {
     }
 }
 
+/// Does Claude Code say every 30 s that a call of this tool still runs (its `tool_progress`
+/// line, `ToolProgress`)? Recorded on 2.1.311 for a Bash call, a tool of an MCP server and
+/// the `Agent` call that waits for a helper (listed as `Task` by the CLI), once each
+/// (docs/research/cli-claude-stream-json-2.1.311-part2.md §8 and -part3.md §3). Not recorded,
+/// so not counted on: WebFetch, WebSearch and every other tool.
+fn has_heartbeat(tool: &str) -> bool {
+    matches!(tool, "Bash" | "Agent" | "Task") || tool.starts_with("mcp__")
+}
+
+/// A tool call that started and did not complete.
+#[derive(Debug, Clone)]
+struct OpenCall {
+    id: String,
+    /// The provider's name of the tool ("Bash", "mcp__linear__search").
+    name: String,
+    /// A helper of the agent made it (the event after its start said so).
+    helpers: bool,
+}
+
 /// What the watchdog remembers about one live run (`Live::watch`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct Watch {
     /// When the run's last event came, or when it was last seen waiting for you.
     last_event: Instant,
     /// Tool calls started and not completed in the current turn.
-    open_tools: u32,
+    open_tools: Vec<OpenCall>,
     /// Its silence is flagged ("stalled: …").
     flagged: bool,
     /// When the watchdog interrupted its turn. A turn that completes clears it: the next
@@ -105,7 +129,25 @@ pub(super) struct Watch {
 
 impl Watch {
     pub(super) fn new() -> Watch {
-        Watch { last_event: Instant::now(), open_tools: 0, flagged: false, nudged: None, owes_continue: None, idle_flagged: false }
+        Watch { last_event: Instant::now(), open_tools: Vec::new(), flagged: false, nudged: None, owes_continue: None, idle_flagged: false }
+    }
+
+    /// The seconds a busy run of `provider` may give no event. With no tool call open:
+    /// `quiet_secs`. With one open: the long `quiet_tool_secs`, but for a Claude run whose
+    /// own open calls all give a heartbeat while they run (`has_heartbeat`): a missing
+    /// heartbeat is silence, so the plain limit holds. A helper's calls do not count for
+    /// that: recorded, a Bash call inside a helper has no heartbeat of its own, and the
+    /// `Agent` call that waits for the helper has. With only calls of helpers open (a helper
+    /// that works in the background) nothing is known to give a sign: the long limit.
+    fn limit_secs(&self, provider: Provider, cfg: &WatchdogSettings) -> u32 {
+        if self.open_tools.is_empty() {
+            return cfg.quiet_secs;
+        }
+        let mut own = self.open_tools.iter().filter(|call| !call.helpers).peekable();
+        if provider == Provider::Claude && own.peek().is_some() && own.all(|call| has_heartbeat(&call.name)) {
+            return cfg.quiet_secs;
+        }
+        cfg.quiet_tool_secs
     }
 
     /// An event of the run came. `queued`: the prompts it was sent that no turn has taken yet.
@@ -116,11 +158,23 @@ impl Watch {
         }
         self.last_event = now;
         match kind {
-            EventKind::ToolStarted { .. } => self.open_tools += 1,
-            EventKind::ToolCompleted { .. } => self.open_tools = self.open_tools.saturating_sub(1),
-            EventKind::TurnStarted { .. } => self.open_tools = 0,
+            EventKind::ToolStarted { call_id, name, .. } => self.open_tools.push(OpenCall { id: call_id.clone(), name: name.clone(), helpers: false }),
+            // The call that just started is a helper's (Claude Code: the event comes right
+            // after the call's `ToolStarted`).
+            EventKind::SubAgentProgress { tool_call_id: Some(id), .. } => {
+                if let Some(call) = self.open_tools.iter_mut().find(|call| call.id == *id) {
+                    call.helpers = true;
+                }
+            }
+            EventKind::ToolCompleted { call_id, .. } => {
+                // (a call whose start was not seen closes nothing)
+                if let Some(at) = self.open_tools.iter().position(|call| call.id == *call_id) {
+                    self.open_tools.remove(at);
+                }
+            }
+            EventKind::TurnStarted { .. } => self.open_tools.clear(),
             EventKind::TurnCompleted { status, .. } => {
-                self.open_tools = 0;
+                self.open_tools.clear();
                 // It finished what it was asked: its one chance is back. Not while a prompt is
                 // still counted as waiting: a run that never takes it stays busy and silent, and
                 // must reach its stop instead of being asked to continue without end.
@@ -199,6 +253,7 @@ pub(super) struct Look {
     pub(super) agent_id: Id,
     pub(super) run_id: Id,
     pub(super) role: Role,
+    provider: Provider,
     pub(super) task_id: Option<Id>,
     pub(super) ws: Option<Id>,
     turn_active: bool,
@@ -218,13 +273,14 @@ impl Look {
             agent_id: agent_id.to_string(),
             run_id: l.run_id.clone(),
             role: l.role,
+            provider: l.provider,
             task_id: l.task_id.clone(),
             ws: l.workspace_id.clone(),
             turn_active: l.turn_active,
             busy: l.turn_active || l.queued > 0,
             retrying: l.continue_owed.is_some() || l.background.holds_gate(),
             quiet: now.duration_since(l.watch.last_event),
-            watch: l.watch,
+            watch: l.watch.clone(),
         }
     }
 
@@ -281,7 +337,7 @@ impl Inner {
         if r.watch.idle_flagged {
             self.watch_unflag(r, Flag::Idle); // it is at work again
         }
-        let limit = Duration::from_secs(u64::from(if r.watch.open_tools > 0 { cfg.quiet_tool_secs } else { cfg.quiet_secs }));
+        let limit = Duration::from_secs(u64::from(r.watch.limit_secs(r.provider, cfg)));
         // Waiting for you is not silence: the clock starts again when you answer.
         let waits = !limit.is_zero() && r.quiet >= limit.min(ASK_AFTER) && self.waits_for_you(r);
         if waits {
@@ -376,7 +432,7 @@ impl Inner {
     /// Every step is a decision on the agent's timeline. The app notifies you of the ones that
     /// need a look (`action`: flagged, idle, interrupted, stopped; not "continued").
     fn watchdog_decision(&self, r: &Look, action: &str, summary: String) {
-        let detail = json!({ "agent_id": r.agent_id, "action": action, "quiet_secs": r.quiet.as_secs(), "tool_open": r.watch.open_tools > 0 });
+        let detail = json!({ "agent_id": r.agent_id, "action": action, "quiet_secs": r.quiet.as_secs(), "tool_open": !r.watch.open_tools.is_empty() });
         let kind = EventKind::Decision { id: new_id(), decision_type: "watchdog".into(), method: "rule".into(), summary, detail };
         if let Err(e) = self.emit(r.ws.as_deref(), row(Some(&r.agent_id), r.task_id.as_deref(), Some(&r.run_id), kind)) {
             tracing::warn!("watchdog event not recorded: {e}");
@@ -595,24 +651,121 @@ mod tests {
         assert_eq!(w.last_event, later, "a live delta counts, although it is never stored");
     }
 
+    /// A tool call starts.
+    fn started(call_id: &str, name: &str) -> EventKind {
+        EventKind::ToolStarted { call_id: call_id.into(), name: name.into(), activity: ActivityKind::Execute, target: Target::default(), input: json!({}), confidence: "observed".into() }
+    }
+
+    fn completed(call_id: &str) -> EventKind {
+        EventKind::ToolCompleted { call_id: call_id.into(), ok: true, output: None, exit_code: None, duration_ms: None, tests_passed: None, tests_failed: None }
+    }
+
+    /// A run that started these tool calls (id, tool) at `start` and gave no event since.
+    fn with_open(start: Instant, calls: &[(&str, &str)]) -> Watch {
+        let mut w = Watch { last_event: start, ..Watch::new() };
+        for (id, name) in calls {
+            w.seen(&started(id, name), start, 0);
+        }
+        w
+    }
+
+    /// The silence the run may keep, with the default settings: 10 minutes, or 60.
+    fn limit(w: &Watch, provider: Provider) -> Duration {
+        secs(w.limit_secs(provider, &WatchdogSettings::default()).into())
+    }
+
+    const PLAIN: Duration = Duration::from_secs(600);
+    const LONG: Duration = Duration::from_secs(3600);
+
     /// A build that runs for hours under Claude Code is never flagged: the CLI's heartbeat for
     /// the open call (every 30 s) starts the clock again each time, and the call stays open.
+    /// So its limit is the plain one: when the heartbeats stop, the CLI hangs.
     #[test]
     fn a_long_command_that_says_it_still_runs_is_not_silent() {
         let start = Instant::now();
-        let limit = Duration::from_secs(u64::from(WatchdogSettings::default().quiet_tool_secs));
-        let mut w = Watch { last_event: start, ..Watch::new() };
-        let target = Target { command: Some("cargo build".into()), ..Target::default() };
-        w.seen(&EventKind::ToolStarted { call_id: "c1".into(), name: "Bash".into(), activity: ActivityKind::Execute, target, input: json!({}), confidence: "observed".into() }, start, 0);
+        let mut w = with_open(start, &[("c1", "Bash")]);
+        assert_eq!(limit(&w, Provider::Claude), PLAIN);
         let mut now = start;
-        while now < start + limit * 3 {
+        while now < start + LONG * 3 {
             now += secs(30);
-            assert_eq!(step(now.duration_since(w.last_event), limit, w.flagged, None), Step::Wait);
+            assert_eq!(step(now.duration_since(w.last_event), limit(&w, Provider::Claude), w.flagged, None), Step::Wait);
             w.seen(&EventKind::ToolProgress { call_id: "c1".into() }, now, 0);
         }
-        assert_eq!(w.open_tools, 1, "a heartbeat ends no call");
-        // The heartbeats stop (the CLI hangs): flagged one limit later, as before.
-        assert_eq!(step((now + limit).duration_since(w.last_event), limit, w.flagged, None), Step::Flag);
+        assert_eq!(w.open_tools.len(), 1, "a heartbeat ends no call");
+        // The heartbeats stop (the CLI hangs): flagged 10 minutes later, not an hour.
+        assert_eq!(step(PLAIN - secs(1), limit(&w, Provider::Claude), w.flagged, None), Step::Wait);
+        assert_eq!(step((now + PLAIN).duration_since(w.last_event), limit(&w, Provider::Claude), w.flagged, None), Step::Flag);
+    }
+
+    /// The tools of Claude Code whose calls have a recorded heartbeat keep the plain limit: an
+    /// MCP tool that hangs is flagged after 10 minutes, and one that still runs never is.
+    /// A tool with no recorded heartbeat (WebFetch) keeps the long limit, also beside a call
+    /// that has one, and so does every call of another CLI.
+    #[test]
+    fn a_hung_tool_call_of_a_claude_run_is_silent_after_the_plain_limit() {
+        let start = Instant::now();
+        // An MCP tool that never returns, and says nothing.
+        let mut w = with_open(start, &[("c1", "mcp__linear__search")]);
+        assert_eq!(limit(&w, Provider::Claude), PLAIN);
+        assert_eq!(step(PLAIN - secs(1), limit(&w, Provider::Claude), false, None), Step::Wait);
+        assert_eq!(step(PLAIN, limit(&w, Provider::Claude), false, None), Step::Flag);
+        // The same call with its heartbeat every 30 s, for three hours: never flagged.
+        let mut now = start;
+        while now < start + LONG * 3 {
+            now += secs(30);
+            assert_eq!(step(now.duration_since(w.last_event), limit(&w, Provider::Claude), w.flagged, None), Step::Wait);
+            w.seen(&EventKind::ToolProgress { call_id: "c1".into() }, now, 0);
+        }
+        for tool in ["Bash", "Agent", "Task", "mcp__codly__codly_submit_report"] {
+            assert_eq!(limit(&with_open(start, &[("c1", tool)]), Provider::Claude), PLAIN, "{tool}");
+        }
+
+        // No recorded heartbeat: the long limit holds, alone and beside a command.
+        let quiet: [&[(&str, &str)]; 3] = [&[("c1", "WebFetch")], &[("c1", "Bash"), ("c2", "WebSearch")], &[("c1", "Read")]];
+        for calls in quiet {
+            let w = with_open(start, calls);
+            assert_eq!(limit(&w, Provider::Claude), LONG, "{calls:?}");
+            assert_eq!(step(PLAIN, limit(&w, Provider::Claude), false, None), Step::Wait, "{calls:?}");
+            assert_eq!(step(LONG, limit(&w, Provider::Claude), false, None), Step::Flag, "{calls:?}");
+        }
+        // When that call returns, the command's heartbeat is the sign again.
+        let mut w = with_open(start, &[("c1", "Bash"), ("c2", "WebFetch")]);
+        w.seen(&completed("c2"), start, 0);
+        assert_eq!(limit(&w, Provider::Claude), PLAIN);
+        w.seen(&completed("c1"), start, 0);
+        assert!(w.open_tools.is_empty());
+
+        // Another CLI is not known to say that a call still runs: the long limit, whatever
+        // the tool is called. With no call open every CLI has the plain one.
+        for provider in Provider::ALL.into_iter().filter(|p| *p != Provider::Claude) {
+            for tool in ["commandExecution", "Bash", "mcp__linear__search"] {
+                let w = with_open(start, &[("c1", tool)]);
+                assert_eq!(limit(&w, provider), LONG, "{provider:?} {tool}");
+                assert_eq!(step(PLAIN, limit(&w, provider), false, None), Step::Wait, "{provider:?} {tool}");
+            }
+            assert_eq!(limit(&with_open(start, &[]), provider), PLAIN, "{provider:?}");
+        }
+        assert_eq!(limit(&with_open(start, &[]), Provider::Claude), PLAIN);
+    }
+
+    /// A helper's own calls do not decide the limit. While the agent's `Agent` call waits for
+    /// the helper, that call's heartbeat is the sign, whatever the helper runs (recorded: a
+    /// Bash call inside a helper has no heartbeat of its own). A helper that works on in the
+    /// background has no call of the agent's open: nothing is known to give a sign there.
+    #[test]
+    fn a_helpers_own_calls_do_not_decide_the_limit() {
+        let start = Instant::now();
+        let helpers = |call: &str| EventKind::SubAgentProgress { call_id: "a1".into(), name: None, step: None, tool_call_id: Some(call.into()), tool_uses: None, tokens: None, report: None };
+        let mut w = with_open(start, &[("a1", "Agent"), ("h1", "WebFetch")]);
+        assert_eq!(limit(&w, Provider::Claude), LONG, "not yet known as the helper's call");
+        w.seen(&helpers("h1"), start, 0);
+        assert_eq!(limit(&w, Provider::Claude), PLAIN, "the Agent call's heartbeat stands for the helper's call");
+        // The `Agent` call returned and the helper works on: only its own call is open.
+        w.seen(&completed("a1"), start, 0);
+        assert_eq!(limit(&w, Provider::Claude), LONG);
+        w.seen(&completed("h1"), start, 0);
+        assert!(w.open_tools.is_empty());
+        assert_eq!(limit(&w, Provider::Claude), PLAIN);
     }
 
     #[test]
@@ -620,12 +773,13 @@ mod tests {
         let mut w = Watch::new();
         let now = Instant::now();
         w.nudged = Some(now);
-        w.open_tools = 2;
+        w.seen(&started("c1", "Bash"), now, 0);
+        w.seen(&started("c2", "Read"), now, 0);
         let ended = |status| EventKind::TurnCompleted { status, result_text: None, duration_ms: None };
         // The interrupted turn itself ends: the run is still on its one chance.
         w.seen(&ended(TurnStatus::Interrupted), now, 0);
         assert!(w.nudged.is_some());
-        assert_eq!(w.open_tools, 0, "no tool call outlives its turn");
+        assert!(w.open_tools.is_empty(), "no tool call outlives its turn");
         // A turn completes, but a prompt it was sent is still not taken: no new chance yet.
         w.seen(&ended(TurnStatus::Completed), now, 1);
         assert!(w.nudged.is_some());

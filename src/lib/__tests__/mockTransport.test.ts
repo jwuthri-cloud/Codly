@@ -309,6 +309,14 @@ describe('the demo transport', () => {
     expect(await reconnect('postgres')).toBeNull();
     await expect(reconnect('linear')).rejects.toThrow('linear still needs a sign-in');
     expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'connected']]);
+
+    // "Turn off" and "Turn on": the server's state follows. Codly's own server stays on.
+    expect(await call(t, 'set_agent_mcp_enabled', { agentId: lead.id, server: 'postgres', enabled: false })).toBeNull();
+    expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'disabled']]);
+    expect(await call(t, 'set_agent_mcp_enabled', { agentId: lead.id, server: 'postgres', enabled: true })).toBeNull();
+    expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'connected']]);
+    await expect(call(t, 'set_agent_mcp_enabled', { agentId: lead.id, server: 'codly', enabled: false })).rejects.toThrow("codly is Codly's own server");
+    expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'connected']]);
   });
 
   it('`?hour=23.995`: the last minute of today, not the first of tomorrow', () => {

@@ -198,6 +198,19 @@ export class MockControls {
     return null;
   }
 
+  /**
+   * "Turn off" and "Turn on" on an MCP server of a Claude agent's live run: the server's
+   * state says "switched off", or "connected" again. Codly's own server stays on.
+   */
+  setMcpEnabled(id: string, server: string, enabled: boolean): null {
+    const a = this.agent(id);
+    if (a.provider !== 'claude') throw new Error('only a Claude agent takes this without a restart');
+    if (server === 'codly') throw new Error(`codly is Codly's own server: ${a.name} reports to Codly through it, so it stays on`);
+    this.note(id, `you turned ${server} ${enabled ? 'on' : 'off'} for ${a.name}'s run`);
+    this.sim.actor(id).emit({ type: 'mcp_server', name: server, status: enabled ? 'connected' : 'disabled', error: null });
+    return null;
+  }
+
   /** "Stop" on a background command: its CLI ends it, and the agent's next list says "stopped".
    *  A helper is stopped the same way, and the agent is then told in a turn of its own
    *  (demo/background.ts). `taskId`: the id the agent's list gives the one to stop. Like Claude

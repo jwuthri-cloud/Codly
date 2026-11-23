@@ -64,12 +64,20 @@ impl Failure {
     }
 }
 
-/// A start error only you can fix: no wait installs a CLI, signs you in, turns an account on
-/// or trusts a folder's own CLI configuration. (The texts are `runs.rs`'s and `trust.rs`'s.
-/// One this list does not know is retried, then blocks with its own words.)
+/// A start error only you can fix: no wait installs a CLI, signs you in, turns an account on,
+/// trusts a folder's own CLI configuration or turns Claude Code's shell sandbox on. (The
+/// texts are `runs.rs`'s, `trust.rs`'s and the Claude adapter's `SandboxNotOn`. One this list
+/// does not know is retried, then blocks with its own words.)
 pub(super) fn needs_you(error: &str) -> bool {
-    const CAUSES: [&str; 6] =
-        ["not installed", "not signed in", "turned off", "no longer available", "binary not found", super::trust::NOT_STARTED];
+    const CAUSES: [&str; 7] = [
+        "not installed",
+        "not signed in",
+        "turned off",
+        "no longer available",
+        "binary not found",
+        super::trust::NOT_STARTED,
+        crate::adapters::claude::SandboxNotOn::NOT_STARTED,
+    ];
     let e = error.to_lowercase();
     CAUSES.iter().any(|c| e.contains(c))
 }
@@ -353,6 +361,9 @@ mod tests {
             "the Codex account codex:/h/.codex-2 is no longer available",
             "Gemini CLI binary not found",
             "Gemini CLI is not started in this folder: it has its own Gemini CLI configuration that you have not trusted",
+            // (the Claude adapter's refusal of a run whose shell sandbox is not on)
+            "Claude Code did not turn its sandbox on, so Codly did not start this agent. Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety",
+            "Claude Code did not answer Codly's check of its sandbox within 90 s, so Codly did not start this agent. Try again, or turn off \"Sandbox Claude's shell\" in Settings → Safety",
         ] {
             assert!(needs_you(e), "{e}");
             assert!(Failure::Start(e.into()).needs_you(), "{e}");

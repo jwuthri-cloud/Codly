@@ -3,11 +3,12 @@
 // (`background_tasks` events, the CLI's whole list at every change, with what left the list).
 // Both belong to one run of the agent: the process that holds the servers and runs the
 // commands. The store keeps them per agent (store.svelte.ts feeds these functions); the agent
-// sheet shows the ones of the agent's live run, with "Reconnect" and "Stop" (requests to the
-// live Claude session).
+// sheet shows the ones of the agent's live run, with "Reconnect", "Turn off", "Turn on" and
+// "Stop" (requests to the live Claude session).
 import { api } from '../api';
 import type { EventKind } from '../gen/EventKind';
 import type { McpServerStatus } from '../gen/McpServerStatus';
+import { clean } from '../util/sanitize';
 import { toast } from './toasts.svelte';
 
 /** One MCP server of an agent's run, as the CLI last gave it. `error` is the CLI's own reason. */
@@ -104,7 +105,7 @@ export const MCP_HINT: Record<McpServerStatus, string> = {
   connecting: 'Claude Code is still connecting to this server.',
   failed: 'The agent works without this server’s tools. Reconnect tries again.',
   needs_sign_in: 'The agent works without this server’s tools until you sign in to it in Claude Code’s own MCP settings. Then press Reconnect.',
-  disabled: 'This server is switched off in Claude Code.',
+  disabled: 'This server is switched off: the agent works without its tools. Turn on starts it again.',
 };
 
 /** How to sign in to a server that needs it, under its row. Codly cannot do it for you: the
@@ -115,6 +116,47 @@ export const signInSteps = (name: string): string =>
 
 /** A server Codly can ask Claude Code to connect again. */
 export const canReconnect = (s: McpServer) => s.status === 'failed' || s.status === 'needs_sign_in';
+
+/** Codly's own MCP server in every run: the agent reports to Codly through it, so it stays on. */
+const CODLY_SERVER = 'codly';
+
+/** The switch of a server's row: its button, the button while the request is on its way, and what the request turns the server to. */
+export type McpSwitch = { label: string; busy: string; enabled: boolean };
+
+/**
+ * The switch a server's row offers: "Turn off" on one that is connected, "Turn on" on one
+ * that is switched off, none in any other state (a server that did not start has Reconnect)
+ * and none on Codly's own server.
+ */
+export function mcpSwitch(s: McpServer): McpSwitch | null {
+  if (s.name === CODLY_SERVER) return null;
+  if (s.status === 'connected') return { label: 'Turn off', busy: 'Turning off…', enabled: false };
+  if (s.status === 'disabled') return { label: 'Turn on', busy: 'Turning on…', enabled: true };
+  return null;
+}
+
+/**
+ * What the switch is for, on its button. Not recorded: whether Claude Code saves the switch
+ * (docs/research has one process that turns a server off and on, and no process started
+ * after an "off"). So the line promises nothing about the agent's next run, and says that
+ * the switch can stay.
+ */
+export const mcpSwitchHint = (agent: string): string => `Switches this server for ${agent}. Claude Code may keep the switch after this run.`;
+
+/**
+ * Turn an MCP server of the agent's live run off or on. Returns whether Claude Code took
+ * the request; the server's next `mcp_server` event says where it stands. A refusal (Codly's
+ * own server, a server that does not start again) is said in a toast, with the reason.
+ */
+export async function switchMcp(agentId: string, server: string, enabled: boolean): Promise<boolean> {
+  try {
+    await api.setAgentMcpEnabled(agentId, server, enabled);
+    return true;
+  } catch (e) {
+    toast({ kind: 'error', title: `Couldn’t turn ${clean(server)} ${enabled ? 'on' : 'off'}`, body: msg(e) });
+    return false;
+  }
+}
 
 /**
  * What a reconnect that did not connect the server came back with: Claude Code's own answer,
