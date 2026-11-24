@@ -11,7 +11,11 @@
   the composer ⌘↵ sends the draft and Approve shows no ⌘↵ keycap. A card too
   big for its scroller never takes the keys, and says so: its buttons answer it.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer: 1-9 pick, ↵ in the
-  answer field or ⌘↵ send. A question that comes in its request's envelope (an MCP server's
+  answer field or ⌘↵ send. A digit picks only while its question's text and its option are in view
+  inside the card's body, and ⌘↵ sends only while every question and every picked option are
+  (`rowsView`); a press before scrolls the body to them. A press that does nothing says why at the
+  card for a moment. A click on the buttons does nothing a moment after any answer, or while the
+  card has just come to its place (`clickRests`): the buttons look at rest meanwhile. A question that comes in its request's envelope (an MCP server's
   elicitation) shows its text, the envelope folded under "Details".
   A Codex permissions request says in words what it wants (`permissionsAsked`), its detail folded.
   The card is never taller than the thread that shows it: its title, its command, the agent's
@@ -49,13 +53,13 @@
   import { copyText, resolveApprovals, saveApprovalRule } from '../../lib/state/actions';
   import { yourAnswers, yourChoice } from '../../lib/state/answers';
   import { changedPlan, PERMISSION_MODES, setPermissionMode } from '../../lib/state/control.svelte';
-  import { keyTargetApproval, registerCardView, registerQuestionKeys } from '../../lib/state/keys';
-  import { readCard, scrollerOf, viewOf } from './cardParts';
+  import { keyTargetApproval, lastAnswerAt, noteAnswer, registerCardView, registerQuestionKeys } from '../../lib/state/keys';
+  import { boxNow, bringIntoView, questionsOf, readCard, scrollerOf, seen, viewOf, type QuestionRows } from './cardParts';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
   import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, safetyPlace, type FooterButton } from '../../lib/util/approvalFooter';
-  import { answerMissing, answerTakesFocus, envelopeAsksText, foldsReason, holdStep, keyAct, keycapActs, NO_HOLD, settled, type KeyFocus, type KeysView } from '../../lib/util/approvalCard';
+  import { answerMissing, answerTakesFocus, clickRests, envelopeAsksText, foldsReason, holdStep, keyAct, keycapActs, NO_HOLD, rowsView, settled, type Box, type CardKey, type KeyAct, type KeyFocus, type KeysView } from '../../lib/util/approvalCard';
   import { idVar } from '../../lib/util/labels';
   import { firstQuestion, settledLine, settledParts, wordsOf } from '../../lib/util/outcome';
   import { permissionsAsked } from '../../lib/util/permissionsAsked';
@@ -169,6 +173,7 @@
   async function decide(choice: ApprovalChoice, message: string | null = null, answers: JsonValue | null = null): Promise<boolean> {
     if (!pending || busy || !offered.has(choice)) return false;
     busy = true;
+    noteAnswer();
     const sent = await resolveApprovals([approval, ...twins].map((a) => a.id), choice, message, answers);
     busy = false;
     noteOpen = false;
@@ -256,6 +261,7 @@
   async function saveRule(kind: ApprovalRuleKind) {
     if (!pending || busy) return;
     busy = true;
+    noteAnswer();
     await saveApprovalRule(approval.id, kind);
     busy = false;
   }
@@ -279,9 +285,13 @@
   $effect(() => {
     if (el && (ui.revealApproval === approval.id || twins.some((t) => t.id === ui.revealApproval))) {
       ui.revealApproval = null;
-      // What it asks first: a body scrolled down inside the card shows its first lines again.
-      if (bodyEl?.querySelector('[data-asks]')) bodyEl.scrollTop = 0;
-      el.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
+      // What it asks first. A question card shows in its body what the key needed (the question
+      // the digits belong to, an option, a picked answer); any other card's body shows its first lines again.
+      const rows = revealRows ?? (questions.length ? [bodyEl?.querySelector<HTMLElement>('[data-asks]')].filter((x): x is HTMLElement => !!x) : null);
+      if (rows?.length) bringIntoView(rows, false);
+      else if (bodyEl?.querySelector('[data-asks]')) bodyEl.scrollTop = 0;
+      revealRows = null;
+      showParts(!ui.reducedMotion);
     }
   });
 
@@ -360,13 +370,40 @@
   // ── the keys are the card's while you see who asks, what and its buttons, and it has settled ──
   /** The requests a key answers on this card, as one string: the watch starts over only when they change. */
   const keyIds = $derived([approval.id, ...twins.map((t) => t.id)].join(' '));
+  /** What a key does to the card now, for each key (`CardKey`): set while it is the candidate.
+   *  The digits and the send key of a question card read it through its question keys. */
+  let actNow: ((key: CardKey) => KeyAct) | null = null;
+  /** For each option of the question the digits belong to, whether its digit acts now; and the
+   *  send key of a question card: their keycaps show only then. */
+  let digitsOk = $state<boolean[]>([]);
+  let sendOk = $state(false);
+  /** What a key that did not act needed to see: the body shows it when the card is brought into view. */
+  let revealRows: HTMLElement[] | null = null;
+  /** Why the last key press did nothing, for a moment (one short line at the card). */
+  let swallowed = $state<string | null>(null);
+  let swallowedTimer: ReturnType<typeof setTimeout> | undefined;
+  function tellWhy(act: KeyAct, view: KeysView, key: CardKey) {
+    const line = act === 'wait' ? 'Wait a moment'
+      : view === 'covered' ? 'Something covers this request'
+      : view !== 'too-big' ? 'Scroll to see the whole request'
+      : key === 'send' ? 'Use the button: your answers do not fit in view together'
+      : key !== 'other' ? 'Click the option: it does not fit in view with its question'
+      : null; // the card says so under its buttons
+    swallowed = line;
+    clearTimeout(swallowedTimer);
+    swallowedTimer = setTimeout(() => (swallowed = null), 2500);
+  }
+  $effect(() => () => clearTimeout(swallowedTimer));
   // A look at every frame while it is the candidate: where it stands (`keysView`), and since when
-  // it has been 'ok' without moving (`holdStep`). The keys look once more at each press: the
-  // keycaps may lag a frame behind.
+  // it has been 'ok' without moving (`holdStep`; the question rows move with a scroll of the body).
+  // The keys look once more at each press: the keycaps may lag a frame behind.
   $effect(() => {
     if (!el || !pending || !candidate) {
       keysAt = 'out';
       ready = false;
+      digitsOk = [];
+      sendOk = false;
+      actNow = null;
       return;
     }
     const card = el;
@@ -374,10 +411,33 @@
     /** It became the card of the keys now (the one before it was answered): the wait counts from here. */
     const from = performance.now();
     let hold = NO_HOLD;
+    let view: KeysView = 'out';
+    let rows: QuestionRows[] = [];
+    let seenBox: Box | null = null;
+    let bodyBox: Box | null = null;
     const look = (now: number): KeysView => {
-      const read = sc && card.isConnected ? readCard(card, sc, bodyEl ?? null, BODY_MIN) : { view: 'out' as const, boxes: [] };
-      hold = holdStep(hold, now, read.view === 'ok', read.boxes);
-      return read.view;
+      const body = bodyEl?.isConnected ? bodyEl : null;
+      const read = sc && card.isConnected ? readCard(card, sc, body, BODY_MIN) : { view: 'out' as const, boxes: [] };
+      rows = body ? questionsOf(body) : [];
+      seenBox = sc ? viewOf(sc) : null;
+      bodyBox = body ? boxNow(body) : null;
+      const moved = [...read.boxes, ...rows.flatMap((q) => [q.text, ...q.options].map(boxNow))];
+      hold = holdStep(hold, now, read.view === 'ok', moved);
+      return (view = read.view);
+    };
+    /** What a key needs to see besides the three parts (`rowsView`). */
+    const needs = (key: CardKey): HTMLElement[] => {
+      if (key === 'other') return [];
+      if (key === 'send') return sendLooks ? rows.flatMap((q) => [q.text, ...q.options.filter((o) => o.dataset.picked !== undefined)]) : [];
+      const q = rows[digitAt];
+      const option = q?.options[key.digit];
+      // No such row on the page: the whole card, which never fits, so the digit does nothing.
+      return q && option ? [q.text, option] : [card];
+    };
+    const actFor = (key: CardKey, now: number): { act: KeyAct; view: KeysView; els: HTMLElement[] } => {
+      const els = needs(key);
+      const v = seenBox && bodyBox ? rowsView(view, els.map(seen), seenBox, bodyBox) : view;
+      return { act: keyAct(v, settled(hold, now, from)), view: v, els };
     };
     let frame = 0;
     const each = () => {
@@ -385,19 +445,57 @@
       keysAt = look(now);
       ready = settled(hold, now, from);
       focusAt = focusOf(document.activeElement, card);
+      if (subject.kind === 'question') {
+        const options = rows[digitAt]?.options.length ?? 0;
+        const digits = Array.from({ length: Math.min(options, 9) }, (_, n) => actFor({ digit: n }, now).act === 'answer');
+        if (digits.join() !== digitsOk.join()) digitsOk = digits;
+        const send = actFor('send', now).act === 'answer';
+        if (send !== sendOk) sendOk = send;
+      }
       frame = requestAnimationFrame(each);
     };
     frame = requestAnimationFrame(each);
-    const unregister = registerCardView(keyIds.split(' '), () => {
+    actNow = (key) => {
       const now = performance.now();
-      const view = look(now);
-      return keyAct(view, settled(hold, now, from));
-    });
+      look(now);
+      const r = actFor(key, now);
+      // Brought into view, the body shows what the key needed of it.
+      revealRows = r.act === 'reveal' && r.view !== 'too-big' && r.els.length ? r.els : null;
+      if (r.act !== 'answer') tellWhy(r.act, r.view, key);
+      return r.act;
+    };
+    const unregister = registerCardView(keyIds.split(' '), () => actNow?.('other') ?? 'reveal');
     return () => {
       cancelAnimationFrame(frame);
       unregister();
     };
   });
+
+  // ── a click on its buttons: the same rest as the keys ──
+  /** The buttons take no click (`clickRests`): an answer went a moment ago, or the card has just
+   *  come to its place (it arrived, or it moved under the pointer). They look at rest meanwhile. */
+  let resting = $state(true);
+  let buttonsHold = NO_HOLD;
+  function buttonsRest(now: number): boolean {
+    const row = el?.querySelector<HTMLElement>('[data-answers]');
+    buttonsHold = holdStep(buttonsHold, now, !!row, row ? [boxNow(row)] : []);
+    return clickRests(now, lastAnswerAt(), buttonsHold);
+  }
+  $effect(() => {
+    if (!el || !pending) return;
+    let frame = 0;
+    const each = () => {
+      const r = buttonsRest(performance.now());
+      if (r !== resting) resting = r;
+      frame = requestAnimationFrame(each);
+    };
+    frame = requestAnimationFrame(each);
+    return () => cancelAnimationFrame(frame);
+  });
+  /** A click on an answer: nothing at all while the buttons rest, not even later. */
+  const onClick = (fn: () => void) => () => {
+    if (!buttonsRest(performance.now())) fn();
+  };
 
   /** Where the focus `active` is, for the keys of `card`: the composer's text is read as the keys
    *  read it (state/keys.ts: any text for the deny keys; Composer.svelte: trimmed text for ⌘↵). */
@@ -411,12 +509,19 @@
     return 'field';
   }
 
+  /** Brings what the keys need of the card into view: from its title to its buttons, inside the
+   *  view of its scroller (not under its fades). In view already, it does not move. */
+  function showParts(smooth: boolean) {
+    const card = el;
+    const head = card?.querySelector<HTMLElement>(':scope > header');
+    const foot = card?.querySelector<HTMLElement>('[data-answers]');
+    if (card?.isConnected && head && foot) bringIntoView([head, foot], smooth);
+  }
   // When it becomes the oldest request on screen, the thread shows it whole; and again when
   // the "Always allow" choices come (a moment after the card) while you see its top.
   function showWhole() {
-    const card = el;
     // After the thread's own follow of the newest line (its tick) has run.
-    if (card) setTimeout(() => card.isConnected && card.scrollIntoView({ block: 'nearest', behavior: 'auto' }), 0);
+    setTimeout(() => showParts(false), 0);
   }
   let wasCandidate = false;
   $effect(() => {
@@ -532,8 +637,12 @@
     t.addEventListener('input', fit);
     return { destroy: () => t.removeEventListener('input', fit) };
   }
-  // The keys of the card that waits: 1-9 pick in the question that has no answer yet, ⌘↵ sends.
+  // The keys of the card that waits: 1-9 pick in the question that has no answer yet, ⌘↵ sends;
+  // each only while what it acts on is in view (`actNow`).
   const digitAt = $derived(digitQuestion(questions.map((q, i) => ({ options: q.options.length, answered: answeredAt(i) }))));
+  /** The send key looks at every question's text and every picked option when it cannot be sure
+   *  they show: the body scrolls, or there is more than one question. */
+  const sendLooks = $derived(questions.length > 1 || bodyScrolls);
   $effect(() => {
     if (!pending || subject.kind !== 'question') return;
     return registerQuestionKeys(approval.id, {
@@ -543,6 +652,8 @@
         if (q) toggle(digitAt, q.options[n].label, !!q.multiSelect);
       },
       send: submitAnswers,
+      // Not the candidate (or not measured yet): a key only brings it into view.
+      act: (key) => actNow?.(key) ?? 'reveal',
     });
   });
 
@@ -646,13 +757,13 @@
     {:else if subject.kind === 'question'}
       {#if questions.length}
         {#each questions as q, qi (qi)}
-          <fieldset class="q">
-            <legend data-asks={qi === 0 || undefined}>{q.question}</legend>
+          <fieldset class="q" data-question>
+            <legend data-asks={qi === Math.max(digitAt, 0) || undefined}>{q.question}</legend>
             {#each q.options as o, oi (oi)}
-              <label class="opt" class:on={(picks[qi] ?? []).includes(o.label)}>
+              <label class="opt" class:on={(picks[qi] ?? []).includes(o.label)} data-option data-picked={(picks[qi] ?? []).includes(o.label) || undefined}>
                 <input type={q.multiSelect ? 'checkbox' : 'radio'} name="q-{approval.id}-{qi}" checked={(picks[qi] ?? []).includes(o.label)} onchange={() => toggle(qi, o.label, !!q.multiSelect)} />
                 <span class="ot"><b>{o.label}</b>{#if o.description}<span class="od">{o.description}</span>{/if}</span>
-                {#if qi === digitAt && oi < 9}<span class="k num" class:off={!capShows(String(oi + 1))} aria-hidden="true">{oi + 1}</span>{/if}
+                {#if qi === digitAt && oi < 9}<span class="k num" class:off={!capShows(String(oi + 1)) || !digitsOk[oi]} aria-hidden="true">{oi + 1}</span>{/if}
               </label>
             {/each}
             {#if q.own && !ownBelow}
@@ -714,16 +825,16 @@
       </div>
     {/if}
 
-    {#snippet keyed(label: string, kbd: string | undefined)}
-      <span class="bl">{label}</span>{#if kbd}<span class="k" class:off={!capShows(kbd)}>{kbd}</span>{/if}
+    {#snippet keyed(label: string, kbd: string | undefined, passes: boolean = true)}
+      <span class="bl">{label}</span>{#if kbd}<span class="k" class:off={!capShows(kbd) || !passes}>{kbd}</span>{/if}
     {/snippet}
     {#if subject.kind === 'question'}
-      <footer data-answers>
-        <button class="btn primary" disabled={busy || unanswered} onclick={submitAnswers}>{@render keyed('Send answer', '⌘↵')}</button>
-        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={() => decide('deny')}>{@render keyed('Skip', '⌘⌫')}</button>{/if}
+      <footer data-answers class:rests={resting}>
+        <button class="btn primary" disabled={busy || unanswered} onclick={onClick(submitAnswers)}>{@render keyed('Send answer', '⌘↵', sendOk && !unanswered)}</button>
+        {#if offered.has('deny')}<button class="btn ghost" disabled={busy} onclick={onClick(() => decide('deny'))}>{@render keyed('Skip', '⌘⌫')}</button>{/if}
       </footer>
     {:else if noteOpen}
-      <form class="note" data-answers onsubmit={(e) => { e.preventDefault(); sendNote(); }}>
+      <form class="note" data-answers class:rests={resting} onsubmit={(e) => { e.preventDefault(); onClick(sendNote)(); }}>
         <input bind:this={noteEl} class="input" placeholder="Tell {agent?.name ?? 'the agent'} what to do instead…" bind:value={note} spellcheck="true"
           onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (noteOpen = false))} />
         <button class="btn" type="submit" disabled={busy || (plan !== null && !note.trim())}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
@@ -731,30 +842,32 @@
       </form>
       {#if plan !== null}<p class="same">{PLAN_NOTE_HINT}</p>{:else if noteLine}<p class="same">{noteLine}</p>{/if}
     {:else if editOpen}
-      <footer data-answers>
-        <button class="btn primary" disabled={busy || !edited.trim()} onclick={acceptEdited}>Accept with my changes</button>
+      <footer data-answers class:rests={resting}>
+        <button class="btn primary" disabled={busy || !edited.trim()} onclick={onClick(acceptEdited)}>Accept with my changes</button>
         <button class="btn ghost" disabled={busy} onclick={() => (editOpen = false)}>Keep its plan</button>
       </footer>
       <p class="same">{agent?.name ?? 'The agent'} then works from your text: Claude Code takes it as the plan.</p>
     {:else}
-      <footer data-answers>
+      <footer data-answers class:rests={resting}>
         {#each buttons as b (b.label)}
-          <button class="btn {b.cls}" disabled={busy} data-tip={b.hint} onclick={() => press(b)}>{@render keyed(b.label, b.kbd)}</button>
+          <button class="btn {b.cls}" disabled={busy} data-tip={b.hint} onclick={onClick(() => press(b))}>{@render keyed(b.label, b.kbd)}</button>
         {/each}
       </footer>
       {#if rulePrefix || ruleExact}
         <!-- The choices open under the buttons, in the card: they lie on nothing you read or press. -->
         <details class="always" bind:open={rulesOpen} use:escCloses>
           <summary data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in {safetyPlace('approval-rules')}.">Always allow in this repo…</summary>
-          <div class="layer">
+          <div class="layer" class:rests={resting}>
             <p class="a-l">Always allow in this repo, for every agent:</p>
-            {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={() => saveRule('prefix')}>Commands that start with <code>{rulePrefix}</code></button>{/if}
-            {#if ruleExact}<button class="btn sm" disabled={busy} onclick={() => saveRule('exact')}>{subject.kind === 'tool' ? 'This tool' : 'This exact command'}</button>{/if}
+            {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={onClick(() => saveRule('prefix'))}>Commands that start with <code>{rulePrefix}</code></button>{/if}
+            {#if ruleExact}<button class="btn sm" disabled={busy} onclick={onClick(() => saveRule('exact'))}>{subject.kind === 'tool' ? 'This tool' : 'This exact command'}</button>{/if}
           </div>
         </details>
       {/if}
     {/if}
     {#if candidate && keysAt === 'too-big'}<p class="same">Use the buttons: the card does not fit the window</p>{/if}
+    <!-- Why a key did nothing: over the card's top edge, taking no room and no press (the keys' test does not see it). -->
+    {#if swallowed}<p class="swallowed" role="status">{swallowed}</p>{/if}
   </article>
 {/if}
 
@@ -793,9 +906,15 @@
   /* One row of buttons, whatever the width: a keycap goes under its label, and a long label takes a second line inside its button. */
   footer { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 6px; }
   footer .btn { flex: 0 1 auto; flex-direction: column; gap: 1px; height: auto; min-height: 32px; padding: 5px 12px; white-space: normal; text-align: center; line-height: 15px; }
-  footer .btn .k { margin: 0; font-size: 10.5px; line-height: 12px; }
+  /* The keycaps are the one sign that the card takes the keys: in the label's own colour, whole (contrast 4.5:1 or more in both themes). */
+  footer .btn .k { margin: 0; font-size: var(--t-xs); line-height: 12px; opacity: 1; }
   /* A keycap that does not show keeps its room: the row has the same height with or without them. */
   .k.off { visibility: hidden; }
+  /* Buttons at rest (`clickRests`): a moment after an answer, or while the card comes to its place, a click does nothing. */
+  .rests .btn { pointer-events: none; }
+  .rests .btn:not(:disabled) { opacity: 0.7; }
+  /* Why a key did nothing, for a moment: over the card's top edge, so it moves nothing and takes no press. */
+  .swallowed { position: absolute; top: -12px; right: 16px; z-index: 1; pointer-events: none; padding: 3px 10px; border-radius: var(--r-full); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-1); background: var(--pop); box-shadow: var(--pop-shadow); }
   .same { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); margin-top: -4px; }
   .own { display: flex; flex-direction: column; }
   /* Under the body it grows only into the room the other parts leave (--answer-max, from the script), then scrolls. */
@@ -826,7 +945,7 @@
   .raw summary { width: fit-content; cursor: pointer; font-size: var(--t-sm); color: var(--ink-3); }
   .raw[open] summary { margin-bottom: 6px; }
   .answer { resize: none; min-height: 36px; max-height: 190px; line-height: 20px; padding-top: 7px; padding-bottom: 7px; overflow-y: auto; font-family: inherit; }
-  .opt .k { margin-left: auto; align-self: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-sm); font-size: var(--t-xs); line-height: 18px; text-align: center; color: var(--ink-3); background: var(--surface-2); }
+  .opt .k { margin-left: auto; align-self: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-sm); font-size: var(--t-xs); line-height: 18px; text-align: center; color: var(--ink-2); background: var(--surface-2); }
   .q { border: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   legend { font-size: 16px; line-height: 24px; color: var(--ink-1); margin-bottom: 6px; padding: 0; }
   .opt { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-1); transition: background-color var(--d-2) var(--ease-out), box-shadow var(--d-2); }

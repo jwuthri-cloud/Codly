@@ -5,7 +5,7 @@
 import type { IntakeKind } from '../gen/IntakeKind';
 
 /** The kinds of request `?approval=…` makes a 1:1 agent ask (story.ts `seedAsk`). */
-const ASK_KINDS = ['file', 'plan', 'network', 'permissions', 'question-long'] as const;
+const ASK_KINDS = ['file', 'plan', 'network', 'permissions', 'question-long', 'questions-two'] as const;
 export type AskKind = (typeof ASK_KINDS)[number];
 
 export type DemoStates = {
@@ -25,7 +25,7 @@ export type DemoStates = {
   planMode: boolean;
   /** `?intake=issue` or `?intake=pr`: that dialog is open, and your request is the first. */
   intake: IntakeKind | null;
-  /** `?approval=file` (or `plan`, `network`, `permissions`, `question-long`): a 1:1 agent asks that kind of request. */
+  /** `?approval=file` (or `plan`, `network`, `permissions`, `question-long`, `questions-two`): a 1:1 agent asks that kind of request. */
   approval: AskKind | null;
   /** `?hour=13`: the hour of the day (from 0, below 24) the demo's clock starts at. */
   hour: number | null;

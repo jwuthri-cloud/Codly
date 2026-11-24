@@ -23,6 +23,7 @@
   import TaskRow from './TaskRow.svelte';
   import WaitReason from './WaitReason.svelte';
   import WeakChecks from './WeakChecks.svelte';
+  import { watchRunPlan } from './runPlanKey';
 
   interface Props {
     planId: string;
@@ -42,6 +43,12 @@
   const starting = $derived(isStarting(planId));
   const busy = $derived(acting || starting);
   let el: HTMLElement | undefined = $state();
+  /** "Run plan" takes ⌘↵ only while it is in view and still (`watchRunPlan`): its keycap shows then. */
+  let runEl: HTMLButtonElement | undefined = $state();
+  let runCap = $state(false);
+  $effect(() => {
+    if (runEl) return watchRunPlan(runEl, planId, (shows) => (runCap = shows));
+  });
   /** Running, but nothing of it goes on without you: a task stopped, and the rest waits for it. */
   const stuck = $derived(plan ? stuckPlan(plan, tasks) : null);
   const stuckLine = $derived.by(() => {
@@ -143,8 +150,8 @@
       {#if deciding}
         <WaitReason {plan} />
         <footer>
-          <button class="btn primary" disabled={busy || plan.status !== 'awaiting_approval'} onclick={() => act(() => runPlan(planId))}>
-            <Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k">⌘↵</span>
+          <button class="btn primary" bind:this={runEl} disabled={busy || plan.status !== 'awaiting_approval'} onclick={() => act(() => runPlan(planId))}>
+            <Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k" style:visibility={runCap ? null : 'hidden'}>⌘↵</span>
           </button>
           <button class="btn ghost" disabled={busy} onclick={edit}>Change the plan</button>
           <button class="btn ghost" disabled={busy} onclick={() => act(() => cancelPlan(planId))}>Cancel</button>

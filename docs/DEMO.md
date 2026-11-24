@@ -59,6 +59,7 @@ each page load. Approve, deny or answer as on the other cards: the agent goes on
 | `?approval=network` | Ned (Claude Code): a command in Claude Code's sandbox wants to reach `registry.npmjs.org`. The step in the thread is the command; after Deny it ends with the sandbox's network error. | Ned's conversation. |
 | `?approval=permissions` | Kit (Codex) asks for more permissions: to write in `../acme-docs`, outside its worktree. | Kit's conversation. |
 | `?approval=question-long` | Ned (Claude Code) asks a question with two options of about 120 characters each. Kit (Codex) passes on a question of an MCP server that has no options: you write the answer. | Answer both (write a long answer for Kit), then look at the two closed rows. |
+| `?approval=questions-two` | Ned (Claude Code) asks two questions at once, six options each: the colour and the font of a landing page. At 1024x640 the card's body scrolls: a number key picks only an option that is in view together with its question (else the press scrolls the body to them, or says to click the option), and ⌘↵ sends only when both questions and both answers are in view at once, so at this size Send answer is the way. | Ned's conversation, at 1024x640. |
 
 ## The second office: `billing-api`
 

@@ -409,6 +409,19 @@ describe('`?approval=…`: a 1:1 agent asks that kind of request once', () => {
     expect(said(sim, codex.id)[0]).toContain(answer);
     expect(all(sim).every((a) => a.status === 'approved')).toBe(true);
   });
+
+  it('`questions-two`: a Claude agent asks two questions of six options each, and goes on with both answers', async () => {
+    const { sim, story } = asking('questions-two');
+    await until(() => all(sim).length === 1);
+    const ap = all(sim)[0];
+    expect(ap.agent_id).toBe(of(sim, 'claude').id);
+    type Asked = { questions: { questions: { question: string; options: { label: string }[] }[] } };
+    const qs = (ap.subject as unknown as Asked).questions.questions;
+    expect(qs.map((q) => q.options.length)).toEqual([6, 6]);
+    story.resolveApproval(ap.id, 'allow_once', null, { [qs[0].question]: qs[0].options[4].label, [qs[1].question]: qs[1].options[5].label });
+    await until(() => said(sim, ap.agent_id).length === 1);
+    expect(said(sim, ap.agent_id)[0]).toBe('Green and The system font then: I start the landing page with those.');
+  });
 });
 
 describe('the demo’s second office, billing-api', () => {
