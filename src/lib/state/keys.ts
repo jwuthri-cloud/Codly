@@ -2,7 +2,8 @@
 // ⌘N new request · ⌘[ / ⌘] previous / next request · ⇧⌘N new task · ⌘O open repo · ⌘↵ the one
 // primary action (approve / run plan) · ⌥⌘↵ allow for the session · ⌘⌫ deny · ⇧⌘⌫ deny with a
 // note (both also from the empty composer; on a plan both open the note) · 1-9 pick an option of the question that waits · G-sequences to rooms · J/K lists · Esc (a toast that
-// waits for you, close, deselect, then stop the running turn: the first press asks, the second stops) · ?.
+// waits for you, close, deselect, then stop the running turn: the first press asks, the second stops;
+// in a 1:1 chat with an agent that rests, two presses open "Undo a turn") · ?.
 // ponytail: hand-rolled instead of tinykeys — one listener, sequences included.
 import type { Approval } from '../gen/Approval';
 import { showsPlan } from '../util/planRequest';
@@ -10,9 +11,12 @@ import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './act
 import { twinsIn } from './approvalGroups';
 import { keyActOf, restsAfterAnswer, type KeyAct } from '../util/approvalCard';
 import { digitPick, isTextField } from '../util/questionKeys';
-import { denyKeyInField, escStep, openOne } from './esc';
+import { rewindLayer } from '../../home/rewindLayer.svelte';
+import { denyKeyInField, escPair, escStep, mayRewind, openOne } from './esc';
+import { busy } from './queue';
 import { requests } from './requests.svelte';
 import { store } from './store.svelte';
+import { takeovers } from './takeover.svelte';
 import { toasts } from './toasts.svelte';
 import { ROOMS, isClosedThread, isRequestThread, ui, type DiffTarget, type Room } from './ui.svelte';
 
@@ -143,11 +147,20 @@ export const questionKeysOf = (id: string) => questionKeys.get(id)?.at(-1) ?? nu
 
 const workspaceOpen = () => !!store.workspace;
 
+/** The composer's text field. */
+const composerField = (el: HTMLElement): boolean => el.tagName === 'TEXTAREA' && !!el.closest?.('[aria-label="Composer"]');
+
 export function installKeys(): () => void {
   let gPending = 0;
+  /** The Esc that may begin a pair (`escPair`): its thread and when. */
+  let escFirst: { thread: string; at: number } | null = null;
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.defaultPrevented) return;
+    if (e.defaultPrevented) {
+      // The composer or a field used this Esc (a menu closed, a toast went, a turn was asked to stop): it begins no pair.
+      if (e.key === 'Escape') escFirst = null;
+      return;
+    }
     const mod = e.metaKey || e.ctrlKey;
     const typing = isTyping(e.target);
     const k = e.key.toLowerCase();
@@ -267,14 +280,22 @@ export function installKeys(): () => void {
     }
 
     if (e.key === 'Escape') {
+      // Every Esc ends a pair; only one that did nothing else may begin the next (`escPair`).
+      const first = escFirst;
+      escFirst = null;
       if (overlay) return; // overlays handle their own Esc
+      const now = Date.now();
       if (typing) {
-        (e.target as HTMLElement).blur();
+        const field = e.target as HTMLElement;
+        if (!e.repeat && composerField(field) && !(field as HTMLTextAreaElement).value.trim()) escFirst = { thread: ui.thread, at: now };
+        field.blur();
         return;
       }
       // One step per press: dismiss the toast that waits for you, close, deselect, leave the full
-      // office, close the find bar, leave a closed request, and only then stop the running turn.
+      // office, close the find bar, leave a closed request, and only then stop the running turn,
+      // or, a second press in a 1:1 chat with an agent that rests, open "Undo a turn".
       const waiting = toasts.waiting;
+      const agent = store.threadAgent(ui.thread);
       const step = escStep({
         repeat: e.repeat,
         artifactOpen: !!ui.artifactOpen,
@@ -286,14 +307,29 @@ export function installKeys(): () => void {
         findOpen: ui.findOpen,
         readingClosed: isClosedThread(ui.thread),
         toastWaits: waiting !== undefined,
+        rewind: mayRewind({
+          oneToOne: !isRequestThread(ui.thread),
+          agent,
+          turnRuns: busy(ui.thread),
+          waits: !!agent && store.pendingApprovals.some((a) => a.agent_id === agent.id),
+          inTerminal: !!agent && takeovers.has(agent.id),
+          composerEmpty: [...document.querySelectorAll<HTMLTextAreaElement>('[aria-label="Composer"] textarea')].every((t) => !t.value.trim()),
+        }),
+        second: escPair(first, ui.thread, now),
       });
-      if (step === 'dismiss-toast') toasts.dismiss(waiting!.id);
-      else if (step === 'close-artifact') ui.artifactOpen = null;
+      if (step === 'dismiss-toast') {
+        // A stop needs two presses of its own: the one before the toast's does not count.
+        toasts.dismiss(waiting!.id);
+        ui.escAsk = null;
+      } else if (step === 'close-artifact') ui.artifactOpen = null;
       else if (step === 'deselect') ui.selection = null;
       else if (step === 'leave-office') ui.mode = 'blend';
       else if (step === 'close-find') ui.findOpen = false;
       else if (step === 'leave-closed') ui.openRequest(ui.request);
-      else if (step === 'stop') stopThreadByEsc(isRequestThread(ui.thread) || store.threadAgent(ui.thread) ? ui.thread : ui.request);
+      else if (step === 'stop') {
+        // Nothing ran to stop: this press may begin a pair.
+        if (!stopThreadByEsc(isRequestThread(ui.thread) || agent ? ui.thread : ui.request)) escFirst = { thread: ui.thread, at: now };
+      } else if (step === 'rewind') rewindLayer.open(agent!.id);
       return;
     }
 
@@ -366,7 +402,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['⇧⌘N', 'New task'],
       ['⌘O', 'Open repository'],
       ['⌘,', 'Settings'],
-      ['Esc', 'Dismiss a toast that waits · close · deselect · press twice to stop the running turn'],
+      ['Esc', 'Close what is open · press twice: stop the running turn, or undo a turn of an agent that rests'],
       ['?', 'This sheet'],
     ],
   },
@@ -379,7 +415,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     items: [
       ['↵', 'Send (queues if the agent is mid-turn)'],
       ['⇧↵', 'New line'],
-      ['Esc Esc', 'Stop the running turn (empty line)'],
+      ['Esc Esc', 'Stop the running turn, or undo a turn of an agent that rests (empty line)'],
       ['↑', 'Bring back what you sent (empty line)'],
       ['⇧⇥', 'Next mode: Ask · Plan · Auto · Direct'],
       ['⇧⇥', 'In a 1:1 with Claude: its next mode (ask for edits · accept edits · plan first)'],

@@ -80,14 +80,28 @@ export function filterSlash<T extends { name: string; label: string; off?: strin
 
 /**
  * A message whose first word is a slash command that Codly does not have: it is not sent (it
- * would start a turn the agent is paid for), and the composer says so. Only a first word made
- * of "/" and a name counts: a path ("/usr/bin", "/mcp/terminal") or a slash later in the text is
- * plain text. `closest`: the action you most likely meant, null when none is near.
+ * would start a turn the agent is paid for), and the composer says so. The first word is all
+ * that follows the "/" up to a space; its name is the letters, digits, `-` and `_` it starts
+ * with. It counts when it is a name that is not an action ("/review this"), a name with more
+ * after it that is not a path ("/help?", "/model:opus", "/undo."), or a name with more slashes
+ * after it that is not a path in the message's sense: one that starts with an action's name
+ * ("/mcp/terminal …"), or one with nothing after it ("/mcp/terminal"). A path in front of more
+ * words ("/usr/bin/env is missing"), "/" alone or in front of words ("/ is the root") and a slash
+ * later in the text are plain text. `closest`: the action you most likely meant, null when none
+ * is near.
  */
 export function unknownSlash(text: string, names: readonly string[]): { word: string; closest: string | null } | null {
-  const m = /^\s*\/([\w-]+)(?=\s|$)/.exec(text);
-  if (!m || names.includes(m[1].toLowerCase())) return null;
-  return { word: m[1], closest: closestName(m[1].toLowerCase(), names) };
+  const m = /^\s*\/(\S*)(.*)$/s.exec(text);
+  if (!m || !m[1]) return null;
+  const [, word, rest] = m;
+  const name = /^[\w-]*/.exec(word)![0].toLowerCase();
+  // "/?" or "/..." alone is no name, but sent it would still start a turn.
+  if (!name) return rest.trim() ? null : { word, closest: null };
+  const known = names.includes(name);
+  const tail = word.slice(name.length);
+  if (!tail) return known ? null : { word, closest: closestName(name, names) };
+  if (tail.includes('/') && !known && rest.trim()) return null;
+  return { word, closest: known ? name : closestName(name, names) };
 }
 
 /** What the composer says about it, above the line: ↵ sends nothing until the text changes. */
@@ -95,12 +109,17 @@ export function unknownSlashLine(u: { word: string; closest: string | null }): s
   return `No such command: /${u.word}. ${u.closest ? `Did you mean /${u.closest}?` : 'Type / alone to see the actions.'} ↵ sends nothing until you change it.`;
 }
 
-/** The name that is fewest letters away from `word` (a typo: a letter missing, extra, changed or two swapped), at most two away. */
+/**
+ * The name that is fewest letters away from `word` (a typo: a letter missing, extra, changed or
+ * two swapped). A short word allows fewer: 1 typo up to 4 letters, 2 for a longer one, and never
+ * more than half its letters ("/x" is near no action).
+ */
 function closestName(word: string, names: readonly string[]): string | null {
+  const allowed = Math.min(word.length <= 4 ? 1 : 2, Math.floor(word.length / 2));
   let best: { name: string; d: number } | null = null;
   for (const name of names) {
     const d = typos(word, name);
-    if (d <= 2 && (!best || d < best.d)) best = { name, d };
+    if (d <= allowed && (!best || d < best.d)) best = { name, d };
   }
   return best?.name ?? null;
 }
@@ -124,4 +143,25 @@ function typos(a: string, b: string): number {
  */
 export function pointerMoved(last: { x: number; y: number } | null, now: { x: number; y: number }): boolean {
   return !!last && (last.x !== now.x || last.y !== now.y);
+}
+
+/**
+ * Which pointer events over the menu pick the row under them (`pointerMoved`). The menu forgets
+ * where the pointer was each time it opens: a menu that opens under a resting pointer keeps its
+ * first row until the pointer really moves.
+ */
+export class MenuPointer {
+  private last: { x: number; y: number } | null = null;
+
+  /** The menu opened: the next event only tells where the pointer is. */
+  opened() {
+    this.last = null;
+  }
+
+  /** Does this event pick the row under the pointer? */
+  picks(now: { x: number; y: number }): boolean {
+    const moved = pointerMoved(this.last, now);
+    this.last = now;
+    return moved;
+  }
 }

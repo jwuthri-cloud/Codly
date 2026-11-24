@@ -9,9 +9,11 @@
   runs one; it is not sent. One that cannot run right now (stop, with nothing running) says why
   and is not sent either. A CLI's own slash commands are not offered: Codly cannot run them, and
   a message that starts with a slash command Codly does not have is not sent (the composer names
-  the closest action). While the agent is in your terminal the composer says so and offers
-  "Give it back".
-  Esc twice on an empty line stops the running turn; ↑ on an empty line brings back what you sent. A
+  the closest action). While the agent is in your terminal the composer says so, offers
+  "Give it back", and sends nothing (composerSend.ts).
+  Esc on an empty line dismisses a toast that waits for you first; twice, it stops the running
+  turn, or in a 1:1 chat with an agent that rests opens "Undo a turn" (RewindMenu, esc.ts). ↑ on
+  an empty line brings back what you sent. A
   draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
   message does not replace it. A new request that holds a draft stays a tab when you leave it.
   The hint in the empty field is an element of its own, not the field's `placeholder`: a hint
@@ -26,7 +28,8 @@
   import { setPermissionMode } from '../lib/state/control.svelte';
   import { giveBack, loadTakeover, takeovers } from '../lib/state/takeover.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
-  import { toast } from '../lib/state/toasts.svelte';
+  import { composerEsc } from '../lib/state/esc';
+  import { toast, toasts } from '../lib/state/toasts.svelte';
   import { busy, busyHint, stoppedHint, waitingHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isRequestThread, ui } from '../lib/state/ui.svelte';
@@ -46,7 +49,10 @@
   import { recall, type Recalled } from './recall';
   import { agentTurns } from './agentTurns';
   import { agentDo, slashCommands, slashContext, type SlashDo } from './composerActions';
-  import { fileMention, filterSlash, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine, type Trigger } from './composerMenu';
+  import { fileMention, filterSlash, MenuPointer, rankFiles, triggerAt, unknownSlash, unknownSlashLine, type Trigger } from './composerMenu';
+  import { sendState } from './composerSend';
+  import RewindMenu from './RewindMenu.svelte';
+  import { rewindLayer } from './rewindLayer.svelte';
   import { repoFiles } from './repoFiles';
 
   interface Props {
@@ -62,7 +68,6 @@
   let dragging = $state(false);
   const saving = $derived(files.some((f) => !f.path && !f.failed));
   const ready = $derived(files.filter((f) => f.path));
-  const canSend = $derived(!saving && (!!text.trim() || ready.length > 0));
 
   function addFiles(list: File[]) {
     for (const f of list) {
@@ -161,6 +166,8 @@
   const waitsForYou = $derived(isBusy && !!agent && store.pendingApprovals.some((a) => a.agent_id === agent.id));
   /** The agent is in your terminal: Codly sends it nothing until you give it back. */
   const inTerminal = $derived(!!agent && takeovers.has(agent.id));
+  /** "Undo a turn" of this conversation's agent is open over the composer. */
+  const rewinding = $derived(!!agent && rewindLayer.agentId === agent.id);
   const placeholder = $derived(
     inTerminal && agent ? `${agent.name} is in your terminal: give it back to message it here`
     : waitsForYou ? waitingHint(agent?.name ?? 'The agent', agent?.provider)
@@ -233,6 +240,8 @@
   const commands = $derived(slashCommands(slashContext(thread, MODES), actions));
   /** The line starts with a slash command Codly does not have: it is not sent. */
   const unknown = $derived(unknownSlash(text, commands.map((c) => c.name)));
+  /** May ↵ send, and why not (the send button's hint). */
+  const may = $derived(sendState({ text, files: ready.length, saving, unknown: !!unknown, inTerminal: inTerminal && agent ? agent.name : null }));
   // Another conversation while the menu is open: ask about its agent (once per agent, not on
   // each of its updates).
   const agentId = $derived(agent?.id ?? null);
@@ -268,6 +277,7 @@
     const next = triggerAt(text, ta.selectionStart ?? 0);
     if (next?.trigger === '@' && mention?.trigger !== '@') loadFiles();
     if (next?.trigger === '/' && mention?.trigger !== '/') loadControls(agent);
+    if (next && next.trigger !== mention?.trigger) rowPointer.opened();
     mention = next;
     if (next) mi = 0;
   }
@@ -310,12 +320,10 @@
     });
   }
 
-  /** Where the pointer was last seen over the menu: a row takes the arrow keys' place only when it really moved. */
-  let lastPointer: { x: number; y: number } | null = null;
+  /** A row takes the arrow keys' place only when the pointer really moved over the menu. */
+  const rowPointer = new MenuPointer();
   function hover(e: PointerEvent, i: number) {
-    const now = { x: e.clientX, y: e.clientY };
-    if (pointerMoved(lastPointer, now)) mi = i;
-    lastPointer = now;
+    if (rowPointer.picks({ x: e.clientX, y: e.clientY })) mi = i;
   }
 
   /** The menu scrolls when it is long (every action, in a low window): the row the arrow keys are on stays in view. */
@@ -335,7 +343,7 @@
 
   /** Never blocks: clear the line, show the message, send in the background. */
   function send() {
-    if (!canSend || unknown) return;
+    if (!may.ok) return;
     sendChat(thread, messageWithFiles(text, ready.flatMap((f) => (f.path ? [f.path] : []))));
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
     files = [];
@@ -387,20 +395,26 @@
       if (e.key === 'ArrowUp') { e.preventDefault(); mi = (mi - 1 + options.length) % options.length; tick().then(showActive); return; }
       // A held key runs no action: its repeats would run the next one too.
       if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); if (!(e.repeat && options[mi].kind === 'command')) pick(options[mi]); return; }
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); mention = null; return; }
     }
-    // An open find bar closes first: Esc never stops a turn while something is still open.
-    if (e.key === 'Escape' && ui.findOpen && !e.defaultPrevented) {
-      e.preventDefault();
-      ui.findOpen = false;
-      return;
-    }
-    // Esc on an empty line asks to stop the running turn, and a second Esc stops it (an Esc that
-    // cancelled a dictation did its job already, and the repeats of a held key stop nothing).
-    // With text typed, or nothing running, Esc leaves the field as before.
-    if (e.key === 'Escape' && !e.repeat && !e.defaultPrevented && !text.trim() && stopThreadByEsc(thread)) {
-      e.preventDefault();
-      return;
+    // One step per press (esc.ts `composerEsc`): the menu, a toast that waits (empty line), the
+    // find bar, then the running turn (empty line: the first press asks, a second stops). An Esc
+    // that cancelled a dictation did its job already. Else Esc leaves the field, as before.
+    if (e.key === 'Escape' && !e.defaultPrevented) {
+      const waiting = toasts.waiting;
+      const step = composerEsc({ repeat: e.repeat, menuOpen: !!mention && options.length > 0, empty: !text.trim(), toastWaits: waiting !== undefined, findOpen: ui.findOpen, turnRuns: isBusy });
+      if (step) {
+        e.preventDefault();
+        if (step === 'close-menu') {
+          e.stopPropagation();
+          mention = null;
+        } else if (step === 'dismiss-toast') {
+          // A stop needs two presses of its own: the one before the toast's does not count.
+          toasts.dismiss(waiting!.id);
+          ui.escAsk = null;
+        } else if (step === 'close-find') ui.findOpen = false;
+        else stopThreadByEsc(thread);
+        return;
+      }
     }
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && walk(e)) return;
     // ⇧⇥ cycles the request's mode, like Claude Code.
@@ -437,7 +451,9 @@
   ondragover={(e) => { if (hasFiles(e)) { e.preventDefault(); dragging = true; } }}
   ondragleave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) dragging = false; }}
   ondrop={(e) => { if (!hasFiles(e)) return; e.preventDefault(); dragging = false; addFiles([...(e.dataTransfer?.files ?? [])]); }}>
-  {#if mention && (options.length || noFiles)}
+  {#if rewinding && agent}
+    <RewindMenu {agent} onclose={() => { rewindLayer.close(); ta?.focus(); }} />
+  {:else if mention && (options.length || noFiles)}
     <ul class="mentions" bind:this={menu} class:actions={mention.trigger === '/'} role="listbox" aria-label={mention.trigger === '/' ? 'Actions' : mention.trigger === '#' ? 'Mention a task' : mention.atStart ? 'Talk to an agent, or mention a file' : 'Mention an agent or a file'}>
       {#each options as o, i (o.id)}
         {#if o.kind === 'agent' && i === 0 && mention?.atStart}<li class="mh eyebrow">Talk 1:1 with</li>{/if}
@@ -466,7 +482,7 @@
       {/each}
     </ul>
   {/if}
-  <div class="composer" class:has={canSend && !unknown} class:one={oneToOne} style:--hue={idVar(agent?.color ?? 0)}>
+  <div class="composer" class:has={may.ok} class:one={oneToOne} style:--hue={idVar(agent?.color ?? 0)}>
     {#if oneToOne && agent}
       <button class="to" onclick={() => ui.openRequest(ui.request)} data-tip="Back to the request (⌫ on an empty line)">
         <Portrait {agent} size={18} />{agent.name}<Icon name="x" size={11} stroke={2} />
@@ -495,7 +511,8 @@
     <button class="attach" onclick={() => picker?.click()} aria-label="Attach files" data-tip="Attach images or files — or paste or drop them"><Icon name="paperclip" size={15} stroke={1.6} /></button>
     <DictationButton target={ta} thread={slot} onText={dictated} />
     <VoiceButton {thread} />
-    <button class="send" disabled={!canSend || !!unknown} onclick={send} aria-label={isBusy ? 'Queue' : 'Send'} data-tip={isBusy ? 'Send — it queues until the turn ends' : 'Send'} data-tip-kbd="↵">
+    <!-- Not `disabled`: a disabled button gets no pointer events in Chromium, and its hint must show. -->
+    <button class="send" aria-disabled={!may.ok} onclick={send} aria-label={isBusy ? 'Queue' : 'Send'} data-tip={!may.ok && may.why ? may.why : isBusy ? 'Send — it queues until the turn ends' : 'Send'} data-tip-kbd={may.ok ? '↵' : undefined}>
       <Icon name="send" size={15} stroke={1.8} />
     </button>
   </div>
@@ -526,7 +543,6 @@
   .hint { align-self: start; padding: 7px 0 6px; font-size: var(--t-lg); line-height: 21px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
   textarea { width: 100%; resize: none; border: 0; outline: none; box-shadow: none; background: transparent; padding: 7px 0 6px; min-height: 34px; max-height: 200px; font-size: var(--t-lg); line-height: 21px; color: var(--ink-1); user-select: text; -webkit-user-select: text; }
   .send { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: var(--ink-3); background: var(--surface-2); flex-shrink: 0; transition: background var(--d-2), color var(--d-2), transform var(--d-2) var(--spring); }
-  .send:disabled { opacity: 1; }
   .has .send { background: var(--aurora); color: var(--on-aurora); transform: scale(1.04); }
   /* Every action is listed: in a low window the list scrolls, and never grows past the top of the page. */
   .mentions { position: absolute; left: 6px; bottom: calc(100% + 8px); width: min(360px, calc(100% - 12px)); max-height: min(440px, 55vh); overflow-y: auto; padding: 5px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); z-index: var(--z-pop); animation: rise-in var(--d-3) var(--spring); }

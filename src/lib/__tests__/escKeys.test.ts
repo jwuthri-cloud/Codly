@@ -1,8 +1,12 @@
-// Esc through the app's key map (installKeys): a toast that waits for you goes first, and a dialog
-// that is closing no longer holds the key. The page is a stand-in: the dialogs it has, and a key
+// Esc through the app's key map (installKeys): a toast that waits for you goes first, a dialog
+// that is closing no longer holds the key, and two presses with an agent that rests open "Undo a turn". The page is a stand-in: the dialogs it has, and a key
 // pressed outside every text field.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { rewindLayer } from '../../home/rewindLayer.svelte';
+import type { Agent } from '../gen/Agent';
+import { ESC_PAIR_WINDOW } from '../state/esc';
 import { installKeys } from '../state/keys';
+import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 
@@ -13,11 +17,30 @@ let onKey: ((e: KeyboardEvent) => void) | null = null;
 let modals: ReturnType<typeof part>[] = [];
 let off: () => void = () => {};
 
-/** Esc, pressed on the page's body. */
-function esc() {
-  const target = { tagName: 'BODY', isContentEditable: false, closest: () => null };
-  onKey!({ key: 'Escape', repeat: false, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, defaultPrevented: false, target, preventDefault() {} } as unknown as KeyboardEvent);
+/** Esc on `target`; `used`: a field or a menu already took it (`defaultPrevented`). */
+function press(target: object, used = false) {
+  onKey!({ key: 'Escape', repeat: false, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, defaultPrevented: used, target, preventDefault() {} } as unknown as KeyboardEvent);
 }
+
+/** Esc, pressed on the page's body. */
+const esc = (used = false) => press({ tagName: 'BODY', isContentEditable: false, closest: () => null }, used);
+
+/** The composer's text field, holding `value`. */
+function composer(value: string) {
+  return {
+    tagName: 'TEXTAREA',
+    isContentEditable: false,
+    value,
+    blurred: false,
+    closest: (selector: string) => (selector === '[aria-label="Composer"]' ? {} : null),
+    blur() {
+      this.blurred = true;
+    },
+  };
+}
+
+/** Esc, pressed in the composer's field. */
+const escIn = (field: ReturnType<typeof composer>) => press(field);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -76,5 +99,78 @@ describe('Esc right after a dialog closed', () => {
     modals = [part(false)];
     esc();
     expect(ui.selection).toEqual({ kind: 'agent', id: 'a1' });
+  });
+});
+
+describe('Esc Esc in a 1:1 chat with an agent that rests', () => {
+  const ada = { id: 'ada', name: 'Ada', role: 'solo', status: 'idle', worktree: '/wt/ada', provider: 'claude' } as Agent;
+
+  beforeEach(() => {
+    ui.selection = null;
+    store.agents = [ada];
+    ui.thread = 'agent:ada';
+  });
+  afterEach(() => {
+    rewindLayer.close();
+    store.agents = [];
+    ui.thread = 'lead';
+  });
+
+  it('two presses open "Undo a turn" of that agent', () => {
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
+    vi.advanceTimersByTime(300);
+    esc();
+    expect(rewindLayer.agentId).toBe('ada');
+  });
+
+  it('two presses too far apart open nothing', () => {
+    esc();
+    vi.advanceTimersByTime(ESC_PAIR_WINDOW + 1);
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
+  });
+
+  it('the Esc that dismissed a toast is not the first of the pair', () => {
+    toasts.show({ kind: 'error', title: 'Couldn’t copy' });
+    esc();
+    esc();
+    expect(toasts.list).toEqual([]);
+    expect(rewindLayer.agentId).toBeNull();
+    esc();
+    expect(rewindLayer.agentId).toBe('ada');
+  });
+
+  it('the first Esc in the empty composer begins the pair: it lets go of the field, the second opens the list', () => {
+    const field = composer('');
+    escIn(field);
+    expect(field.blurred).toBe(true);
+    expect(rewindLayer.agentId).toBeNull();
+    vi.advanceTimersByTime(300);
+    esc();
+    expect(rewindLayer.agentId).toBe('ada');
+  });
+
+  it('an Esc in a composer that holds text begins no pair', () => {
+    escIn(composer('fix the header'));
+    vi.advanceTimersByTime(300);
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
+  });
+
+  it('an Esc the composer used (a menu closed) begins no pair', () => {
+    escIn(composer(''));
+    vi.advanceTimersByTime(100);
+    esc(true);
+    vi.advanceTimersByTime(100);
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
+  });
+
+  it('in a request’s thread two presses open nothing', () => {
+    ui.thread = 'lead';
+    esc();
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
   });
 });

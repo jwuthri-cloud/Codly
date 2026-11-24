@@ -34,9 +34,9 @@ describe('the chip', () => {
   it('follows the agent’s way of working', () => {
     expect(words(chipOf('Balanced', { own: true, request: false, way: 'plan' }))).toBe('Plan first · then Balanced');
     expect(words(chipOf('Balanced', { own: true, request: false, way: 'accept_edits' }))).toBe('Accept edits · Balanced');
-    // Asking for edits is what the permissions already say: the chip is the permissions alone.
-    expect(words(chipOf('Balanced', { own: true, request: false, way: 'ask' }))).toBe('Balanced');
-    expect(words(chipOf('Ask first', { own: false, request: false, way: 'ask' }))).toBe('Ask first · Settings');
+    // Every way is named, asking for edits too.
+    expect(words(chipOf('Balanced', { own: true, request: false, way: 'ask' }))).toBe('Ask for edits · Balanced');
+    expect(words(chipOf('Ask first', { own: false, request: false, way: 'ask' }))).toBe('Ask for edits · Ask first');
   });
 
   it('is the permissions alone for the other agents, as before', () => {
@@ -48,7 +48,8 @@ describe('the chip', () => {
   it('its tip says what the way of working changes', () => {
     expect(chipOf('Balanced', { own: true, request: false, way: 'plan' }).tip).toContain('until you accept its plan, only reads are approved for it');
     expect(chipOf('Balanced', { own: true, request: false, way: 'accept_edits' }).tip).toContain('your permissions do not see them');
-    expect(chipOf('Balanced', { own: true, request: false, way: 'ask' }).tip).toBe('How much this agent asks you before it acts');
+    expect(chipOf('Balanced', { own: true, request: false, way: 'ask' }).tip).toBe('Every edit follows your permissions first, like a command.');
+    expect(chipOf('Balanced', { own: true, request: false, way: null }).tip).toBe('How much this agent asks you before it acts');
     expect(chipOf('Balanced', { own: true, request: true, way: null }).tip).toBe('How much every agent on this request asks you before it acts');
   });
 });
