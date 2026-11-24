@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
 import type { Item } from '../spine';
-import { meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, type Rect, type ScrollState } from '../threadScroll';
+import { meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, scrolledUpByHand, type Rect, type ScrollState } from '../threadScroll';
 
 const card = (key: string, status: string): Item => ({ kind: 'approval', key, ts: 0, approval: { status } as unknown as Approval, twins: [] });
 const sys = (key: string): Item => ({ kind: 'system', key, ts: 0, text: 'x', card: null });
@@ -29,6 +29,13 @@ describe('revealTop', () => {
   });
   it('a card taller than the view shows its top', () => {
     expect(revealTop(500, view, { top: 200, bottom: 700 }, 28)).toBe(672);
+  });
+  // Round 7's risk 1: the "new below" mark lay 10 px over the bottom of a card brought into view.
+  it('leaves room under the card for the mark when asked', () => {
+    expect(revealTop(500, view, { top: 200, bottom: 400 }, 28, 46)).toBe(646);
+    expect(revealTop(500, view, { top: 40, bottom: 250 }, 28, 46)).toBe(500);
+    // Too tall for that room: its top, as before.
+    expect(revealTop(500, view, { top: 200, bottom: 450 }, 28, 46)).toBe(672);
   });
 });
 
@@ -84,6 +91,34 @@ describe('nextMove', () => {
   it('when the last card is answered, goes back to the newest line if you were there when the hold began', () => {
     expect(at({ held: true, followed: true })).toBe('bottom');
     expect(at({ held: true, followed: false, added: true })).toBe('mark');
+  });
+});
+
+// Round 7's "not fixed 2": the thread could not tell its own scroll from yours, so it went back
+// to the newest line after the last answer also when you had scrolled up during the hold.
+describe('scrolledUpByHand', () => {
+  const after = (s: Partial<Parameters<typeof scrolledUpByHand>[0]>) => scrolledUpByHand({ before: 800, now: 800, own: null, atEnd: false, ...s });
+
+  it('your scroll up during a hold: no way back to the newest line after the last answer', () => {
+    expect(after({ now: 500 })).toBe(true);
+    // As the thread would run it: the hold began at the newest line, you scrolled up, the last card was answered.
+    const followed = !after({ now: 500 });
+    expect(nextMove({ card: false, fresh: false, held: true, inView: false, atBottom: false, followed, added: false })).toBe('none');
+  });
+
+  it('the thread’s own scroll is not yours, up or down: the return stays as it was', () => {
+    expect(after({ now: 620, own: 620 })).toBe(false);
+    expect(after({ now: 620.4, own: 620 })).toBe(false);
+    const followed = !after({ now: 620, own: 620 });
+    expect(nextMove({ card: false, fresh: false, held: true, inView: false, atBottom: false, followed, added: false })).toBe('bottom');
+  });
+
+  it('a scroll down, a scroll of 1 px, or a view pulled back to the newest line by a row that shrank is none', () => {
+    expect([after({ now: 900 }), after({ now: 799.5 }), after({ now: 500, atEnd: true })]).toEqual([false, false, false]);
+  });
+
+  it('a scroll up that ends elsewhere than where the thread put the view is yours', () => {
+    expect(after({ now: 400, own: 620 })).toBe(true);
   });
 });
 

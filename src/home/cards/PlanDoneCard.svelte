@@ -5,7 +5,8 @@
   conflict is resolved the card does not say "ready to merge", and the one primary button is
   the step's own "Have an agent resolve it". While a pull request for the plan is open and its
   checks are not read yet, still run or failed, the primary button is to look at the pull
-  request; Merge stays.
+  request; Merge stays. Both keep their places while the checks change: only which one is the
+  primary button does.
 -->
 <script lang="ts">
   import { keepBranch, mergePlan } from '../../lib/state/actions';
@@ -99,9 +100,10 @@
         <span class="done"><Icon name="check" size={13} stroke={2} />Merged into <code>{target}</code> at <code>{shortSha(merged.sha)}</code></span>
         <button class="btn ghost sm" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {:else}
-        {#if prChecking && pr && !conflict}
+        <!-- Both stay where they are while the checks change: only which one is the main button does. -->
+        {#if pr?.state === 'open' && !conflict}
           {@const url = pr.url}
-          <button class="btn primary" onclick={() => openExternal(url)} data-tip={pullRequestTip(pr)}><Icon name="link" size={14} />View the pull request</button>
+          <button class="btn" class:primary={prChecking} onclick={() => openExternal(url)} data-tip={prChecking ? pullRequestTip(pr) : 'Open it in your browser'}><Icon name="link" size={14} />View the pull request</button>
         {/if}
         <button class="btn" class:primary={!conflict && !prChecking} disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
         <button class="btn" disabled={busy || kept} onclick={keep}>Keep the branch</button>
@@ -112,7 +114,7 @@
     {#if plan.integration_worktree && !merged}<PreviewStep source={{ kind: 'plan', id: planId }} worktree={plan.integration_worktree} />{/if}
     {#if !merged && !kept}<MergeConflictStep source={{ kind: 'plan', id: planId }} refresh={busy} onunchecked={() => merge(true)} />{/if}
     {#if !kept}<RepoSyncBar refresh={merged?.sha ?? busy} {planId} />{/if}
-    {#if plan.integration_branch}<PullRequestStep source={{ kind: 'plan', id: planId }} canPush={!merged} />{/if}
+    {#if plan.integration_branch}<PullRequestStep source={{ kind: 'plan', id: planId }} canPush={!merged} mergedInto={merged ? target : null} />{/if}
   </article>
 {/if}
 

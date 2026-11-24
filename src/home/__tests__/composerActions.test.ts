@@ -6,7 +6,7 @@ import { api } from '../../lib/api';
 import type { Agent } from '../../lib/gen/Agent';
 import type { Checkpoint } from '../../lib/gen/Checkpoint';
 import type { LeadMode } from '../../lib/gen/LeadMode';
-import { showContext } from '../../lib/state/control.svelte';
+import { contextReads, showContext } from '../../lib/state/control.svelte';
 import type { McpServer } from '../../lib/state/session';
 import { toasts } from '../../lib/state/toasts.svelte';
 import { AgentTurns, noTurn } from '../agentTurns';
@@ -235,15 +235,17 @@ describe('/context', () => {
     for (const t of [...toasts.list]) toasts.dismiss(t.id);
   });
 
-  it('says how full the agent’s context is in a toast', async () => {
+  it('puts how full the agent’s context is in its thread, with no toast', async () => {
     vi.spyOn(api, 'agentContextUsage').mockResolvedValue({ used_tokens: 6035, max_tokens: 1_000_000, percent: 1, auto_compact_at: 967_000, parts: [] });
-    await showContext('ada', 'Ada');
-    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['info', 'Ada’s context', '6k of 1M tokens (1%) · compacts by itself at 967k']]);
+    await showContext('ada');
+    expect(contextReads.ada).toMatchObject({ line: '6k of 1M tokens (1%) · compacts by itself at 967k' });
+    expect(toasts.list).toEqual([]);
   });
 
-  it('a reading that fails says why, once', async () => {
-    vi.spyOn(api, 'agentContextUsage').mockRejectedValue('Ada is not running');
-    await showContext('ada', 'Ada');
-    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t read its context', 'Ada is not running']]);
+  it('a reading that fails says why, once, and puts nothing in the thread', async () => {
+    vi.spyOn(api, 'agentContextUsage').mockRejectedValue('Bo is not running');
+    await showContext('bo');
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t read its context', 'Bo is not running']]);
+    expect(contextReads.bo).toBeUndefined();
   });
 });

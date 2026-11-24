@@ -1,7 +1,7 @@
-// The pull-request step, from the buttons' side. Nothing here runs by itself: a draft is asked
+// The pull-request step, from the buttons' side. Nothing is sent by itself: a draft is asked
 // for when you press Create pull request, and a push or a pull request is sent only from the
 // dialog that named the remote, the branch and the base (`confirm`). A failure says in a toast
-// what was sent and what was not.
+// what was sent and what was not. Only reads run by themselves: an open pull request's checks.
 import { api } from '../api';
 import type { PrChecks } from '../gen/PrChecks';
 import type { PrConfirm } from '../gen/PrConfirm';
@@ -78,13 +78,21 @@ export async function pushPrBranch(source: PrSource, confirm: PrConfirm): Promis
   }
 }
 
-/** Refresh: read the pull request's state and checks once more. */
-export async function refreshPullRequest(source: PrSource) {
+/** How often an open pull request's checks are read again while its row is on screen, in ms. */
+export const PR_REFRESH_MS = 30_000;
+
+/**
+ * Refresh: read the pull request's state and checks once more. A read you asked for (the
+ * button) that fails says why in a toast. One the row makes by itself (`byItself`: every 30 s,
+ * when the window gets the focus) says nothing when it fails: the row keeps the last reading and
+ * says how old it is, and the next one tries again.
+ */
+export async function refreshPullRequest(source: PrSource, byItself = false) {
   try {
     const pr = await api.refreshPullRequest(source);
     prUi.opened[prKey(source)] = pr;
   } catch (e) {
-    toast({ kind: 'error', title: 'Couldn’t read the pull request', body: msg(e) });
+    if (!byItself) toast({ kind: 'error', title: 'Couldn’t read the pull request', body: msg(e) });
   }
 }
 

@@ -237,7 +237,7 @@ export function agentDo(thread: () => string): AgentDo {
       ui.modelDialog = { provider: a.provider, agentId: a.id };
     },
     compact: (a) => void compactAgent(a.id, a.name),
-    context: (a) => void showContext(a.id, a.name),
+    context: (a) => void showContext(a.id),
     undo: (a) => rewindLayer.open(a.id),
     terminal: (a) => void openInTerminal(a.id),
     showTerminal: (a) => showTerminal(a.id),

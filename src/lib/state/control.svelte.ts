@@ -13,6 +13,7 @@ import type { PermissionMode } from '../gen/PermissionMode';
 import type { Provider } from '../gen/Provider';
 import { clock, tokens } from '../util/format';
 import { toast } from './toasts.svelte';
+import { wallNow } from './ui.svelte';
 
 export const NO_CONTROL: ControlState = { block_tools: false, stop_requested: false, paused: false, held: 0 };
 
@@ -123,15 +124,15 @@ export function compactWait(agent: Pick<Agent, 'task_id' | 'status'>): string | 
   return IN_TURN.includes(agent.status) ? 'Wait until its turn ends.' : null;
 }
 
-/** Ask an agent to compact its conversation now (the core picks the way of its CLI). The toast
- *  says that the CLI took the request; the compaction itself shows in the agent's history. */
+/** Ask an agent to compact its conversation now (the core picks the way of its CLI). The core
+ *  records the request, and the thread shows that record as a row (home/controlRows.ts), so only
+ *  a refusal says something here. */
 export async function compactAgent(agentId: string, name: string): Promise<boolean> {
   try {
     await api.compactAgent(agentId);
-    toast({ kind: 'success', title: `Compacting ${name}’s conversation`, body: 'Its history shows it when it is done.' });
     return true;
   } catch (e) {
-    toast({ kind: 'error', title: 'Couldn’t compact its conversation', body: msg(e) });
+    toast({ kind: 'error', title: `Couldn’t compact ${name}’s conversation`, body: msg(e) });
     return false;
   }
 }
@@ -156,9 +157,16 @@ export function compactionLine(events: EventRow[], agent: Pick<Agent, 'id' | 'ru
   return null;
 }
 
-/** `/context` in the composer: read how full the agent's context is and say it in a toast. A
- *  read that fails says why (`readContext`). */
-export async function showContext(agentId: string, name: string): Promise<void> {
+/**
+ * The last `/context` reading of each agent in this window, by agent id: its thread shows it as
+ * a row ("Context: …", home/controlRows.ts). A reading is not an event: the core keeps no record
+ * of it, so the row is gone after a reload of the window.
+ */
+export const contextReads = $state<Record<string, { ts: number; line: string }>>({});
+
+/** `/context` in the composer: read how full the agent's context is and put the line in its
+ *  thread. A read that fails says why in a toast (`readContext`). */
+export async function showContext(agentId: string): Promise<void> {
   const u = await readContext(agentId);
-  if (u) toast({ kind: 'info', title: `${name}’s context`, body: contextLine(u) });
+  if (u) contextReads[agentId] = { ts: wallNow(), line: contextLine(u) };
 }

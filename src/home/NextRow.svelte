@@ -2,7 +2,8 @@
   One fixed-height row above the composer (so nothing jumps): while the thread's agent works it
   says what it is doing (and how many of your messages wait for it); otherwise it offers the next
   sensible actions for this request as small chips. When the agent keeps its own todo list, a
-  small count ("3/7") follows its name; a press opens the whole list over the row. While its
+  small count ("3/7") follows its name; a press opens the whole list over the row. While it waits
+  for you in the middle of its list, the row says the step it waits in, greyed. While its
   turn runs, Stop interrupts it; so does Esc pressed twice (after the first press the row asks
   for the second).
   New request (⌘N) sits on the right once something was said here (in a new request it would
@@ -20,7 +21,7 @@
   import Menu, { type MenuItem } from '../components/Menu.svelte';
   import Say from '../components/Say.svelte';
   import { reviewLabel } from './threadWords';
-  import { todoLine } from './todoLine';
+  import { todoLine, todoWords } from './todoLine';
 
   interface Props {
     thread: string;
@@ -113,6 +114,9 @@
         </button>
       {/each}
     </div>
+  {:else if n?.tone === 'wait' && agent && line}
+    <!-- It waits for you in the middle of its list: the line stays, greyed, on the step it waits in. -->
+    <p class="live waits"><b>{agent.name}</b><span class="truncate num">{todoWords(line)}</span></p>
   {:else}
     <span class="grow"></span>
   {/if}
@@ -134,6 +138,7 @@
   .live { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--t-sm); color: var(--ink-2); animation: fade-in var(--d-3) var(--ease-out); }
   .live b { font-weight: var(--w-semi); color: var(--ink-1); white-space: nowrap; }
   .live.esc { font-weight: var(--w-med); color: var(--ink-1); white-space: nowrap; }
+  .live.waits, .live.waits b { color: var(--ink-3); }
   .cnt { flex-shrink: 0; height: 22px; padding: 0 8px; border-radius: var(--r-full); font-size: var(--t-xs); font-weight: var(--w-semi); color: var(--ink-2); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-2); }
   .cnt:hover, .cnt[aria-expanded='true'] { background: var(--surface-3); color: var(--ink-1); }
   .q { white-space: nowrap; color: var(--ink-3); }

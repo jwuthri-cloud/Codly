@@ -25,14 +25,13 @@ export function todoLine(steps: readonly PlanStep[]): TodoLine | null {
   };
 }
 
-/** "3 of 7", and the step it is on: "3 of 7 · Add the toggle to the header". */
+/** The step it is on and where that is in the list: "Step 2 of 7 · Add the toggle to the header"; "7 of 7 done" when all are. */
 export function todoWords(line: TodoLine): string {
-  const count = `${line.done} of ${line.total}`;
-  return line.step ? `${count} · ${line.step.text}` : count;
+  return line.step && line.at != null ? `Step ${line.at + 1} of ${line.total} · ${line.step.text}` : `${line.done} of ${line.total} done`;
 }
 
 /**
- * The words of an agent's list while it works (its narration's tone is 'live'): "3 of 7 · …".
+ * The words of an agent's list while it works (its narration's tone is 'live'): "Step 3 of 7 · …".
  * Null otherwise, also with a list: what the narration says then (in your terminal, out of
  * quota, stopped, waiting for you) is the news, not the list.
  */
@@ -40,4 +39,15 @@ export function workingTodo(tone: Tone | undefined, steps: readonly PlanStep[]):
   if (tone !== 'live') return null;
   const line = todoLine(steps);
   return line ? todoWords(line) : null;
+}
+
+/**
+ * The line of an agent's list where the agent itself is shown (its 1:1 header, the row above
+ * the composer): while it works, and also while it waits for you (`waiting`: the line is greyed,
+ * the step it waits in is still the step it is on). Null at any other time, or with no list.
+ */
+export function todoNow(tone: Tone | undefined, steps: readonly PlanStep[]): { text: string; waiting: boolean } | null {
+  if (tone !== 'live' && tone !== 'wait') return null;
+  const line = todoLine(steps);
+  return line ? { text: todoWords(line), waiting: tone === 'wait' } : null;
 }

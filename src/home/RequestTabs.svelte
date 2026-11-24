@@ -1,7 +1,8 @@
 <!--
   Your requests, side by side: one tab per thing you asked for, each with its own Lead and plan
   running in parallel. Title = your first words; the dot says where its plan is (planning ·
-  waiting for you · running · done), amber when it needs you. ⌘[ / ⌘] switch, ⌘N starts one.
+  waiting for you · running · done), amber when it needs you. A small dot after the title says
+  that rows came since you last had it on screen (the amber wins). ⌘[ / ⌘] switch, ⌘N starts one.
   × closes a request (its Lead stops). It asks first when the close leaves work behind: a
   running plan (closing cancels it), finished work that is not merged, an open pull request,
   a draft whose composer holds text. The question takes the keyboard: it opens on Keep, Esc
@@ -12,14 +13,34 @@
   (lib/state/closing.ts). The clock at the end opens the requests you closed, to read again.
 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { closeRequest } from '../lib/state/actions';
   import { closeQuestion, closeWithUndo, type CloseQuestion } from '../lib/state/closing';
   import { requests, type Request } from '../lib/state/requests.svelte';
-  import { CLOSED_LIST, isClosedThread, ui } from '../lib/state/ui.svelte';
+  import { store } from '../lib/state/store.svelte';
+  import { CLOSED_LIST, isClosedThread, isRequestThread, ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
+  import { hasNews } from './away';
+  import { forgetSeen, seenAt } from './lastSeen';
 
   const list = $derived(requests.list);
+  const office = $derived(store.workspace?.id ?? null);
+  /** By request: when its newest row that is not yours came (a message, a card that asks you). */
+  const newest = $derived.by(() => {
+    const at = new Map<string, number>();
+    const note = (thread: string, ts: number) => at.set(thread, Math.max(at.get(thread) ?? 0, ts));
+    for (const c of store.chats) if (c.author !== 'user' && isRequestThread(c.thread)) note(c.thread, c.ts);
+    for (const ap of store.approvals) note(store.approvalThread(ap), ap.created_at);
+    return at;
+  });
+  /** A request you closed leaves the map of when you last had it on screen (an Undo brings back the tab, and it is stamped again once you leave it). */
+  let shown: { office: string | null; threads: string[] } = { office: null, threads: [] };
+  $effect(() => {
+    const now = { office, threads: list.map((r) => r.thread) };
+    const gone = shown.office === now.office ? shown.threads.filter((t) => !now.threads.includes(t)) : [];
+    shown = now;
+    if (gone.length) untrack(() => forgetSeen(now.office, gone));
+  });
   let bar: HTMLDivElement | undefined = $state();
   /** You are reading the closed requests: no tab is the open one. */
   const reading = $derived(isClosedThread(ui.thread));
@@ -89,6 +110,7 @@
   <div class="list" role="tablist" bind:this={bar}>
     {#each list as r (r.thread)}
       {@const on = !reading && ui.request === r.thread}
+      {@const news = hasNews({ onScreen: ui.thread === r.thread, needsYou: r.needsYou, seen: seenAt(office, r.thread), newest: newest.get(r.thread) ?? null })}
       {#if asking?.thread === r.thread}
         <div class="ask" role="group" aria-label="{r.title}: {asking.ask}">
           <span class="q" data-tip="{asking.ask} {asking.detail}">{asking.ask}</span>
@@ -104,13 +126,13 @@
             class="pick"
             data-thread={r.thread}
             onclick={() => ui.openRequest(r.thread)}
-            aria-label="{r.title} — {r.status}"
+            aria-label="{r.title} — {r.status}{news ? ' · new since you looked' : ''}"
             data-tip="{r.lead && r.lead.name !== 'Lead' ? `${r.lead.name} · ` : ''}{r.status}"
             data-tip-kbd="⌘[ ⌘]"
           >
             <span class="dot" aria-hidden="true"></span>
             <span class="t">{r.title}</span>
-            {#if r.waiting}<span class="n num">{r.waiting}</span>{/if}
+            {#if r.waiting}<span class="n num">{r.waiting}</span>{:else if news}<span class="new-dot" aria-hidden="true"></span>{/if}
           </button>
           <button
             class="x"
@@ -145,6 +167,7 @@
      (16, or 22 with two digits). */
   .tab { display: inline-flex; align-items: center; height: 30px; padding-right: 4px; border-radius: var(--r-full); max-width: 250px; min-width: calc(54px + 3em); flex-shrink: 1; color: var(--ink-3); font-size: var(--t-sm); font-weight: var(--w-med); transition: background-color var(--d-2), color var(--d-2), opacity var(--d-2); }
   .tab:has(.n) { min-width: calc(84px + 3em); }
+  .tab:has(.new-dot) { min-width: calc(68px + 3em); }
   .tab:hover { background: var(--surface-2); color: var(--ink-1); }
   .tab.closing { opacity: 0.45; }
   .pick { display: inline-flex; align-items: center; gap: 8px; height: 100%; min-width: 0; padding: 0 4px 0 10px; color: inherit; font: inherit; }
@@ -166,6 +189,8 @@
   .p-merged .dot { box-shadow: inset 0 0 0 1.5px var(--ok); }
   .p-failed .dot { background: var(--bad); box-shadow: none; }
   .tab.amber .dot { background: var(--amber); box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 25%, transparent); animation: none; }
+  /* Rows came since you last had it on screen. */
+  .new-dot { flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-2); }
   .n { flex-shrink: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--amber); color: #241504; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
   .new { display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--r-full); color: var(--ink-2); flex-shrink: 0; }
   .new:hover { background: var(--surface-2); color: var(--ink-1); }

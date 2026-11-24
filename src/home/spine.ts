@@ -23,8 +23,14 @@ import { groupSame } from '../lib/state/approvalGroups';
 import { isSlotNote } from '../lib/state/queue';
 import { killedAt, killLine, stoppedByYou, stoppedTurns } from '../lib/state/stops';
 import { isRequestThread } from '../lib/state/ui.svelte';
+import { contextReads } from '../lib/state/control.svelte';
+import type { Away } from './away';
+import { controlRows } from './controlRows';
 import { noticeRows, type Note } from './notices';
 import { canRetry, endedByKill, messageOf, troublesOf, type TroubleKind } from './outcomes';
+
+/** A summary's first word stays as it is when it is a task's key or an agent's name ("t1 …", "eli …"), as in History. */
+const isName = (word: string) => store.tasks.some((t) => t.key === word) || store.agents.some((a) => a.name === word);
 
 export type Item =
   | { kind: 'user'; key: string; ts: number; msg: ChatMessage; outgoing: Outgoing | null }
@@ -74,7 +80,12 @@ export type Item =
     }
   // What the agent's CLI told about the run, in its own words: all of one turn, or the same
   // words told again outside a turn (`noticeRows`). `notes`: oldest first; `ts`: the newest one's.
-  | { kind: 'notice'; key: string; ts: number; agentId: string; notes: Note[] };
+  | { kind: 'notice'; key: string; ts: number; agentId: string; notes: Note[] }
+  // What you did to the thread's agent (`controlRows`): one row for a minute; `ts`: the newest one's.
+  | { kind: 'control'; key: string; ts: number; agentId: string; notes: Note[] }
+  // What came while you were away, in one row before the first row newer than your leave
+  // (`ts`); placed by Conversation.svelte (`withAway`), never by `buildSpine`.
+  | { kind: 'away'; key: string; ts: number; summary: Away };
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
 /** `norm` of a message's text, worked out once (a message object is never changed). */
@@ -162,7 +173,7 @@ export const planIdOf = (att: JsonValue | null | undefined): string | null => {
 
 // Same millisecond: a message's ts is when it finished, a work row's when its first call
 // started, so the message comes first.
-const RANK: Record<Item['kind'], number> = { user: 0, system: 1, say: 2, ask: 2, work: 3, trouble: 4, notice: 4, approval: 5, 'task-done': 6 };
+const RANK: Record<Item['kind'], number> = { user: 0, system: 1, say: 2, ask: 2, work: 3, trouble: 4, notice: 4, control: 4, approval: 5, 'task-done': 6, away: 7 };
 
 export function buildSpine(thread: string): Item[] {
   const owner = store.threadAgent(thread);
@@ -295,6 +306,10 @@ export function buildSpine(thread: string): Item[] {
       items.push(row);
       began.set(row, notes[0].ts);
     }
+
+    // ── what you did to it: a compaction, a mode, a model, a context reading ──
+    for (const notes of controlRows(store.events, owner, isName, contextReads[owner.id] ?? null))
+      items.push({ kind: 'control', key: `x:${notes[0].eventId}:${notes[0].ts}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes });
   }
 
   // ── approvals, where they happened (a worker's land in its plan's request) ──
