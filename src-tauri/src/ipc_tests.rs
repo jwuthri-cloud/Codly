@@ -66,6 +66,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::recheck_task,
             commands::accept_task,
             commands::send_back_task,
+            commands::send_back_plan,
             commands::merge_plan,
             commands::merge_plan_warning,
             commands::undo_merge,
@@ -177,6 +178,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     // The diff's Send back: review comments go to a task that can still take them.
     let e = invoke(&wv, "send_back_task", json!({ "taskId": task["id"], "comments": "1. `a.txt:1`\n   Rename it." })).unwrap_err();
     assert!(e.to_string().contains("is cancelled; reopen it first"), "{e}");
+    // On a finished plan's diff, they become one more task of the plan.
+    let e = invoke(&wv, "send_back_plan", json!({ "planId": "nope", "comments": "1. `a.txt`\n   Rename it.", "files": ["a.txt"] })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
 
     // Cancel with the tasks that wait for it (a board task has none), and Keep what is merged
     // (only a running plan can finish early).

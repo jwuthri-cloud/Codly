@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-back-plan"
+description = "Enables the send_back_plan command without any pre-configured scope."
+commands.allow = ["send_back_plan"]
+
+[[permission]]
+identifier = "deny-send-back-plan"
+description = "Denies the send_back_plan command without any pre-configured scope."
+commands.deny = ["send_back_plan"]

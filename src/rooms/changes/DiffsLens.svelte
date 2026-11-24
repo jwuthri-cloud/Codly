@@ -5,9 +5,12 @@
   files. Plans already in your branch (merged from Codly or by hand) or kept on their own branch
   sit under Merged, with their tasks.
   It is also where you review: comment on a line or a file, tick files as viewed, open one in
-  the editor, and Send back gives all your comments to the agent that did the work (a new
-  request, for work that is merged or finished: the comments stay here until you send its
-  message; Discard takes them out of that request too). A comment on a file that left the diff since stays in the bar above Send back,
+  the editor, and Send back gives all your comments to the agent that did the work. On a
+  finished plan that is not in your branch they become one more task of the plan, for the agent
+  that wrote the files; while the plan runs, those on its finished work wait here until it is
+  done and you press Send back again (nothing goes by itself; a plan that does not move on
+  without you sends them to a new request); on merged work they go to a new request, and stay here until you send its message
+  (Discard takes them out of that request too). A comment on a file that left the diff since stays in the bar above Send back,
   where you can read and remove it.
   A task's diff has a second scope, "Last turn": only what the last turn in the task's worktree
   changed, committed or not (from the checkpoint Codly kept before that turn). It is for
@@ -17,8 +20,8 @@
   1:1 agents with changes in their worktree have a chip of their own. An agent's diff is all its
   work since its branch left yours (its commits, its edits, its new files), or its last turn; a
   read of either is a snapshot too. Comments on it go to the agent as one message of yours in
-  its 1:1 chat. On a plan that still runs, Send back gives each task's comments to its worker
-  and puts only the rest in a new request.
+  its 1:1 chat. On a plan that still runs, Send back gives each task's comments to its worker,
+  and the rest wait for the plan to finish.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -31,12 +34,12 @@
   import { diffstats } from '../../lib/state/diffstats.svelte';
   import { planOwners, review, reviewKey, taskOwners } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
-  import { ui } from '../../lib/state/ui.svelte';
+  import { ui, type DiffTarget } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
   import { ago, plural } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { oneAtATime } from '../../lib/util/oneAtATime';
-  import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, commentKeys, diffGroup, discardWords, editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, reviewBarWords, splitByTask, splitWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
+  import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, commentKeys, diffGroup, discardWords, editorPlace, finishedWorkGoes, heavy, HEAVY_LABEL, IN_FOLDER_WORDS, inProjectFolder, inTurn, offDiff, parseDiffKeeping, sendBackBarWords, splitByTask, splitWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -63,6 +66,11 @@
     ui.diffTarget ??
       (first ? { kind: 'plan' as const, id: first.id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : solo[0] ? { kind: 'agent' as const, id: solo[0].id } : null),
   );
+  /** The diff on screen, for the room's title (ChangesRoom): the one you picked or the one shown first. */
+  let { shown = $bindable(null) }: { shown?: DiffTarget } = $props();
+  $effect(() => {
+    shown = target;
+  });
   // The chip you are in: a plan's id, 'loose' (tasks with no plan shown), 'merged' or the 1:1 agents.
   const group = $derived(diffGroup(target, (id) => store.taskMap.get(id)?.plan_id, settled, (pid) => plans.some((p) => p.id === pid)));
   const groupPlan = $derived(plans.find((p) => p.id === group) ?? null);
@@ -236,19 +244,30 @@
     const worker = (task?.assignee && store.agentMap.get(task.assignee)) || null;
     return editorPlace(task, plan, worker, store.leadOf(plan?.thread ?? 'lead') ?? store.leads[0] ?? null);
   }
-  // A task that is not done takes the comments itself; merged or finished work gets a new request.
+  // A task that is not done takes the comments itself; finished work goes where `finishedWorkGoes` says.
   const toWorker = $derived(!!targetTask && targetTask.status !== 'done');
   const workerName = $derived((targetTask?.assignee && store.agentMap.get(targetTask.assignee)?.name) || 'its worker');
-  /** On the diff of a plan that still runs: where Send back takes the comments of each task at work, and how many go to a new request (see `sendBack`). */
+  /** The plan of the diff on screen (the plan's, or its task's), and where the comments on its finished work go. */
+  const targetPlan = $derived.by(() => {
+    const id = target?.kind === 'plan' ? target.id : targetTask?.plan_id;
+    return (id && store.planMap.get(id)) || null;
+  });
+  const goes = $derived(finishedWorkGoes(targetPlan, store.tasks));
+  /** On the diff of a plan that still runs: where Send back takes the comments of each task at work, and where the rest go (see `sendBack`). */
   const split = $derived.by(() => {
     if (target?.kind !== 'plan') return null;
     const { tasks: parts, rest } = splitByTask(comments, ownerTasks);
     if (!parts.length) return null;
     const who = (t: Task) => (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
-    return splitWords(parts.map((p) => ({ n: p.comments.length, who: who(p.task), key: p.task.key })), rest.length, false);
+    return splitWords(parts.map((p) => ({ n: p.comments.length, who: who(p.task), key: p.task.key })), rest.length, false, goes);
   });
   /** Finished work whose comments are in a new request already, not sent yet. */
   const waiting = $derived(!toWorker && !!waitingRequest(notesKey));
+  /** Nothing goes now: the comments are on finished work of a plan that still runs. */
+  const onlyWait = $derived(!toWorker && !split && !targetAgent && goes === 'wait');
+  const sendLabel = $derived(targetAgent ? `Send to ${targetAgent.name}` : 'Send back');
+  /** An agent that works in your project folder itself: its diff is every uncommitted change there. */
+  const inFolder = $derived(inProjectFolder(targetAgent, store.workspace?.repo_path));
   let sending = $state(false);
   async function send() {
     if (!target || sending) return;
@@ -343,7 +362,7 @@
         </div>
       {:else if target.kind === 'agent'}
         <div class="lenses turn-pick" role="radiogroup" aria-label="Which changes of the agent">
-          <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip="Its commits, its edits and its new files, since its branch left {into}">All changes</button>
+          <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip={inFolder ? IN_FOLDER_WORDS : `Its commits, its edits and its new files, since its branch left ${into}`}>All changes</button>
           <button role="radio" aria-checked={turnOnly} onclick={() => (turnOnly = true)} data-tip="Only what its last turn changed, committed or not">Last turn</button>
         </div>
       {/if}
@@ -404,7 +423,7 @@
             <ul class="gone" aria-label="Comments on files that left the diff">
               {#each gone as c, i (goneKeys[i])}
                 <li>
-                  <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. Send back still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
+                  <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. {sendLabel} still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
                   {#if c.quote != null}<p class="g-q">{c.quote}</p>{/if}
                   <p class="g-t">{c.text}</p>
                   <button class="btn sm ghost" onclick={() => review.comment(notesKey, c, '')}>Remove</button>
@@ -417,13 +436,13 @@
               <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {comments.length === 1 ? 'It is' : 'They are'} on {target.kind === 'agent' ? 'all its changes' : 'the whole task’s diff'}.</p>
               <button class="btn sm" onclick={() => (turnOnly = false)}>{wholeLabel}</button>
             {:else}
-            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : targetAgent ? agentBarWords(comments.length, targetAgent.name) : split ? `Send back gives ${split}.` : reviewBarWords(comments.length, toWorker ? workerName : null, waiting ? review.inHand(notesKey) : null)}</p>
+            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : targetAgent ? agentBarWords(comments.length, targetAgent.name) : split ? `Send back gives ${split}.` : sendBackBarWords(comments.length, toWorker ? workerName : null, goes, waiting ? review.inHand(notesKey) : null)}</p>
             {#if discarding}
               <button class="btn sm danger" onclick={() => discardReview(notesKey)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
               <button class="btn sm ghost" use:safeChoice={{ keep: () => (discarding = null), back: () => discardBtn }} onclick={() => (discarding = null)}>Keep</button>
             {:else}
               <button class="btn sm ghost" bind:this={discardBtn} onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
-              <button class="btn sm primary" disabled={sending} onclick={send} data-tip={split ?? undefined}><Icon name="send" size={13} />{targetAgent ? `Send to ${targetAgent.name}` : 'Send back'}</button>
+              <button class="btn sm primary" disabled={sending || onlyWait} onclick={send} data-tip={split ?? (onlyWait ? 'The plan is still running: press Send back when it is done' : undefined)}><Icon name="send" size={13} />{sendLabel}</button>
             {/if}
             {/if}
           </div>
@@ -445,7 +464,7 @@
   .pk.muted:not([aria-selected='true']) { color: var(--ink-3); }
   .st { color: var(--ink-3); font-weight: var(--w-reg); white-space: nowrap; font-size: var(--t-xs); font-family: var(--font-mono); }
   .sub { padding-left: 12px; }
-  .land { margin: 6px 8px 2px; align-self: flex-start; }
+  .land { margin: 6px 8px 2px; align-self: flex-start; flex-shrink: 0; }
   .turn-pick { margin: 12px 8px 0; align-self: flex-start; flex-shrink: 0; }
   .turn-h { flex-shrink: 0; padding: 0 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .all-in { padding: 6px 10px; color: var(--ink-3); font-size: var(--t-sm); }

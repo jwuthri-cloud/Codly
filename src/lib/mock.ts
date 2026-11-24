@@ -43,6 +43,7 @@ import { mockAgentDiff, mockAgentGit } from './demo/agentgit';
 import { setWallHour } from './demo/clock';
 import { BILLING, demoCloseOffice, demoMovedTo, demoPlays } from './demo/office';
 import { MergeConflictDemo } from './demo/mergeConflict';
+import { sendBackPlanDemo } from './demo/reviewTask';
 import { demoStates, opensRepo, type DemoStates } from './demo/states';
 import { intakeUi } from './state/intake.svelte';
 import { PullRequestDemo } from './demo/pullrequest';
@@ -686,6 +687,8 @@ export class MockTransport implements Transport {
         return story.planDiff(String(a.planId));
       case 'send_back_task':
         return story.sendBackTask(String(a.taskId), String(a.comments));
+      case 'send_back_plan':
+        return sendBackPlanDemo(sim, String(a.planId), String(a.comments), (a.files as string[]) ?? []);
       case 'get_events': {
         const agentId = a.agentId as string | null;
         const thread = (a.thread as string | null) ?? null;

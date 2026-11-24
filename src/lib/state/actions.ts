@@ -11,6 +11,7 @@ import type { ApprovalRuleKind } from '../gen/ApprovalRuleKind';
 import type { HeldCheck } from '../gen/HeldCheck';
 import type { MemoryKind } from '../gen/MemoryKind';
 import type { MemoryScope } from '../gen/MemoryScope';
+import type { Plan } from '../gen/Plan';
 import type { Provider } from '../gen/Provider';
 import type { Rank } from '../gen/Rank';
 import type { Settings } from '../gen/Settings';
@@ -23,7 +24,7 @@ import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
-import { followUpRequest, reviewMessage, sameSpot, splitByTask, splitWords, type ReviewComment, type ReviewDraft, type SplitPart } from '../util/review';
+import { finishedWorkGoes, followUpRequest, reviewMessage, sameSpot, splitByTask, splitWords, type ReviewComment, type ReviewDraft, type SplitPart } from '../util/review';
 import { answerText } from '../util/outcome';
 import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
@@ -419,16 +420,19 @@ export function waitingRequest(key: string): string | null {
  * Send back: every comment you wrote on a diff, as one message (file, line, the quoted line, the
  * comment). A task that is not done gets them through the core: its worker reads them and Codly
  * checks the work again; they leave the diff when the core took them, and one you wrote or
- * changed while the call was on its way stays. Merged or finished work (a done task, a whole
- * plan) opens a new request
- * with the comments ready to send: they stay on the diff until you send that message, and Send
- * back again goes to the same request (with the comments as they are now). On a plan that still
- * runs, each comment goes where its file's work is (`splitByTask`): the comments on the files of
- * a task still at work go to that task's worker, one call per task, and only the others go to
- * the new request; a call that is refused keeps its comments on the diff. A 1:1 agent's diff
- * sends them as one message of yours in its 1:1 chat. `paths`: the diff's files, in order. True:
- * the comments went to an agent, or are in a request's composer; false: nothing happened
- * (nothing to send, or the core refused and a toast says why).
+ * changed while the call was on its way stays. On a plan that still runs, each comment goes
+ * where its file's work is (`splitByTask`): the comments on the files of a task still at work go
+ * to that task's worker, one call per task; a call that is refused keeps its comments on the diff.
+ * The comments on finished work (a done task, the files no task at work takes) go where
+ * `finishedWorkGoes` says: on a finished plan that is not in your branch they become one more task
+ * of the plan, through the core (`sendToPlan`); while the plan runs they stay on the diff until it
+ * is done, and you press Send back again then (a plan that does not move on without you, its
+ * tasks left blocked or failed, sends them to a new request instead); on merged work (or when the core says they belong there: the plan has a pull request)
+ * a new request opens with them ready to send: they stay on the diff until you send that message,
+ * and Send back again goes to the same request (with the comments as they are now). A 1:1 agent's
+ * diff sends them as one message of yours in its 1:1 chat. `paths`: the diff's files, in order.
+ * True: comments went to an agent, or are in a request's composer; false: nothing happened
+ * (nothing to send, the plan still runs, or the core refused and a toast says why).
  */
 export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: string }, paths: string[]): Promise<boolean> {
   const key = reviewKey(target);
@@ -446,18 +450,32 @@ export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: st
     return true;
   }
   let rest = list;
+  const goes = finishedWorkGoes(plan, store.tasks);
+  const parts: SplitPart[] = [];
   if (!task && plan) {
     const split = splitByTask(list, planOwners(store.tasks.filter((t) => t.plan_id === plan.id)));
     if (split.tasks.length) {
-      const parts: SplitPart[] = [];
       for (const { task: owner, comments } of split.tasks) {
         const t = await sendToTask(owner, key, comments, paths, `send your comments back to ${owner.key}`);
         if (t) parts.push({ n: comments.length, who: workerName(t), key: t.key });
       }
-      if (parts.length) toast({ kind: 'success', title: 'Comments sent back', body: splitWords(parts, split.rest.length, true) });
+      if (parts.length) toast({ kind: 'success', title: 'Comments sent back', body: splitWords(parts, split.rest.length, true, goes) });
       if (!split.rest.length) return parts.length > 0;
       rest = split.rest;
     }
+  }
+  // The plan still runs: its finished work takes comments once the plan is done (`send_back_plan`).
+  // Nothing sends them by itself then: you press Send back again.
+  if (goes === 'wait') {
+    if (!parts.length) {
+      const them = rest.length === 1 ? 'it' : 'them';
+      toast({ kind: 'info', title: 'Your comments stay here for now', body: `The plan is still running. When it is done, press Send back again and it makes ${them} one more task of it.` });
+    }
+    return parts.length > 0;
+  }
+  if (goes === 'plan' && plan) {
+    const went = await sendToPlan(plan, key, rest, paths);
+    if (went !== 'new request') return went === 'sent' || parts.length > 0;
   }
   const text = followUpRequest(task, plan, rest, paths);
   const waiting = waitingRequest(key);
@@ -490,6 +508,31 @@ async function sendToTask(task: Task, key: string, comments: ReviewComment[], pa
   if (store.isOpen(ws)) store.upsertTask(t);
   dropSent(key, comments);
   return t;
+}
+
+/** How the core's refusal ends when the comments belong in a new request: the plan has a pull
+ *  request, or is merged since (crates/codly-core/src/orchestrator/review_back.rs, `NEW_REQUEST`). */
+const NEW_REQUEST = 'ask for the changes in a new request';
+
+/** Review comments on a finished plan's work, through the core: one more task of the plan, for
+ *  the agent that wrote their files. They leave the diff when the core took them (`dropSent`).
+ *  'new request': the core says they belong in one; a toast says why it refused otherwise. */
+async function sendToPlan(plan: Plan, key: string, comments: ReviewComment[], paths: string[]): Promise<'sent' | 'refused' | 'new request'> {
+  const ws = store.workspace?.id;
+  const files = [...new Set(comments.map((c) => c.path))];
+  let t: Task;
+  try {
+    t = await api.sendBackPlan(plan.id, reviewMessage(comments, paths), files);
+  } catch (e) {
+    if (msg(e).includes(NEW_REQUEST)) return 'new request';
+    toast({ kind: 'error', title: 'Couldn’t send your comments back', body: `${msg(e)} — your comments stay on the diff.` });
+    return 'refused';
+  }
+  if (store.isOpen(ws)) store.upsertTask(t);
+  dropSent(key, comments);
+  const n = comments.length === 1 ? '1 comment' : `${comments.length} comments`;
+  toast({ kind: 'success', title: `${n} sent back: task ${t.key}${t.assignee ? ` for ${workerName(t)}` : ''}, in this request` });
+  return 'sent';
 }
 
 /** Review comments on a 1:1 agent's diff: one message of yours in its 1:1 chat, the call a chat

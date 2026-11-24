@@ -119,13 +119,55 @@ export function reviewMessage(list: ReviewComment[], paths: string[]): string {
  */
 export const sentIn = (text: string, comments: ReviewComment[]): ReviewComment[] => comments.filter((c) => text.includes(commentHead(c)));
 
-/** The request that a review of merged or finished work opens: what you reviewed, where its work
- *  is, then the comments. A new Lead reads it, so it names everything. */
+/** The request that a review of merged work opens: what you reviewed, where its work is, then
+ *  the comments. A new Lead reads it, so it names everything. */
 export function followUpRequest(task: Task | null, plan: Plan | null, list: ReviewComment[], paths: string[]): string {
   const what = task ? `task ${task.key} “${task.title}”${plan ? ` of the plan “${plan.summary}”` : ''}` : `the plan “${plan?.summary ?? ''}”`;
   const branch = plan?.integration_branch ?? task?.branch;
   const where = plan?.merged_sha ? ['Its work is merged.'] : branch ? [`Its work is on the branch ${branch}.`] : [];
   return `${[`I reviewed ${what}.`, ...where, 'Please make these changes.'].join(' ')}\n\n${reviewMessage(list, paths)}`;
+}
+
+/**
+ * Where Send back takes the comments on a plan's finished work (a done task's diff, or the files
+ * of a plan's diff that no task at work takes):
+ * - `plan`: the plan is finished and not in your branch: they become one more task of it, for
+ *   the agent that wrote the files (`send_back_plan`);
+ * - `wait`: the plan still runs and will finish by itself: they stay on the diff until it is
+ *   done, and you press Send back again then (nothing is sent by itself);
+ * - `request`: no plan, or one that is merged, kept on its branch, failed or cancelled, or one
+ *   that runs but does not move on without you (each task left is blocked or failed): a new
+ *   request.
+ * `tasks`: the tasks of the board (those of `plan` are read).
+ */
+export type FinishedGoes = 'plan' | 'wait' | 'request';
+
+/** The task statuses of a plan that still moves on by itself. */
+const MOVING: readonly TaskStatus[] = ['pending', 'ready', 'running', 'verifying', 'reviewing', 'changes_requested', 'merging'];
+
+export function finishedWorkGoes(plan: Plan | null, tasks: readonly Task[]): FinishedGoes {
+  if (!plan || plan.merged_sha || plan.kept) return 'request';
+  if (plan.status === 'done') return 'plan';
+  if (plan.status === 'integrating') return 'wait';
+  if (plan.status !== 'running') return 'request';
+  const own = tasks.filter((t) => t.plan_id === plan.id);
+  const stuck = !own.some((t) => MOVING.includes(t.status)) && own.some((t) => t.status === 'blocked' || t.status === 'failed');
+  return stuck ? 'request' : 'wait';
+}
+
+/**
+ * What the review bar says after "N comments not sent." on a task's or a plan's diff. `worker`:
+ * the agent of a task that is not done (it gets them itself). Else `goes` says where the
+ * comments on finished work go. `inRequest` as for `reviewBarWords`: on a finished plan, a
+ * request holds them when the core sent them there before (the plan has a pull request), and
+ * Send back takes them there again.
+ */
+export function sendBackBarWords(total: number, worker: string | null, goes: FinishedGoes, inRequest: number | null): string {
+  const them = total === 1 ? 'it' : 'them';
+  if (worker || goes === 'request') return reviewBarWords(total, worker, inRequest);
+  if (goes === 'wait') return `This plan is still running, and nothing is sent yet: when it is done, press Send back and it makes ${them} one more task of it, for the agent that wrote these files.`;
+  if (inRequest != null) return reviewBarWords(total, null, inRequest);
+  return `Send back makes ${them} one more task of this plan, for the agent that wrote these files.`;
 }
 
 /**
@@ -351,7 +393,8 @@ const takesComments = (t: Task) => t.status !== 'done' && t.status !== 'cancelle
 /**
  * Send back on a plan's whole diff: each comment goes where its file's work is. The comments on
  * a file of a task still at work go to that task (`tasks`, in the order of their first comment);
- * the ones on a file of a done or cancelled task, or of no task, go to a new request (`rest`).
+ * the ones on a file of a done or cancelled task, or of no task, are the `rest`: they go where
+ * the plan's finished work goes (`finishedWorkGoes`).
  */
 export function splitByTask(list: readonly ReviewComment[], owners: ReadonlyMap<string, Task>): { tasks: { task: Task; comments: ReviewComment[] }[]; rest: ReviewComment[] } {
   const tasks: { task: Task; comments: ReviewComment[] }[] = [];
@@ -372,15 +415,37 @@ export function splitByTask(list: readonly ReviewComment[], owners: ReadonlyMap<
 /** One part of a split Send back: how many comments go to whom, and the task they are on. */
 export type SplitPart = { n: number; who: string; key: string };
 
+/** Where the `rest` of a split Send back go (`finishedWorkGoes`), after the press and before it. */
+const REST_WORDS: Record<FinishedGoes, { sent: [string, string]; before: [string, string] }> = {
+  request: { sent: ['is in a new request', 'are in a new request'], before: ['goes to a new request', 'go to a new request'] },
+  wait: {
+    sent: ['stays here: send it back when the plan is done', 'stay here: send them back when the plan is done'],
+    before: ['stays here until the plan is done', 'stay here until the plan is done'],
+  },
+  plan: { sent: ['is one more task of this plan', 'are one more task of this plan'], before: ['goes to one more task of this plan', 'go to one more task of this plan'] },
+};
+
 /**
- * Where a split Send back takes the comments: "2 comments to Ada (t1), 1 to Bo (t2); 1 is in a
- * new request". `sent`: false says it before the press ("…; 1 goes to a new request").
+ * Where a split Send back takes the comments: "2 comments to Ada (t1), 1 to Bo (t2); 1 stays
+ * here: send it back when the plan is done". `sent`: false says it before the press ("…; 1 stays
+ * here until the plan is done"). `goes`: where the comments that no task at work takes go.
  */
-export function splitWords(parts: readonly SplitPart[], rest: number, sent: boolean): string {
+export function splitWords(parts: readonly SplitPart[], rest: number, sent: boolean, goes: FinishedGoes): string {
   const to = parts.map((p, i) => `${p.n}${i ? '' : p.n === 1 ? ' comment' : ' comments'} to ${p.who} (${p.key})`).join(', ');
   if (!rest) return to;
-  const req = sent ? `${rest === 1 ? 'is' : 'are'} in a new request` : `${rest === 1 ? 'goes' : 'go'} to a new request`;
-  return to ? `${to}; ${rest} ${req}` : `${rest} ${req}`;
+  const words = REST_WORDS[goes][sent ? 'sent' : 'before'][rest === 1 ? 0 : 1];
+  return to ? `${to}; ${rest} ${words}` : `${rest} ${words}`;
+}
+
+/** What an agent's diff is when it works in your project folder itself (`inProjectFolder`). */
+export const IN_FOLDER_WORDS = 'Every uncommitted change in your project folder, your own edits included';
+
+/** Does `agent` work in your project folder itself (`repoPath`), not in a worktree of its own? */
+export const inProjectFolder = (agent: Agent | null, repoPath: string | null | undefined): boolean => !!agent?.worktree && agent.worktree === repoPath;
+
+/** The Changes room's title and the line under it, on a 1:1 agent's diff. */
+export function agentDiffHead(agent: Agent, repoPath: string | null | undefined): { title: string; sub: string } {
+  return { title: agent.name, sub: inProjectFolder(agent, repoPath) ? IN_FOLDER_WORDS : `What ${agent.name} changed in its own worktree` };
 }
 
 /** What the review bar says after "N comments not sent." on a 1:1 agent's diff. */

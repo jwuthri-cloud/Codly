@@ -368,9 +368,10 @@ async fn comments_start_a_stopped_task_again_and_a_done_task_takes_none() {
     assert!(yours.contains(&"you sent t1 back with review comments; its next run starts with them".to_string()), "{yours:?}");
     assert_eq!(asked_in_chat(&core, t.assignee.as_deref().unwrap()).await, [COMMENTS]);
 
-    // Its work is merged now: the changes are a new request, and nothing is recorded.
+    // Its work is merged into the finished plan now: the comments go on the plan
+    // (`send_back_plan`), and nothing is recorded.
     let e = core.send_back_task(&t.id, COMMENTS).await.unwrap_err().to_string();
-    assert!(e.contains("t1 is done") && e.contains("new request"), "{e}");
+    assert_eq!(e, "t1 is done; send your comments on the plan and they become one more task of it");
     assert_eq!(asked_in_chat(&core, t.assignee.as_deref().unwrap()).await.len(), 1);
     core.shutdown().await;
 }
