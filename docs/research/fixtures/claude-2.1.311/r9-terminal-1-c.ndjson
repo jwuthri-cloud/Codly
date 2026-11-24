@@ -1,0 +1,2 @@
+{"_note":"claude 2.1.311, recorded 2026-11-23. Lines without a leading _ key are CLI stdout lines. Ids, paths and account fields are placeholders; slash_commands, skills, plugins, agents, commands, models and usage reports are shortened. See cli-claude-stream-json-2.1.311-part7.md.","_argv":["claude","--model","haiku","--strict-mcp-config","--setting-sources","local","--resume","sess-1"],"_cwd":"/tmp/work/r9-terminal-1"}
+{"_meta":{"exit_code":1,"printed":"No conversation found with session ID: sess-1","printed_characters":75},"_t":0.638}
