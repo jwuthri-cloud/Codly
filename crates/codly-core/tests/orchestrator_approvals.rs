@@ -1376,3 +1376,44 @@ mod what_you_said {
         shut_down(&core).await;
     }
 }
+
+/// The floor for your own folder reads a line handed to env, and the commands a runner
+/// starts: in your folder they ask, in a Codly worktree they are allowed as before.
+#[test]
+fn full_access_reads_a_line_handed_to_env_in_your_own_folder() {
+    for (c, why) in [
+        ("env -S 'git reset --hard'", "discards uncommitted work"),
+        ("timeout 60 env --split-string='rm -rf src'", "deletes folders"),
+        ("uv run env -S 'git push -f'", "force push"),
+        ("npx git rebase main", "rewrites git history"),
+        ("env -uSECRET git clean -fd", "discards uncommitted work"),
+    ] {
+        let r = reason(full(c, true));
+        assert!(r.contains(why) && r.contains("your project folder itself"), "{c}: {r}");
+        assert!(allowed(&full(c, false)), "a Codly worktree keeps full access: {c}");
+    }
+    assert!(allowed(&full("env FOO=1 git status", true)));
+}
+
+/// In your own folder under Full access: a `find` that deletes in a build folder through `rm`
+/// is allowed, as its `-delete` twin is; a line that starts many commands is still read to
+/// its last command, and so is the line for a shell or env at its end.
+#[test]
+fn full_access_reads_find_rm_and_long_lines_in_your_own_folder() {
+    for c in ["find node_modules -name .cache -exec rm -rf {} +", "find dist -name '*.map' -exec rm -r {} \\;"] {
+        let v = full(c, true);
+        assert!(allowed(&v), "{c}: {v:?}");
+    }
+    let many = "uv run ".repeat(26);
+    for (c, why) in [
+        (format!("{many}true; git reset --hard"), "discards uncommitted work"),
+        (format!("{many}true; sh -c 'git reset --hard'"), "discards uncommitted work"),
+        (format!("{many}true; env -S 'git reset --hard'"), "discards uncommitted work"),
+        (format!("{}git reset --hard", "uv run ".repeat(24)), "discards uncommitted work"),
+        // A target of its own besides the files find finds.
+        ("find node_modules -exec rm -rf src \\;".to_string(), "deletes folders"),
+    ] {
+        let r = reason(full(&c, true));
+        assert!(r.contains(why) && r.contains("your project folder itself"), "{c}: {r}");
+    }
+}

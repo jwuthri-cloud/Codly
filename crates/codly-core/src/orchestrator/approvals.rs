@@ -264,11 +264,11 @@ const MANY_TARGETS: &[&str] = &["make", "just", "task", "gradle", "mvn"];
 const OWN_ACCOUNT: &[&str] = &["config", "login", "logout", "publish"];
 
 /// Does the line run one of the `OWN_ACCOUNT` subcommands (`cargo login x`,
-/// `npm config set …`, `npm c set …`, `git config …`), behind a wrapper or `sh -c` too, and
-/// behind a program that starts another (`pnpm exec git config …`, `npx -c 'git config …'`,
-/// `uv run git config …`)? A line that starts more commands than `MAX_STARTED` is not read to
-/// the end and gets yes, so nothing is offered for it, as `command_risks` says "runs dynamic
-/// code" for it.
+/// `npm config set …`, `npm c set …`, `git config …`), behind a wrapper, `sh -c` or `env -S`
+/// too, and behind a program that starts another (`pnpm exec git config …`,
+/// `npx -c 'git config …'`, `uv run git config …`)? A line that starts more commands than
+/// `MAX_STARTED` is not read to the end and gets yes, so nothing is offered for it, as
+/// `command_risks` says "runs dynamic code" for it.
 fn own_account(cmd: &str) -> bool {
     line_own_account(cmd, 0, &mut 0)
 }
@@ -282,56 +282,96 @@ fn line_own_account(cmd: &str, depth: u8, started: &mut usize) -> bool {
     })
 }
 
-/// `own_account` for the words of one command: the program behind its wrappers, and every
-/// command that program starts (`started_by`), and the ones those start in turn.
+/// `own_account` for the words of one command, and for every command they run
+/// (`each_command`).
+fn runs_own_account(words: &[String], depth: u8, started: &mut usize) -> bool {
+    // Deeper than this, `command_risks` says "runs dynamic code": nothing is offered.
+    let line = |inner: &str, _: bool, started: &mut usize| (depth < 3 && (one_more(started) || line_own_account(inner, depth + 1, started))).then_some(());
+    let own = |prog: &str, args: &[String]| {
+        // Behind an option's value too (`npm --prefix web config set …`).
+        let subs = if prog == "git" { git_sub(args).0.into_iter().collect() } else { subcommands(prog, args) };
+        (SUBCOMMAND_TOOLS.contains(&prog) && subs.iter().any(|sub| OWN_ACCOUNT.contains(sub) || names_config(prog, sub))).then_some(())
+    };
+    each_command(words, started, Some(()), own, line).is_some()
+}
+
+/// Reads each command that the words of one simple command run: the program behind its
+/// wrappers and behind an `env` in front (`env_run`), every command that program starts
+/// (`started_by`), and the ones those start in turn. `command` gets each program by its name,
+/// with its arguments: a part of `words` that ends where `words` end. A line for a shell
+/// (`sh -c`, `env -S`, `npx -c`) goes to `line`, told whether a program started it
+/// (`started_by`), with the count of started commands. The first answer ends the reading.
 ///
 /// Each command is read once. A command a program starts is a part of these same words, and
 /// the same part is found again behind each program in front of it (`uv run uv run uv run x`:
 /// the last `uv run x` behind the first `uv` and behind the second), so the work stays small
-/// on a long line, as in `command_risks`.
-fn runs_own_account(words: &[String], depth: u8, started: &mut usize) -> bool {
-    // Deeper than this, `command_risks` says "runs dynamic code": nothing is offered.
-    let line = |inner: &str, started: &mut usize| depth < 3 && (one_more(started) || line_own_account(inner, depth + 1, started));
+/// on a long line, as in `command_risks`. Once more than `MAX_STARTED` commands are started,
+/// the answer is `past`; when that is None, what the programs start is not looked for any
+/// more, and the commands found already are still read.
+fn each_command<T: Copy>(
+    words: &[String],
+    started: &mut usize,
+    past: Option<T>,
+    mut command: impl FnMut(&str, &[String]) -> Option<T>,
+    mut line: impl FnMut(&str, bool, &mut usize) -> Option<T>,
+) -> Option<T> {
     // The commands to read, and where each one stands in `words` (the same place is the same
     // command).
     let mut commands = vec![words];
     let mut places = HashSet::from([std::ptr::from_ref(words)]);
-    let mut read = 0;
-    while let Some(&command) = commands.get(read) {
+    let (mut read, mut past_count) = (0, false);
+    while let Some(&words) = commands.get(read) {
         read += 1;
-        let Some(start) = classify::command_start(command) else { continue };
-        let Some((prog, args)) = command[start..].split_first() else { continue };
+        let start = match classify::command_start(words) {
+            Some(start) => Some(start),
+            None => {
+                let run = env_run(words);
+                if let Some(found) = run.line.and_then(|inner| line(&inner, false, started)) {
+                    return Some(found);
+                }
+                run.program
+            }
+        };
+        let Some((prog, args)) = start.and_then(|start| words[start..].split_first()) else { continue };
         let prog = basename(prog);
         if classify::SHELLS.contains(&prog) {
-            if matches!(classify::shell_run(args), ShellRun::Command(inner) if line(inner, started)) {
-                return true;
+            if let ShellRun::Command(inner) = classify::shell_run(args)
+                && let Some(found) = line(inner, false, started)
+            {
+                return Some(found);
             }
             continue;
         }
-        // Behind an option's value too (`npm --prefix web config set …`).
-        let subs = if prog == "git" { git_sub(args).0.into_iter().collect() } else { subcommands(prog, args) };
-        if SUBCOMMAND_TOOLS.contains(&prog) && subs.iter().any(|sub| OWN_ACCOUNT.contains(sub) || names_config(prog, sub)) {
-            return true;
+        if let Some(found) = command(prog, args) {
+            return Some(found);
+        }
+        if past_count {
+            continue;
         }
         for next in started_by(prog, args) {
             match next {
                 Started::Program(next) => {
-                    if places.insert(std::ptr::from_ref(next)) {
-                        if one_more(started) {
-                            return true;
-                        }
-                        commands.push(next);
+                    if !places.insert(std::ptr::from_ref(next)) {
+                        continue;
                     }
+                    if one_more(started) {
+                        if past.is_some() {
+                            return past;
+                        }
+                        past_count = true;
+                        break;
+                    }
+                    commands.push(next);
                 }
                 Started::ShellLine(inner) => {
-                    if line(&inner, started) {
-                        return true;
+                    if let Some(found) = line(&inner, true, started) {
+                        return Some(found);
                     }
                 }
             }
         }
     }
-    false
+    None
 }
 
 /// Do these words only say that something runs, so the next word names what
@@ -1024,8 +1064,13 @@ fn subcommands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a str> {
 /// Options of npm, pnpm, yarn and bun that stand before the subcommand and take a value in
 /// the next word (`pnpm --filter web add x`, `npm --prefix web install`,
 /// `pnpm --reporter silent exec …`). With `=` the value is in the option's own word.
-/// `--reporter` and `--loglevel` are from pnpm's documentation.
-const PM_VALUED: &[&str] = &["--filter", "-F", "-C", "--dir", "--prefix", "-w", "--workspace", "--cwd", "--reporter", "--loglevel"];
+/// `--reporter`, `--loglevel`, `--workspace-concurrency`, `--resume-from`, `--filter-prod`,
+/// `--test-pattern` and `--changed-files-ignore-pattern` are from pnpm's documentation, not
+/// from a recording.
+const PM_VALUED: &[&str] = &[
+    "--filter", "-F", "-C", "--dir", "--prefix", "-w", "--workspace", "--cwd", "--reporter", "--loglevel", "--workspace-concurrency", "--resume-from",
+    "--filter-prod", "--test-pattern", "--changed-files-ignore-pattern",
+];
 
 /// The words of an npm, pnpm, yarn or bun line that can be its subcommand, each with the
 /// words after it: the first word that is not an option, wherever it stands
@@ -1038,16 +1083,17 @@ const PM_VALUED: &[&str] = &["--filter", "-F", "-C", "--dir", "--prefix", "-w", 
 /// (`yarn workspace web add x`), or runs the subcommand in each of them
 /// (`yarn workspaces foreach -A add x`). Which options of `foreach` take a value is not listed
 /// either (`--include web`, `--jobs 2`): behind `foreach`, the word after an option that holds
-/// no `=` is read both ways too.
+/// no `=` is read both ways too. So is the word after a long option of pnpm that `PM_VALUED`
+/// does not list (`pnpm --network-concurrency 4 exec …`).
 fn pm_subs<'a>(prog: &str, args: &'a [String]) -> Vec<(&'a str, &'a [String])> {
     let (mut found, mut i) = (vec![], 0);
-    // Behind `yarn workspaces foreach`, and there after an option that may take the next word.
+    // Behind `yarn workspaces foreach`, and after an option that may take the next word.
     let (mut foreach, mut may_be_value) = (false, false);
     while let Some(a) = args.get(i).map(String::as_str) {
         i += 1;
         let valued = PM_VALUED.contains(&a) && !(prog == "pnpm" && a == "-w");
         if a.starts_with('-') && !valued {
-            may_be_value = foreach && !a.contains('=');
+            may_be_value = (foreach || (prog == "pnpm" && a.starts_with("--") && a != "--")) && !a.contains('=');
             continue;
         }
         if valued {
@@ -1206,11 +1252,12 @@ const ENV_RUNNERS: &[&str] = &["uv", "poetry", "pipenv", "pdm", "hatch", "rye", 
 /// The programs that are read by their name behind one of `ENV_RUNNERS`: the package
 /// managers and runners, the programs that publish, git, the command lines of GitHub and
 /// Docker, the shells (their `-c` line is read as a line inside the line), `rm`, the
-/// programs that fetch from the network, `sudo`, and `env` (its `-S` line is read as a line
-/// inside the line, `split_line`).
+/// programs that fetch from the network, `sudo`, `env` (its `-S` line is read as a line
+/// inside the line, `env_run`) and `printenv` (it and `env` with no command show the
+/// environment, as they do on their own).
 const READ_BY_NAME: &[&str] = &[
     "npm", "pnpm", "yarn", "bun", "npx", "cargo", "pip", "pip3", "uv", "poetry", "twine", "gem", "git", "gh", "docker", "sh", "bash", "zsh", "dash",
-    "rm", "curl", "wget", "sudo", "env",
+    "rm", "curl", "wget", "sudo", "env", "printenv",
 ];
 
 /// The commands that may stand behind one of `ENV_RUNNERS`: after its `run` or `exec` (for
@@ -1275,9 +1322,11 @@ fn env_runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> 
 /// The commands `find` runs for the files it finds: what follows each of its `-exec`,
 /// `-execdir`, `-ok` and `-okdir`.
 fn find_commands(args: &[String]) -> impl Iterator<Item = &[String]> {
-    let runs = |word: &String| ["-exec", "-execdir", "-ok", "-okdir"].contains(&word.as_str());
-    (0..args.len()).filter(move |&at| runs(&args[at]) && at + 1 < args.len()).map(move |at| &args[at + 1..])
+    (0..args.len()).filter(move |&at| FIND_RUNS.contains(&args[at].as_str()) && at + 1 < args.len()).map(move |at| &args[at + 1..])
 }
+
+/// The options of `find` that run a command for the files it finds.
+const FIND_RUNS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// Every command a program starts: what a package runner starts (`runner_commands`), what may
 /// stand behind another runner (`env_runner_commands`), and what `find` runs
@@ -1466,47 +1515,111 @@ fn inner_risks(line: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u
     risks
 }
 
-/// The line that `env -S` / `--split-string` makes the command it runs, with the words behind
-/// it: for the first `env` among `words` that has one (`env -S 'npm publish'`,
-/// `nice env --split-string='rm -rf src'`, `env -iS'npm publish'`, `env -u X -S 'x' y`).
-/// Past the options of env that take a value (`-u`, `-C`, `-P`). None when no `env` here
-/// has one.
-fn split_line(words: &[String]) -> Option<String> {
-    let split_by = |at: usize| {
-        let mut i = at + 1;
-        while let Some(option) = words.get(i).map(String::as_str).filter(|o| o.starts_with('-') && !matches!(*o, "-" | "--")) {
-            i += 1;
-            // The line glued to its option: after `--split-string=`, or after the `S` of a short
-            // option's cluster (empty when the line is the next word).
-            let short = || option.strip_prefix('-').filter(|o| !o.starts_with('-'))?.split_once('S').map(|(_, rest)| rest);
-            let (line, behind) = match option.strip_prefix("--split-string=").or_else(short) {
-                Some(line) if !line.is_empty() || option.starts_with("--") => (line, i),
-                Some(_) => (words.get(i)?.as_str(), i + 1),
-                None if option == "--split-string" => (words.get(i)?.as_str(), i + 1),
-                None => {
-                    i += usize::from(matches!(option, "-u" | "-C" | "-P" | "--unset" | "--chdir"));
-                    continue;
-                }
-            };
-            return Some(std::iter::once(line).chain(words[behind..].iter().map(String::as_str)).collect::<Vec<_>>().join(" "));
-        }
-        None
-    };
-    (0..words.len()).filter(|&at| basename(&words[at]) == "env").find_map(split_by)
+/// What one `env` runs (`env_reading`).
+enum EnvReading {
+    /// The line that `-S` / `--split-string` makes the command, with the words behind it, as
+    /// the words of an `env` (`env -S '-i git push'` runs `env -i git push`).
+    Line(String),
+    /// The command stands at this place among the words, past env's options.
+    Command(usize),
 }
 
-/// What `env -S` runs (`split_line`): "runs dynamic code", and the risks of its line, read as a
-/// line inside the line (within the depth and `MAX_STARTED`). env splits the line by its own
-/// rules, so the line keeps "runs dynamic code".
-fn split_line_risks(words: &[String], cwd: Option<&Path>, worktree: Option<&Path>, depth: u8, reading: &mut LineReading) -> Vec<String> {
+/// What the `env` at `at` among `words` runs, read with env's own options. `-u`, `-C` and `-P`
+/// (`--unset`, `--chdir`) take the rest of their word, or the next word, as their value: an
+/// `S` in that value is no switch (`env -uSECRET npm publish`, `env -C/Users/Shared …`).
+/// None when an option has no value.
+fn env_reading(words: &[String], at: usize) -> Option<EnvReading> {
+    let mut i = at + 1;
+    // The value or the line in the next word.
+    let next = |i: &mut usize| {
+        *i += 1;
+        words.get(*i - 1).map(String::as_str)
+    };
+    while let Some(option) = words.get(i).map(String::as_str).filter(|o| o.starts_with('-')) {
+        i += 1;
+        let line = match option.strip_prefix("--") {
+            Some("") => break,
+            Some("split-string") => next(&mut i)?,
+            Some(long) => match long.strip_prefix("split-string=") {
+                Some(line) => line,
+                None if matches!(long, "unset" | "chdir") => {
+                    next(&mut i)?;
+                    continue;
+                }
+                None => continue,
+            },
+            // In a cluster of short options, the first that takes a value takes the rest of
+            // the word (`-iS'npm publish'`, `-uSECRET`).
+            None => match option[1..].char_indices().find(|&(_, c)| matches!(c, 'S' | 'u' | 'C' | 'P')) {
+                Some((j, letter)) => {
+                    let value = &option[j + 2..];
+                    let value = if value.is_empty() { next(&mut i)? } else { value };
+                    if letter != 'S' {
+                        continue;
+                    }
+                    value
+                }
+                None => continue,
+            },
+        };
+        // env reads the line as its own words, its options first (`env -S '-i git push'`):
+        // the line is read with `env` in front.
+        let line = ["env", line].into_iter().chain(words[i..].iter().map(String::as_str));
+        return Some(EnvReading::Line(line.collect::<Vec<_>>().join(" ")));
+    }
+    Some(EnvReading::Command(i))
+}
+
+/// What a command runs whose program `classify::command_start` cannot name: one with an
+/// `env` in front that may split a line (`env -S 'npm publish'`), or whose option has a value
+/// with an `S` in it (`env -uSECRET npm publish`). Both readings are made, and the command
+/// carries the risks of each:
+/// - `line`: the line that `env -S` / `--split-string` makes the command, with the words
+///   behind it, for the first `env` among the words that has one (`env -S 'npm publish'`,
+///   `nice env --split-string='rm -rf src'`, `env -iS'npm publish'`, `env -u X -S 'x' y`,
+///   `env -C/Users/Shared env -S 'git push'`);
+/// - `program`: where the program stands, past each `env` and the wrappers behind it
+///   (`env -uSECRET timeout 5 npm publish`). None when an `env` runs a line instead.
+struct EnvRun {
+    line: Option<String>,
+    program: Option<usize>,
+}
+
+/// `EnvRun` of the words of one command.
+fn env_run(words: &[String]) -> EnvRun {
+    let envs = |from: usize| (from..words.len()).filter(|&at| basename(&words[at]) == "env");
+    let line = envs(0).find_map(|at| match env_reading(words, at)? {
+        EnvReading::Line(line) => Some(line),
+        EnvReading::Command(_) => None,
+    });
+    // Each `env` that runs a command moves `from` past its options.
+    let mut from = 0;
+    let program = loop {
+        if let Some(at) = classify::command_start(&words[from..]) {
+            break Some(from + at);
+        }
+        match envs(from).next().and_then(|at| env_reading(words, at)) {
+            Some(EnvReading::Command(at)) => from = at,
+            _ => break None,
+        }
+    };
+    EnvRun { line, program }
+}
+
+/// What a command runs that has an `env` in front (`env_run`): "runs dynamic code", the
+/// risks of the line env splits, read as a line inside the line (within the depth and
+/// `MAX_STARTED`), and where the program stands, for the caller to read it as any other.
+/// env splits the line by its own rules, so the line keeps "runs dynamic code".
+fn env_risks(words: &[String], cwd: Option<&Path>, worktree: Option<&Path>, depth: u8, reading: &mut LineReading) -> (Vec<String>, Option<usize>) {
+    let run = env_run(words);
     let mut risks = vec!["runs dynamic code".to_string()];
-    if let Some(line) = split_line(words)
+    if let Some(line) = run.line
         && depth < 3
         && !one_more(&mut reading.started)
     {
         risks.extend(inner_risks(&line, cwd, worktree, depth + 1, reading));
     }
-    risks
+    (risks, run.program)
 }
 
 /// `command_risks`, with what was kept while the line around it was read (`LineReading`).
@@ -1553,12 +1666,19 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
         if texts[..at].iter().any(|w| matches!(basename(w), "sudo" | "doas")) {
             add("sudo");
         }
-        let Some(start) = start else {
+        let start = match start {
+            Some(start) => start,
             // `env -S 'git push'`
-            for r in split_line_risks(&texts, cwd, worktree, depth, reading) {
-                add(&r);
+            None => {
+                let (found, program) = env_risks(&texts, cwd, worktree, depth, reading);
+                for r in found {
+                    add(&r);
+                }
+                match program {
+                    Some(at) => at,
+                    None => continue,
+                }
             }
-            continue;
         };
         let Some(first) = seg.get(start) else {
             // `env` with no command prints the environment
@@ -1634,16 +1754,29 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
                     }
                 };
                 // Past a wrapper in front of it (`pnpm exec env CI=1 npm publish`).
-                let Some(at) = classify::command_start(words) else {
-                    for r in split_line_risks(words, cwd, worktree, depth, reading) {
-                        add(&r);
+                let at = match classify::command_start(words) {
+                    Some(at) => at,
+                    None => {
+                        let (found, program) = env_risks(words, cwd, worktree, depth, reading);
+                        for r in found {
+                            add(&r);
+                        }
+                        match program {
+                            Some(at) => at,
+                            None => continue,
+                        }
                     }
-                    continue;
                 };
                 if words[..at].iter().any(|w| matches!(basename(w), "sudo" | "doas")) {
                     add("sudo");
                 }
-                let Some(name) = words.get(at) else { continue };
+                let Some(name) = words.get(at) else {
+                    // `uv run env`, `npx env`: env with no command prints the environment.
+                    if words[..at].iter().any(|w| basename(w) == "env") {
+                        add(classify::SECRETS);
+                    }
+                    continue;
+                };
                 let started_args = &words[at + 1..];
                 if places.insert(std::ptr::from_ref(started_args)) {
                     if one_more(&mut reading.started) {
@@ -1801,55 +1934,92 @@ fn checkout_loss(subject: &ApprovalSubject, ctx: &PolicyCtx) -> Option<&'static 
 /// Does the line run a command that can lose work for good in `checkout`, your project
 /// folder: git history rewritten, work that is not committed dropped, a force push, a
 /// recursive delete outside the build folders, a file of yours deleted by an agent that does
-/// not work there (`works_there`)? Behind a wrapper or `sh -c` too. `start` is where the line
-/// runs; `cd`, `git -C` and the paths on the line say where each command acts. A folder the
-/// line does not name (`cd $DIR`, no `start`) may be yours, and counts as yours.
-/// Like every rule here it reads the command line: what a script does is not looked into.
+/// not work there (`works_there`)? Behind a wrapper, `sh -c` or `env -S` too, and behind a
+/// program that starts another (`npx git reset --hard`, `uv run rm -rf src`,
+/// `find . -exec git checkout -- . \;`), as `command_risks` reads them (`each_command`).
+/// `start` is where the line runs; `cd`, `git -C` and the paths on the line say where each
+/// command acts. A folder the line does not name (`cd $DIR`, no `start`) may be yours, and
+/// counts as yours. Like every rule here it reads the command line: what a script does is not
+/// looked into.
 fn loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, works_there: bool, depth: u8) -> Option<&'static str> {
+    line_loses_work(cmd, start, checkout, works_there, depth, &mut 0)
+}
+
+/// `loses_work` for a line that stands `depth` lines deep, with the count of the commands that
+/// the line around it started already. The commands and lines that programs start count
+/// towards `MAX_STARTED`; past it, what they start is not looked for any more. The line of a
+/// shell or of `env -S` that the line runs itself is read at any count, within the depth.
+fn line_loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, works_there: bool, depth: u8, started: &mut usize) -> Option<&'static str> {
     // Where the next simple command runs: `cd` moves it.
     let mut dir = start.map(lexical);
     parse(cmd).segments.iter().find_map(|seg| {
         let texts: Vec<String> = seg.iter().map(|w| w.text.clone()).collect();
-        let at = classify::command_start(&texts)?;
-        let (first, rest) = seg.get(at..)?.split_first()?;
-        let args: Vec<String> = rest.iter().map(|w| w.text.clone()).collect();
-        let here = dir.as_deref();
-        match basename(&first.text) {
-            // `cd`, `cd -` and `popd` go home or back: not named on the line.
-            "cd" | "pushd" | "popd" => {
-                dir = rest.iter().find(|w| !w.text.starts_with('-')).and_then(|to| written_path(to, here));
-                None
-            }
-            prog if classify::SHELLS.contains(&prog) => match classify::shell_run(&args) {
-                ShellRun::Command(inner) if depth < 3 => loses_work(inner, here, checkout, works_there, depth + 1),
-                _ => None,
-            },
-            "git" => {
-                let (folder, mut places) = git_places(&seg[..at], rest, here);
-                let loss = git_loss(&args, folder.as_deref());
-                places.push(folder);
-                loss.filter(|_| places.iter().any(|place| yours(place.as_deref(), checkout)))
-            }
-            "rm" => {
-                let mut targets = rest.iter().filter(|w| !w.text.starts_with('-'));
-                if short_flag(&args, "rR") || long_flag(&args, &["recursive"]) {
-                    deletes_work(targets, here, checkout)
-                } else {
-                    // One file by its name is everyday work for an agent that works in your
-                    // folder. For an agent with a worktree of its own it is not, from there
-                    // or after a `cd` into your folder: a file of yours that is not committed
-                    // is gone for good.
-                    (!works_there && targets.any(|w| deletes_yours(w, here, checkout))).then_some(DELETES_FILES)
-                }
-            }
-            // `find` deletes what it finds below the folders it starts from (its words before
-            // the first test), by itself or through `rm`.
-            "find" if has(&args, &["-delete"]) || exec_rm(&args) => {
-                deletes_work(rest.iter().take_while(|w| !w.text.starts_with(['-', '(', '!'])), here, checkout)
-            }
-            _ => None,
+        // `cd`, `cd -` and `popd` go home or back: not named on the line.
+        if let Some((first, rest)) = classify::command_start(&texts).and_then(|at| seg[at..].split_first())
+            && matches!(basename(&first.text), "cd" | "pushd" | "popd")
+        {
+            dir = rest.iter().find(|w| !w.text.starts_with('-')).and_then(|to| written_path(to, dir.as_deref()));
+            return None;
         }
+        let here = dir.as_deref();
+        // The arguments of each command end where the segment ends: the program stands just
+        // before them, and the words in front of it before that.
+        let command = |prog: &str, args: &[String]| {
+            let at = seg.len() - args.len() - 1;
+            let rest = &seg[at + 1..];
+            // The `rm` of a `find -exec rm` deletes the files find finds (`{}`): the `find` rule
+            // reads where those are. Its other targets, up to the `;` or `+` that ends it, are
+            // read here.
+            if prog == "rm" && at > 0 && FIND_RUNS.contains(&seg[at - 1].text.as_str()) {
+                let own: Vec<Word> = rest.iter().take_while(|w| !matches!(w.text.as_str(), ";" | "+")).filter(|w| w.text != "{}").cloned().collect();
+                if !own.iter().any(|w| !w.text.starts_with('-')) {
+                    return None;
+                }
+                return command_loss(prog, &seg[..at], &own, here, checkout, works_there);
+            }
+            command_loss(prog, &seg[..at], rest, here, checkout, works_there)
+        };
+        let line = |inner: &str, by_a_program: bool, started: &mut usize| {
+            if depth >= 3 || (by_a_program && one_more(started)) {
+                return None;
+            }
+            line_loses_work(inner, here, checkout, works_there, depth + 1, started)
+        };
+        each_command(&texts, &mut *started, None, command, line)
     })
+}
+
+/// What one command can lose in `checkout` (`loses_work`): `prog` with its words `rest`, behind
+/// the words `before` it on the line (git reads the `GIT_DIR` and `GIT_WORK_TREE` among
+/// them), on a line that runs in `here`.
+fn command_loss(prog: &str, before: &[Word], rest: &[Word], here: Option<&Path>, checkout: &Path, works_there: bool) -> Option<&'static str> {
+    let args: Vec<String> = rest.iter().map(|w| w.text.clone()).collect();
+    match prog {
+        "git" => {
+            let (folder, mut places) = git_places(before, rest, here);
+            let loss = git_loss(&args, folder.as_deref());
+            places.push(folder);
+            loss.filter(|_| places.iter().any(|place| yours(place.as_deref(), checkout)))
+        }
+        "rm" => {
+            let mut targets = rest.iter().filter(|w| !w.text.starts_with('-'));
+            if short_flag(&args, "rR") || long_flag(&args, &["recursive"]) {
+                deletes_work(targets, here, checkout)
+            } else {
+                // One file by its name is everyday work for an agent that works in your
+                // folder. For an agent with a worktree of its own it is not, from there
+                // or after a `cd` into your folder: a file of yours that is not committed
+                // is gone for good.
+                (!works_there && targets.any(|w| deletes_yours(w, here, checkout))).then_some(DELETES_FILES)
+            }
+        }
+        // `find` deletes what it finds below the folders it starts from (its words before
+        // the first test), by itself or through `rm`.
+        "find" if has(&args, &["-delete"]) || exec_rm(&args) => {
+            deletes_work(rest.iter().take_while(|w| !w.text.starts_with(['-', '(', '!'])), here, checkout)
+        }
+        _ => None,
+    }
 }
 
 /// The path a word names on a line that runs in `dir`, absolute and without `.` or `..`. A
@@ -1904,7 +2074,7 @@ fn git_places(env: &[Word], opts: &[Word], dir: Option<&Path>) -> (Option<PathBu
 
 /// `find … -exec rm …` (or `-execdir`, `-ok`, `-okdir`).
 fn exec_rm(args: &[String]) -> bool {
-    args.windows(2).any(|w| ["-exec", "-execdir", "-ok", "-okdir"].contains(&w[0].as_str()) && basename(&w[1]) == "rm")
+    args.windows(2).any(|w| FIND_RUNS.contains(&w[0].as_str()) && basename(&w[1]) == "rm")
 }
 
 /// A recursive delete of `targets`, on a line that runs in `dir`, loses work of yours unless
@@ -2265,9 +2435,18 @@ fn test_runner(prog: &str, args: &[String]) -> bool {
 /// documentation of the .NET CLI, not from a recording.
 const DOTNET_PLAIN_OPTIONS: &[&str] = &["--no-restore", "--no-build", "--nologo"];
 
+/// The options of `dotnet test` and `dotnet build` that take a fixed word or a name in the next
+/// word, which can name no code and no command: the configuration (`-c Release`), how much it
+/// prints (`-v quiet`) and which tests run (`--filter Category=Unit`). From the documentation
+/// of the .NET CLI, not from a recording.
+const DOTNET_VALUED_OPTIONS: &[&str] = &["-c", "--configuration", "-v", "--verbosity", "--filter"];
+
 /// The same for `swift test` and `swift build`, from the documentation of the Swift Package
 /// Manager.
 const SWIFT_PLAIN_OPTIONS: &[&str] = &["-q", "--quiet", "-v", "--verbose", "--parallel", "--skip-build"];
+
+/// The same as `DOTNET_VALUED_OPTIONS` for swift: the configuration (`-c release`).
+const SWIFT_VALUED_OPTIONS: &[&str] = &["-c"];
 
 /// The same for `deno test`, `deno check` and `deno lint`, from Deno's documentation. None
 /// of them gives the code a permission (`-A`, `--allow-net`).
@@ -2275,6 +2454,11 @@ const DENO_PLAIN_OPTIONS: &[&str] = &["-q", "--quiet", "--parallel"];
 
 /// The same for `mix test`, from the documentation of Mix.
 const MIX_PLAIN_OPTIONS: &[&str] = &["--trace", "--stale", "--failed", "--cover"];
+
+/// The same as `DOTNET_VALUED_OPTIONS` for `mix test`: the tags of the tests it runs or leaves
+/// out (`--only slow`, `--exclude external`), the seed and the most failures before it stops.
+/// From the documentation of Mix.
+const MIX_VALUED_OPTIONS: &[&str] = &["--only", "--exclude", "--seed", "--max-failures"];
 
 /// The same for `bazel test` and `bazel build` (and bazelisk, which runs bazel), from Bazel's
 /// documentation. Not `--run_under`, whose value is a command.
@@ -2284,7 +2468,9 @@ const BAZEL_PLAIN_OPTIONS: &[&str] = &["-k", "--keep_going", "--test_output=erro
 /// is not one of the options above is a subcommand that checks, and every word after it is
 /// one of those options or an operand the subcommand takes? Each runs whatever its first word
 /// names (`dotnet run test`, `deno run -A build.ts test`), so any other word makes the line an
-/// unknown command. The subcommands and their operands, from the documentation of each CLI:
+/// unknown command. After the subcommand, an option that takes a fixed word or a name
+/// (`DOTNET_VALUED_OPTIONS`, `SWIFT_VALUED_OPTIONS`, `MIX_VALUED_OPTIONS`) takes the next word,
+/// which is no option. The subcommands and their operands, from the documentation of each CLI:
 /// - dotnet: `test`, `build`, with one project, solution or folder;
 /// - swift: `test`, `build`, with no operand;
 /// - deno: `test`, `check`, `lint` (never `run`, `task` or `eval`), with files and folders,
@@ -2293,24 +2479,40 @@ const BAZEL_PLAIN_OPTIONS: &[&str] = &["-k", "--keep_going", "--test_output=erro
 /// - zig: `build`, alone or with its step `test`;
 /// - bazel and bazelisk: `test`, `build`, with targets (`//...`, `//app:test`).
 fn check_run(prog: &str, args: &[String]) -> bool {
-    let (checks, plain): (&[&str], &[&str]) = match prog {
-        "dotnet" => (&["test", "build"][..], DOTNET_PLAIN_OPTIONS),
-        "swift" => (&["test", "build"][..], SWIFT_PLAIN_OPTIONS),
-        "deno" => (&["test", "check", "lint"][..], DENO_PLAIN_OPTIONS),
-        "mix" => (&["test"][..], MIX_PLAIN_OPTIONS),
-        "zig" => (&["build"][..], &[][..]),
-        "bazel" | "bazelisk" => (&["test", "build"][..], BAZEL_PLAIN_OPTIONS),
+    let (checks, plain, valued): (&[&str], &[&str], &[&str]) = match prog {
+        "dotnet" => (&["test", "build"][..], DOTNET_PLAIN_OPTIONS, DOTNET_VALUED_OPTIONS),
+        "swift" => (&["test", "build"][..], SWIFT_PLAIN_OPTIONS, SWIFT_VALUED_OPTIONS),
+        "deno" => (&["test", "check", "lint"][..], DENO_PLAIN_OPTIONS, &[][..]),
+        "mix" => (&["test"][..], MIX_PLAIN_OPTIONS, MIX_VALUED_OPTIONS),
+        "zig" => (&["build"][..], &[][..], &[][..]),
+        "bazel" | "bazelisk" => (&["test", "build"][..], BAZEL_PLAIN_OPTIONS, &[][..]),
         _ => return false,
     };
-    let words: Vec<&str> = args.iter().map(String::as_str).filter(|word| !plain.contains(word)).collect();
-    let Some((sub, operands)) = words.split_first() else { return false };
-    checks.contains(sub)
+    let (mut sub, mut operands, mut i) = (None, vec![], 0);
+    while let Some(word) = args.get(i).map(String::as_str) {
+        i += 1;
+        if plain.contains(&word) {
+            continue;
+        }
+        match sub {
+            None => sub = Some(word),
+            Some(_) if valued.contains(&word) => {
+                if !args.get(i).is_some_and(|value| !value.starts_with('-')) {
+                    return false;
+                }
+                i += 1;
+            }
+            Some(_) => operands.push(word),
+        }
+    }
+    let Some(sub) = sub else { return false };
+    checks.contains(&sub)
         && operands.iter().all(|word| !word.starts_with('-'))
         && match prog {
             "dotnet" => operands.len() <= 1,
             "swift" => operands.is_empty(),
             "deno" => operands.iter().all(|word| !word.contains(':')),
-            "zig" => matches!(operands, [] | ["test"]),
+            "zig" => matches!(operands.as_slice(), [] | ["test"]),
             _ => true,
         }
 }
@@ -4028,6 +4230,8 @@ mod tests {
             ("pnpm exec env -S 'git push'", "push"),
             ("find . -exec env -S 'git push' \\;", "push"),
             ("sh -c \"env -S 'git push'\"", "push"),
+            ("env -S '-i npm publish'", "publish"),
+            ("env -S'-P/usr/bin git push'", "push"),
         ] {
             let found = risks(c);
             assert!(found.iter().any(|r| r == risk) && found.iter().any(|r| r == "runs dynamic code"), "{c}: {found:?}");
@@ -4092,5 +4296,223 @@ mod tests {
         let (found, started, inner_read) = read("sh -c 'npm publish'; sh -c 'git push'");
         assert!(found.iter().any(|r| r == "publish") && found.iter().any(|r| r == "push"), "{found:?}");
         assert_eq!((started, inner_read), (2, 2));
+    }
+
+    /// A command line as one word for a shell, in single quotes.
+    fn quoted(c: &str) -> String {
+        format!("'{}'", c.replace('\'', r"'\''"))
+    }
+
+    /// The same command, handed to env as a line: on its own, with a wrapper in front, glued
+    /// to the option, behind a runner.
+    fn handed_to_env(c: &str) -> [String; 5] {
+        let q = quoted(c);
+        [
+            format!("env -S {q}"),
+            format!("timeout 60 env --split-string={q}"),
+            format!("nice -n 5 env -iS{q}"),
+            format!("uv run env -S {q}"),
+            format!("npx env -u X -S {q}"),
+        ]
+    }
+
+    /// The check for loss of work in your own project folder reads a line handed to env, and
+    /// the commands a runner starts, as the risk check does.
+    #[test]
+    fn the_check_for_lost_work_reads_a_line_handed_to_env() {
+        let folder = Path::new("/Users/me/code/app");
+        let lost = |c: &str| loses_work(c, Some(folder), folder, true, 0);
+        for (c, why) in [
+            ("git rebase main", REWRITES_HISTORY),
+            ("git rebase -i HEAD~3", REWRITES_HISTORY),
+            ("git commit --amend --no-edit", REWRITES_HISTORY),
+            ("git filter-branch --tree-filter 'rm -f x' HEAD", REWRITES_HISTORY),
+            ("git branch -D feature", REWRITES_HISTORY),
+            ("git branch -f main HEAD~3", REWRITES_HISTORY),
+            ("git update-ref -d refs/heads/main", REWRITES_HISTORY),
+            ("git reflog expire --expire=now --all", REWRITES_HISTORY),
+            ("git gc --prune=now", REWRITES_HISTORY),
+            ("git pull --rebase", REWRITES_HISTORY),
+            ("git pull -r origin main", REWRITES_HISTORY),
+            ("git reset HEAD~1", REWRITES_HISTORY),
+            ("git reset --soft HEAD^", REWRITES_HISTORY),
+            ("git reset -q origin/main", REWRITES_HISTORY),
+            ("git reset --hard origin/main", DISCARDS_WORK),
+            ("git -C . reset --hard", DISCARDS_WORK),
+            ("git clean -fdx", DISCARDS_WORK),
+            ("git checkout -- .", DISCARDS_WORK),
+            ("git checkout -f main", DISCARDS_WORK),
+            ("git checkout -B main origin/main", DISCARDS_WORK),
+            ("git switch --discard-changes main", DISCARDS_WORK),
+            ("git restore src/a.ts", DISCARDS_WORK),
+            ("git restore --staged --worktree src/a.ts", DISCARDS_WORK),
+            ("git stash drop", DISCARDS_WORK),
+            ("git stash clear", DISCARDS_WORK),
+            ("git worktree remove --force ../other", DISCARDS_WORK),
+            ("git push --force origin main", FORCE_PUSH),
+            ("git push -f", FORCE_PUSH),
+            ("git push --force-with-lease origin main", FORCE_PUSH),
+            ("git push origin +main", FORCE_PUSH),
+            ("git push origin :old-branch", FORCE_PUSH),
+            ("git push --delete origin old-branch", FORCE_PUSH),
+            ("rm -rf src", DELETES_FOLDERS),
+            ("rm -r docs/old", DELETES_FOLDERS),
+            ("rm -fr .", DELETES_FOLDERS),
+            ("rm -rf node_modules src", DELETES_FOLDERS),
+            ("rm -rf $BUILD_DIR", DELETES_FOLDERS),
+            ("rm -rf ../app/dist", DELETES_FOLDERS),
+            ("rm -rf /Users/me/code/app/dist", DELETES_FOLDERS),
+            ("rm -rf *", DELETES_FOLDERS),
+            ("rm -rf {dist,src}", DELETES_FOLDERS),
+            ("find . -name '*.orig' -delete", DELETES_FOLDERS),
+            ("find src -type f -exec rm {} +", DELETES_FOLDERS),
+            ("ls | xargs rm -rf", DELETES_FOLDERS),
+            ("timeout 60 git reset --hard", DISCARDS_WORK),
+            ("cd web && git clean -fd", DISCARDS_WORK),
+            ("npm test; git push -f", FORCE_PUSH),
+            ("bash -lc 'git reset --hard HEAD~1'", DISCARDS_WORK),
+        ] {
+            assert_eq!(lost(c), Some(why), "{c}");
+            for line in handed_to_env(c) {
+                assert_eq!(lost(&line), Some(why), "{line}");
+            }
+        }
+        // Behind a runner, and behind a value glued to an option of env.
+        for (c, why) in [
+            ("npx git reset --hard", DISCARDS_WORK),
+            ("pnpm exec git clean -fd", DISCARDS_WORK),
+            ("uv run rm -rf src", DELETES_FOLDERS),
+            ("find . -exec git checkout -- . \\;", DISCARDS_WORK),
+            ("bun exec 'git push -f'", FORCE_PUSH),
+            ("env -uSECRET git reset --hard", DISCARDS_WORK),
+            ("env -C/Users/Shared env -S 'git reset --hard'", DISCARDS_WORK),
+            // env reads its own options at the start of the line.
+            ("env -S '-i git reset --hard'", DISCARDS_WORK),
+            ("env -S'-P/usr/bin git clean -fd'", DISCARDS_WORK),
+            ("env -S '-u X -S \"git push -f\"'", FORCE_PUSH),
+            // The `rm` of a `find -exec` with a target of its own.
+            ("find node_modules -exec rm -rf src \\;", DELETES_FOLDERS),
+        ] {
+            assert_eq!(lost(c), Some(why), "{c}");
+        }
+        // The files find finds below a build folder are read by the find rule, with
+        // `-exec rm` as with `-delete`.
+        for c in ["find node_modules -name .cache -exec rm -rf {} +", "find dist -name '*.map' -execdir rm -r {} \\;"] {
+            assert_eq!(lost(c), None, "{c}");
+        }
+        // A line that starts more commands than `MAX_STARTED` is still read to its last
+        // command, and so is the line for a shell or env there.
+        let many = "uv run ".repeat(26);
+        for c in [
+            format!("{many}true; git reset --hard"),
+            format!("{many}true; sh -c 'git reset --hard'"),
+            format!("{many}true; env -S 'git reset --hard'"),
+            format!("{}git reset --hard", "uv run ".repeat(24)),
+            format!("{}npx -c 'git reset --hard'", "uv run ".repeat(22)),
+        ] {
+            assert_eq!(lost(&c), Some(DISCARDS_WORK), "{c}");
+        }
+        for c in ["env FOO=1 git status", "env -S 'git status'", "npx eslint src", "uv run pytest", "env -uSECRET git status"] {
+            assert_eq!(lost(c), None, "{c}");
+        }
+    }
+
+    /// A command that changes your own account or settings is found in a line handed to env.
+    #[test]
+    fn your_own_account_is_found_in_a_line_handed_to_env() {
+        for c in [
+            "cargo login x",
+            "git config user.name me",
+            "npm config set registry http://localhost:4873",
+            "timeout 60 npm login",
+            "cd web && cargo login x",
+            "sh -c 'npm config set registry http://localhost:4873'",
+            "npm --prefix web config set registry http://localhost:4873",
+            "pnpm -C web config set registry http://localhost:4873",
+            "pnpm exec git config user.name me",
+            "npx git config user.name me",
+            "npm exec -- git config user.name me",
+            "npx -c 'git config user.name me'",
+            "bun exec 'git config user.name me'",
+            "pnpm exec env CI=1 git config user.name me",
+            "pnpm exec sh -c 'git config user.name me'",
+            "npx npx git config user.name me",
+            "find . -exec git config user.name x \\;",
+            "uv run git config user.name me",
+            "bundle exec git config user.name me",
+        ] {
+            assert!(own_account(c), "{c}");
+            for line in handed_to_env(c) {
+                assert!(own_account(&line), "{line}");
+            }
+        }
+        assert!(own_account("env -uSECRET git config user.name me"));
+        assert!(own_account("env -S'-u X git config user.name me'"));
+        assert!(own_account("env -S '-i cargo login x'"));
+        for c in ["env FOO=1 git status", "env -S 'git status'", "env -uSECRET git status"] {
+            assert!(!own_account(c), "{c}");
+        }
+    }
+
+    /// The value glued to an option of env is its value: the command behind it is read, and so
+    /// is the line of a second env behind it.
+    #[test]
+    fn a_value_glued_to_an_option_of_env_is_no_switch() {
+        for (c, risk) in [
+            ("env -C/Users/Shared env -S 'git push'", "push"),
+            ("env -uSECRET npm publish", "publish"),
+            ("env -PS/bin npm publish", "publish"),
+            ("env -u SECRET -iS'npm publish'", "publish"),
+        ] {
+            let found = risks(c);
+            assert!(found.iter().any(|r| r == risk) && found.iter().any(|r| r == "runs dynamic code"), "{c}: {found:?}");
+        }
+    }
+
+    /// An option of pnpm before the subcommand that `PM_VALUED` does not list is read both
+    /// ways: with the next word as its value, and with that word as the subcommand.
+    #[test]
+    fn an_unknown_option_of_pnpm_hides_no_subcommand() {
+        for c in ["pnpm --network-concurrency 4 exec npm publish", "pnpm --workspace-concurrency 2 exec npm publish"] {
+            assert!(risks(c).iter().any(|r| r == "publish"), "{c}: {:?}", risks(c));
+        }
+        let c = "pnpm --reporter silent test";
+        assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
+        assert_eq!(classify_command(c, &[]), Some(TEST_RUNNER));
+    }
+
+    /// `env` with no command and `printenv` show the environment behind a runner too.
+    #[test]
+    fn the_environment_shown_behind_a_runner_may_show_secrets() {
+        assert!(risks("env").iter().any(|r| r == classify::SECRETS));
+        for c in ["uv run env", "npx env", "poetry run printenv", "uv run env -u X"] {
+            assert!(risks(c).iter().any(|r| r == classify::SECRETS), "{c}: {:?}", risks(c));
+        }
+        assert!(!risks("uv run env CI=1 pytest").iter().any(|r| r == classify::SECRETS));
+    }
+
+    /// The options of dotnet, mix and swift that take a fixed word or a name keep a test run a
+    /// test run; one that names a file or code still asks.
+    #[test]
+    fn a_test_run_may_name_its_configuration_and_tags() {
+        for (c, test_run) in [
+            ("dotnet test -c Release", true),
+            ("dotnet build --configuration Release --no-restore", true),
+            ("dotnet test -v quiet --filter Category=Unit", true),
+            ("dotnet test App.Tests.csproj -c Release", true),
+            ("mix test --only slow", true),
+            ("mix test --exclude external --seed 0 --max-failures 1", true),
+            ("swift build -c release", true),
+            ("dotnet test --settings x.runsettings", false),
+            ("dotnet test -c", false),
+            ("dotnet test -c --settings x.runsettings", false),
+            ("dotnet -c Release test", false),
+            ("mix test --require x.exs", false),
+            ("mix test --only", false),
+            ("swift run -c release", false),
+        ] {
+            let kind = classify_command(c, &[]);
+            assert_eq!(kind == Some(TEST_RUNNER), test_run, "{c}: {kind:?}");
+        }
     }
 }
