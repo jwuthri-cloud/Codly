@@ -35,7 +35,7 @@ import { ChecksDemo } from './checks';
 import { DEMO_MCP, MODE_LABEL } from './controls';
 import { BILLING } from './office';
 import { BILLING_FILES, diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
-import { saidWith } from './said';
+import { denyNoteMessage, saidWith } from './said';
 import { doneTaskRefusal } from './reviewTask';
 import { Actor, Cancelled, HOME, REPO, Sim, TurnFailed, WORKTREES, sha, uid, type ToolSpec } from './sim';
 import type { AskKind } from './states';
@@ -1354,7 +1354,8 @@ export class Story {
       // Like the core's broker: a rule you saved for this repo answers in your place.
       sim.approvals.set(ap.id, { ...ap, status: 'approved', decided_by: 'policy' });
       act.emit({ type: 'approval_resolved', approval_id: ap.id, status: 'approved', by: 'policy' });
-      sim.decision('approval_policy', 'rule', `auto-allowed your rule for this repo: ${describeRule(rule)}`, { approval_id: ap.id, rule: rule.id }, { agent: a.id, task: a.task_id });
+      const yours = `your rule for this repo: ${describeRule(rule)}`;
+      sim.decision('approval_policy', 'rule', `auto-allowed ${yours}`, { approval_id: ap.id, rule: yours }, { agent: a.id, task: a.task_id });
     }
     const st = rule ? 'approved' : await this.answered(act, ap, `${command.split(' ').slice(0, 3).join(' ')}…`, auto);
     if (st === 'approved') {
@@ -1748,6 +1749,10 @@ export class Story {
     sim.approvals.set(id, { ...ap, status, decided_by: by });
     // Like the core: what you said with the answer is a row of its own, just before the answer.
     const said = saidWith(ap, sim.agents.get(ap.agent_id)?.provider, choice, message, answers);
+    // Like the core: the note of a deny reaches an agent of another CLI as a message, and is on record once it went out.
+    const asker = sim.agents.get(ap.agent_id);
+    const told = asker ? denyNoteMessage(asker, choice, message) : null;
+    if (told) sim.chat(told.thread, told.author, told.text);
     if (said) sim.emit({ type: 'approval_said', approval_id: id, ...said }, { agent: ap.agent_id, task: ap.task_id, run: ap.run_id });
     sim.emit({ type: 'approval_resolved', approval_id: id, status, by }, { agent: ap.agent_id, task: ap.task_id, run: ap.run_id });
     if (message) sim.decision('approval', 'human', `You denied ${'command' in ap.subject ? '`' + ap.subject.command + '`' : 'the request'}: “${message}”`, { approval: id }, { agent: ap.agent_id, task: ap.task_id });

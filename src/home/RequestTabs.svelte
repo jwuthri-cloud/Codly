@@ -2,7 +2,9 @@
   Your requests, side by side: one tab per thing you asked for, each with its own Lead and plan
   running in parallel. Title = your first words; the dot says where its plan is (planning ·
   waiting for you · running · done), amber when it needs you. A small dot after the title says
-  that rows came since you last had it on screen (the amber wins). ⌘[ / ⌘] switch, ⌘N starts one.
+  that rows came since you last had it on screen (the amber wins): a message, a card, a task that
+  finished, a plan that is ready or finished (Codly's line), something that went wrong.
+  ⌘[ / ⌘] switch, ⌘N starts one.
   × closes a request (its Lead stops). It asks first when the close leaves work behind: a
   running plan (closing cancels it), finished work that is not merged, an open pull request,
   a draft whose composer holds text. The question takes the keyboard: it opens on Keep, Esc
@@ -17,22 +19,36 @@
   import { closeRequest } from '../lib/state/actions';
   import { closeQuestion, closeWithUndo, type CloseQuestion } from '../lib/state/closing';
   import { requests, type Request } from '../lib/state/requests.svelte';
+  import { killedAt, yourStops } from '../lib/state/stops';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isClosedThread, isRequestThread, ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
-  import { hasNews } from './away';
+  import { hasNews, leadTroubles, requestNews, type News } from './away';
   import { forgetSeen, seenAt } from './lastSeen';
 
   const list = $derived(requests.list);
   const office = $derived(store.workspace?.id ?? null);
-  /** By request: when its newest row that is not yours came (a message, a card that asks you). */
-  const newest = $derived.by(() => {
-    const at = new Map<string, number>();
-    const note = (thread: string, ts: number) => at.set(thread, Math.max(at.get(thread) ?? 0, ts));
-    for (const c of store.chats) if (c.author !== 'user' && isRequestThread(c.thread)) note(c.thread, c.ts);
-    for (const ap of store.approvals) note(store.approvalThread(ap), ap.created_at);
-    return at;
+  /** By request: what went wrong in its Lead's turns, read again when that Lead's rows change. */
+  const troubles = $derived.by((): News[] => {
+    const leads = list.flatMap((r) => (r.lead ? [{ thread: r.thread, agentId: r.lead.id }] : []));
+    for (const l of leads) void store.revBy.get(l.agentId);
+    return leadTroubles(store.events, leads, yourStops, killedAt);
   });
+  /** By request: when its newest row that is not yours came (a message, a card that asks you, a finished task, a trouble). */
+  const newest = $derived(
+    requestNews(
+      {
+        chats: store.chats,
+        asks: store.approvals.map((ap) => ({ thread: store.approvalThread(ap), ts: ap.created_at })),
+        finished: store.tasks.flatMap((t) => {
+          const marks = t.status === 'done' ? store.taskMarks[t.id] : undefined;
+          return marks?.length ? [{ thread: store.taskThread(t.id), ts: marks[marks.length - 1].ts }] : [];
+        }),
+        troubles,
+      },
+      isRequestThread,
+    ),
+  );
   /** A request you closed leaves the map of when you last had it on screen (an Undo brings back the tab, and it is stamped again once you leave it). */
   let shown: { office: string | null; threads: string[] } = { office: null, threads: [] };
   $effect(() => {

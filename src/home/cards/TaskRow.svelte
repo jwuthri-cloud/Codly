@@ -1,9 +1,9 @@
 <!--
   One task as a checklist line: state mark, key, title, what it waits on or what it is doing,
   and who does it (the assigned agent, or the provider the Lead suggested). A running task whose
-  worker keeps its own todo list says how far it is and the step it is on ("3 of 7 · …"). A task
-  held since Codly restarted says so, not "Starting…". Used by the plan card in the conversation
-  and by the Plan room's list. Click → the task sheet.
+  worker keeps its own todo list says how far it is and the step it is on ("Step 3 of 7 · …").
+  A task held since Codly restarted says so, not "Starting…". Used by the plan card in the
+  conversation and by the Plan room's list. Click → the task sheet.
 -->
 <script lang="ts">
   import type { Plan } from '../../lib/gen/Plan';

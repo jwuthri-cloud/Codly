@@ -4,7 +4,8 @@
 // You were away when the page was hidden or the window had no focus for 10 minutes or more, or
 // when you open a thread that you last had on screen 10 minutes ago or more.
 import type { Approval } from '../lib/gen/Approval';
-import { troubleTitle } from './outcomes';
+import type { EventRow } from '../lib/gen/EventRow';
+import { endedByKill, troubleTitle, troublesOf } from './outcomes';
 import type { Item } from './spine';
 
 /** How long you must be gone before the thread sums up what came, in ms. */
@@ -23,13 +24,31 @@ export type Away = { minutes: number; facts: AwayFact[] };
 /** The time you left a thread and the time you came back to it. */
 export type AwayWindow = { since: number; back: number };
 
+/**
+ * Where a plan stands, for the summary's words: it waits for your go, it was merged into your
+ * branch, its branch was kept, it is finished with a conflict, or with a merge its checks
+ * refused, it is ready to merge, or none of those (it runs, it was cancelled…).
+ */
+export type PlanEnd = 'waits' | 'merged' | 'kept' | 'conflict' | 'checks' | 'ready' | 'other';
+
 /** What the summary needs to name things. */
 export type AwayNames = {
   agent: (id: string) => string;
   task: (id: string) => { key: string; assignee: string | null } | null;
-  /** The plan was merged into your branch (else it waits for your merge, or its branch was kept). */
-  planMerged: (planId: string) => boolean;
+  plan: (planId: string) => PlanEnd;
 };
+
+/** A finished plan in the summary, in the words of its card's head. */
+export function planDoneWords(end: PlanEnd): string {
+  switch (end) {
+    case 'merged': return 'the plan was merged';
+    case 'ready': return 'the plan is ready to merge';
+    case 'kept': return 'the plan finished, and its branch is kept';
+    case 'conflict': return 'the plan finished, with a conflict to resolve';
+    case 'checks': return 'the plan finished, and its checks stopped the merge';
+    default: return 'the plan finished';
+  }
+}
 
 /** How often the thread you look at is stamped: a quit or a crash with no leave event loses at most this much. */
 export const STAMP_EVERY_MS = 60_000;
@@ -67,10 +86,11 @@ function waitWords(cards: Approval[]): string {
  * The summary of what came in a thread between `w.since` and `w.back`, from its rows (`items`:
  * in their order on screen), or null when there is nothing worth one: fewer than 3 new rows, or
  * less than 10 minutes gone. Your own messages are not news. At most five facts, the ones that
- * need you first: the cards that still wait for you (every card that came before your return and
- * waits, also one older than your leave: it is the card the thread holds), trouble, requests answered without you (by a
- * saved rule or by the agent's mode), the tasks that finished, a plan that finished, and how many
- * other rows came. A fact that does not fit is counted with the other rows.
+ * need you first: a plan that waits for your go and the cards that still wait for you (every
+ * one that came before your return and waits, also one older than your leave: it is what the
+ * thread holds), trouble, requests answered without you (by a saved rule or by the agent's
+ * mode), the tasks that finished, a plan that finished (in the words of where it stands), and
+ * how many other rows came. A fact that does not fit is counted with the other rows.
  */
 export function awaySummary(items: readonly Item[], w: AwayWindow, names: AwayNames): Away | null {
   if (!wasAway(w.since, w.back)) return null;
@@ -80,6 +100,12 @@ export function awaySummary(items: readonly Item[], w: AwayWindow, names: AwayNa
 
   const drafts: Draft[] = [];
   const add = (rank: number, rows: Item[], text: string) => drafts.push({ key: rows[0].key, text, rank, ts: rows[0].ts, covers: rows.filter(fresh) });
+
+  // A plan that waits for your go, like a card that waits: also one that came before your leave.
+  for (const it of items) {
+    if ((it.kind !== 'system' && it.kind !== 'say') || it.card?.type !== 'plan' || it.ts > w.back) continue;
+    if (names.plan(it.card.planId) === 'waits') add(0, [it], 'the plan waits for your go');
+  }
 
   const waiting = items.filter((it): it is Item & { kind: 'approval' } => it.kind === 'approval' && it.approval.status === 'pending' && it.ts <= w.back);
   if (waiting.length) {
@@ -113,7 +139,7 @@ export function awaySummary(items: readonly Item[], w: AwayWindow, names: AwayNa
 
   for (const it of news) {
     if ((it.kind !== 'system' && it.kind !== 'say') || it.card?.type !== 'plan-done') continue;
-    add(4, [it], names.planMerged(it.card.planId) ? 'the plan was merged' : 'the plan is ready to merge');
+    add(4, [it], planDoneWords(names.plan(it.card.planId)));
   }
 
   drafts.sort((a, b) => a.rank - b.rank || a.ts - b.ts);
@@ -144,6 +170,45 @@ export function awayKeys(items: readonly Item[], w: AwayWindow): Set<string> {
 export function withAway(items: Item[], row: Item & { kind: 'away' }): Item[] {
   const at = items.findIndex((it) => it.ts > row.ts);
   return at < 0 ? items : [...items.slice(0, at), row, ...items.slice(at)];
+}
+
+/** A row of a request that lights its tab's dot: when it came, in which request. */
+export type News = { thread: string; ts: number };
+
+/**
+ * By request: when its newest row that is not yours came (`hasNews`): a message that is not yours
+ * (`chats`; the Lead's, Codly's line that a plan is ready or finished), a card that asks you
+ * (`asks`), a task that finished (`finished`), something that went wrong in its Lead's turn
+ * (`troubles`). `isRequest`: a thread that is a request (a 1:1 chat has no tab).
+ */
+export function requestNews(
+  s: { chats: readonly { thread: string; author: string; ts: number }[]; asks: readonly News[]; finished: readonly News[]; troubles: readonly News[] },
+  isRequest: (thread: string) => boolean,
+): Map<string, number> {
+  const at = new Map<string, number>();
+  const note = (n: News) => at.set(n.thread, Math.max(at.get(n.thread) ?? 0, n.ts));
+  for (const c of s.chats) if (c.author !== 'user' && isRequest(c.thread)) note(c);
+  for (const n of [...s.asks, ...s.finished, ...s.troubles]) note(n);
+  return at;
+}
+
+/**
+ * By request: when something went wrong in its Lead's turns (`requestNews`'s `troubles`), by the
+ * rule of the rows the thread shows (outcomes.ts): an error, a turn that failed or hit its step
+ * limit, a turn that something other than you cut. A stop of yours (`stops`: the starts of the
+ * turns you stopped, by button or key) and a turn you killed (`kills`) are not news. One pass
+ * over the log for all the Leads.
+ */
+export function leadTroubles(events: readonly EventRow[], leads: readonly { thread: string; agentId: string }[], stops: (agentId: string) => number[], kills: (agentId: string) => number[]): News[] {
+  const byLead = new Map<string, EventRow[]>(leads.map((l) => [l.agentId, []]));
+  for (const ev of events) if (ev.agent_id) byLead.get(ev.agent_id)?.push(ev);
+  return leads.flatMap((l) => {
+    const yours = stops(l.agentId);
+    const killed = kills(l.agentId);
+    return troublesOf(byLead.get(l.agentId) ?? [], l.agentId, (start) => yours.includes(start))
+      .filter((t) => !endedByKill(t, killed))
+      .map((t) => ({ thread: l.thread, ts: t.ts }));
+  });
 }
 
 /**

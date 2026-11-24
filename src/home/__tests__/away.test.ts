@@ -2,7 +2,9 @@
 // things that need you first, each with the row it is about.
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
-import { AWAY_MS, Presence, STAMP_EVERY_MS, awayFor, awayKeys, awaySummary, hasNews, wasAway, withAway, type AwayNames, type Spot } from '../away';
+import type { EventKind } from '../../lib/gen/EventKind';
+import type { EventRow } from '../../lib/gen/EventRow';
+import { AWAY_MS, Presence, STAMP_EVERY_MS, awayFor, awayKeys, awaySummary, hasNews, leadTroubles, planDoneWords, requestNews, wasAway, withAway, type AwayNames, type PlanEnd, type Spot } from '../away';
 import type { Item } from '../spine';
 
 const T = 1_760_000_000_000;
@@ -14,7 +16,7 @@ const at = (m: number) => T + m * MIN;
 const names: AwayNames = {
   agent: (id) => ({ ada: 'Ada', bo: 'Bo', lead: 'Lead' })[id] ?? 'An agent',
   task: (id) => ({ t1: { key: 't1', assignee: 'ada' }, t2: { key: 't2', assignee: 'ada' }, t4: { key: 't4', assignee: 'bo' } })[id] ?? null,
-  planMerged: (id) => id === 'merged',
+  plan: (id) => (({ merged: 'merged', kept: 'kept', conflict: 'conflict', checks: 'checks', waits: 'waits', running: 'other' }) as Record<string, PlanEnd>)[id] ?? 'ready',
 };
 
 const say = (key: string, m: number): Item => ({ kind: 'say', key, ts: at(m), agentId: 'lead', itemId: null, text: 'x', phase: 'final', streaming: false, header: true, card: null, replyTo: null });
@@ -27,6 +29,7 @@ const card = (key: string, m: number, agent: string, status: Approval['status'] 
 const done = (key: string, m: number, taskId: string): Item => ({ kind: 'task-done', key, ts: at(m), taskId });
 const trouble = (key: string, m: number, reason: string | null): Item => ({ kind: 'trouble', key, ts: at(m), agentId: 'lead', eventId: 1, what: 'failed', reason, retry: null });
 const planDone = (key: string, m: number, planId: string): Item => ({ kind: 'system', key, ts: at(m), text: 'Plan done', card: { type: 'plan-done', planId } });
+const planReady = (key: string, m: number, planId: string): Item => ({ kind: 'say', key, ts: at(m), agentId: 'lead', itemId: null, text: 'Here is the plan', phase: 'final', streaming: false, header: true, card: { type: 'plan', planId }, replyTo: null });
 
 const texts = (items: Item[]) => awaySummary(items, w, names)?.facts.map((f) => f.text) ?? null;
 
@@ -101,6 +104,33 @@ describe('awaySummary', () => {
     expect(awaySummary([say('s1', 2), say('s2', 3), say('s3', 50), say('s4', 51)], w, names)).toBeNull();
   });
 
+  it('a finished plan is said in the words of where it stands, not always "ready to merge"', () => {
+    const rest = [say('s1', 2), say('s2', 3)];
+    const said = (planId: string) => texts([planDone('p1', 1, planId), ...rest])?.[0];
+    expect(['ready', 'merged', 'kept', 'conflict', 'checks', 'running'].map(said)).toEqual([
+      'the plan is ready to merge',
+      'the plan was merged',
+      'the plan finished, and its branch is kept',
+      'the plan finished, with a conflict to resolve',
+      'the plan finished, and its checks stopped the merge',
+      'the plan finished',
+    ]);
+    expect(planDoneWords('waits')).toBe('the plan finished');
+  });
+
+  it('a plan that waits for your go is the first fact, also one that came before you left', () => {
+    // "6 more rows" said nothing while the plan waited (round 8 review, part B, defect 5).
+    const rows = [say('s1', 2), say('s2', 3), say('s3', 4), work('w1', 5), say('s4', 6), say('s5', 7)];
+    expect(awaySummary([planReady('m0', -20, 'waits'), ...rows], w, names)?.facts).toEqual([
+      { key: 'm0', text: 'the plan waits for your go' },
+      { key: 's1', text: '6 more rows' },
+    ]);
+    expect(texts([card('a1', 1, 'bo'), planReady('m1', 2, 'waits'), ...rows])?.slice(0, 2)).toEqual(['Bo waits for your answer', 'the plan waits for your go']);
+    // A plan that runs, or one that came after your return, is no such fact.
+    expect(texts([planReady('m0', 1, 'running'), ...rows])).toEqual(['7 more rows']);
+    expect(texts([...rows, planReady('m9', 60, 'waits')])).toEqual(['6 more rows']);
+  });
+
   it('a card that came after your return is not a fact: it did not come while you were away', () => {
     const items = [say('s1', 2), say('s2', 3), say('s3', 4), card('a1', 60, 'bo')];
     expect(texts(items)).toEqual(['3 more rows']);
@@ -123,6 +153,53 @@ describe('the row of the summary', () => {
   it('says how long you were away', () => {
     expect([awayFor(47), awayFor(60), awayFor(72)]).toEqual(['47 min', '1 h', '1 h 12 min']);
     expect([wasAway(T, T + AWAY_MS), wasAway(T, T + AWAY_MS - 1), wasAway(undefined, T)]).toEqual([true, false, false]);
+  });
+});
+
+describe('requestNews', () => {
+  const isRequest = (t: string) => t === 'lead' || t.startsWith('lead:');
+  it('a finished task, a trouble and a card light the dot as a message does; your own message does not', () => {
+    const newest = requestNews(
+      {
+        chats: [
+          { thread: 'lead', author: 'user', ts: 50 },
+          { thread: 'lead:b', author: 'lead-b', ts: 10 },
+          { thread: 'agent:ada', author: 'ada', ts: 90 },
+        ],
+        asks: [{ thread: 'lead:b', ts: 20 }],
+        finished: [{ thread: 'lead', ts: 30 }],
+        troubles: [{ thread: 'lead:c', ts: 40 }],
+      },
+      isRequest,
+    );
+    expect(Object.fromEntries(newest)).toEqual({ lead: 30, 'lead:b': 20, 'lead:c': 40 });
+  });
+});
+
+describe('leadTroubles', () => {
+  let id = 0;
+  const ev = (agent: string, ts: number, kind: unknown): EventRow => ({ id: ++id, ts, agent_id: agent, task_id: null, run_id: null, kind: kind as EventKind });
+  const started = (agent: string, ts: number) => ev(agent, ts, { type: 'turn_started', input: 'go' });
+  const ended = (agent: string, ts: number, status: string) => ev(agent, ts, { type: 'turn_completed', status, result_text: null, duration_ms: null });
+  const leads = [{ thread: 'lead', agentId: 'l1' }, { thread: 'lead:b', agentId: 'l2' }];
+  const none = () => [];
+
+  it('lights the dot as the thread shows a trouble row: errors, failed turns and step limits, also of turns before the last', () => {
+    const events = [
+      started('l1', 10), ev('l1', 11, { type: 'error', message: 'rate limited', fatal: false }), ended('l1', 12, 'completed'),
+      started('l1', 20), ended('l1', 21, 'failed'),
+      started('l1', 30), ended('l1', 31, 'completed'),
+      started('l2', 40), ended('l2', 41, 'max_turns'),
+      started('ada', 50), ended('ada', 51, 'failed'), // a worker: not a Lead of a tab
+    ];
+    expect(leadTroubles(events, leads, none, none)).toEqual([{ thread: 'lead', ts: 11 }, { thread: 'lead', ts: 21 }, { thread: 'lead:b', ts: 41 }]);
+  });
+
+  it('a turn you stopped, by button or with Esc, or one you killed, is not news; one its CLI cut is', () => {
+    const events = [started('l1', 10), ended('l1', 12, 'interrupted'), started('l2', 20), ended('l2', 22, 'interrupted'), started('l1', 30), ended('l1', 32, 'interrupted')];
+    const stops = (agent: string) => (agent === 'l1' ? [10] : []);
+    const kills = (agent: string) => (agent === 'l2' ? [21] : []);
+    expect(leadTroubles(events, leads, stops, kills)).toEqual([{ thread: 'lead', ts: 32 }]);
   });
 });
 

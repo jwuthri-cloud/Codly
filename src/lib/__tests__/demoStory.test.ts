@@ -20,7 +20,8 @@ import { demoStates, opensRepo } from '../demo/states';
 import { AMEND, AUTOPLAY, MERGE_FAILURES, REQUEST, REQUEST_B, REQUEST_CARDS, Story, type StoryOptions } from '../demo/story';
 import { TASK_FILES } from '../demo/repo';
 import { mockAgentDiff, mockAgentGit } from '../demo/agentgit';
-import { outcomeBy } from '../util/outcome';
+import { outcomeBy, yourRuleOf } from '../util/outcome';
+import { savedRuleOf } from '../../sheet/historyWords';
 import { parseDiff } from '../util/diff';
 import { startedWithoutFolderConfig } from '../state/session';
 import type { Workspace } from '../gen/Workspace';
@@ -172,6 +173,11 @@ describe('“Always allow in this repo” in the demo', () => {
       'you saved a rule: always allow commands that start with `npm install` in this repo',
       'auto-allowed your rule for this repo: commands that start with `npm install`',
     ]);
+    // Their details are the core's: the closed rows name the rule you saved, and the rule of
+    // yours that answered the next one.
+    const decisions = events(sim, 'decision').map((d) => ({ type: d.decision_type, detail: d.detail }));
+    expect(savedRuleOf(decisions, first.id)).toEqual({ kind: 'prefix', command: 'npm install' });
+    expect(yourRuleOf(decisions, second.id)).toEqual({ kind: 'prefix', command: 'npm install' });
 
     // Removed: Codly asks again.
     story.rules.remove(rule.id);

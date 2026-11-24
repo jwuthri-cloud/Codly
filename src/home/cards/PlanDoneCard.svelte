@@ -3,15 +3,17 @@
   the agents made, and the decision that is yours — merge into your branch, or keep the branch.
   A merge that would conflict with your branch says so here, with the two ways out: until the
   conflict is resolved the card does not say "ready to merge", and the one primary button is
-  the step's own "Have an agent resolve it". While a pull request for the plan is open and its
-  checks are not read yet, still run or failed, the primary button is to look at the pull
+  the step's own "Have an agent resolve it". The same after a merge refused for checks that
+  failed on the merge result ("Have an agent fix it" is the one primary button) or that could
+  not run there (no primary button): Merge is a plain one. While a pull request for the plan is
+  open and its checks are not read yet, still run or failed, the primary button is to look at the pull
   request; Merge stays. Both keep their places while the checks change: only which one is the
   primary button does.
 -->
 <script lang="ts">
   import { keepBranch, mergePlan } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
-  import { conflictsWith } from '../../lib/state/mergeState.svelte';
+  import { conflictsWith, mergeBlock, mergeKey, mergeUi } from '../../lib/state/mergeState.svelte';
   import { prKey, prUi } from '../../lib/state/pullRequest.svelte';
   import { planSpent, spentVersion } from '../../lib/state/spent.svelte';
   import { store } from '../../lib/state/store.svelte';
@@ -49,20 +51,24 @@
   const target = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
   /** The branch it conflicts with: nothing can merge until that is resolved, and the step below has the ways out. */
   const conflict = $derived(merged || kept ? null : conflictsWith({ kind: 'plan', id: planId }));
+  /** A conflict or checks that refused the merge: the way out below is the main button, not Merge. */
+  const blocked = $derived(merged || kept ? null : mergeBlock(mergeUi.states[mergeKey({ kind: 'plan', id: planId })]));
   /** A pull request for it is open and its checks are not read, still run or failed: look at those before you merge here. */
   const pr = $derived(prUi.opened[prKey({ kind: 'plan', id: planId })] ?? null);
   const prChecking = $derived(pullRequestFirst(pr));
-  let busy = $state(false);
+  let working = $state(false);
+  /** A merge or keep from here, or a merge of this plan from elsewhere (the chip at the thread's end), is under way. */
+  const busy = $derived(working || mergeUi.merging.includes(planId));
   // `unchecked`: after the plan's checks failed on the merge result, you merge anyway.
   async function merge(unchecked = false) {
-    busy = true;
+    working = true;
     await mergePlan(planId, null, unchecked);
-    busy = false;
+    working = false;
   }
   async function keep() {
-    busy = true;
+    working = true;
     await keepBranch(planId);
-    busy = false;
+    working = false;
   }
 </script>
 
@@ -103,9 +109,9 @@
         <!-- Both stay where they are while the checks change: only which one is the main button does. -->
         {#if pr?.state === 'open' && !conflict}
           {@const url = pr.url}
-          <button class="btn" class:primary={prChecking} onclick={() => openExternal(url)} data-tip={prChecking ? pullRequestTip(pr) : 'Open it in your browser'}><Icon name="link" size={14} />View the pull request</button>
+          <button class="btn" class:primary={prChecking && !blocked} onclick={() => openExternal(url)} data-tip={prChecking ? pullRequestTip(pr) : 'Open it in your browser'}><Icon name="link" size={14} />View the pull request</button>
         {/if}
-        <button class="btn" class:primary={!conflict && !prChecking} disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
+        <button class="btn" class:primary={!blocked && !prChecking} disabled={busy || kept} onclick={() => merge()}><Icon name="merge" size={14} />Merge into {target}</button>
         <button class="btn" disabled={busy || kept} onclick={keep}>Keep the branch</button>
         <button class="btn ghost" onclick={() => ui.openDiff({ kind: 'plan', id: planId })}>View changes</button>
       {/if}

@@ -1,17 +1,20 @@
 <!--
   One fixed-height row above the composer (so nothing jumps): while the thread's agent works it
   says what it is doing (and how many of your messages wait for it); otherwise it offers the next
-  sensible actions for this request as small chips. When the agent keeps its own todo list, a
+  sensible actions for this request as small chips (a finished plan's merge among them, while
+  nothing stands in its way: its card may be far above the end). When the agent keeps its own todo list, a
   small count ("3/7") follows its name; a press opens the whole list over the row. While it waits
   for you in the middle of its list, the row says the step it waits in, greyed. While its
   turn runs, Stop interrupts it; so does Esc pressed twice (after the first press the row asks
   for the second).
   New request (⌘N) sits on the right once something was said here (in a new request it would
-  open another empty one).
+  open another empty one). When you come back and the summary of your time away is above the
+  view, a chip at its start takes you to it.
 -->
 <script lang="ts">
-  import { sendChat, stopThread } from '../lib/state/actions';
+  import { mergePlan, sendChat, stopThread } from '../lib/state/actions';
   import { groupSame } from '../lib/state/approvalGroups';
+  import { mergeBlock, mergeKey, mergeUi } from '../lib/state/mergeState.svelte';
   import { narrate } from '../lib/state/narration';
   import { busy } from '../lib/state/queue';
   import { stopping } from '../lib/state/stops';
@@ -20,6 +23,8 @@
   import Icon from '../components/Icon.svelte';
   import Menu, { type MenuItem } from '../components/Menu.svelte';
   import Say from '../components/Say.svelte';
+  import { awayFor } from './away';
+  import { awayShown } from './awayShown.svelte';
   import { reviewLabel } from './threadWords';
   import { todoLine, todoWords } from './todoLine';
 
@@ -84,6 +89,15 @@
       out.push({ label: 'Show the plan', icon: 'plan', run: () => (ui.revealPlan = plan.id) });
       out.push({ label: 'What’s left?', run: () => sendChat(thread, 'What’s left, and is anything at risk?') });
     } else if (plan?.status === 'done' && !store.planMerges[plan.id] && !plan.merged_sha && !plan.kept && !ui.keptPlans.includes(plan.id)) {
+      // The plan's card can be far above the end (a review, fix or resolve task came after it):
+      // its merge is here too, while nothing stands in its way and no merge of it is under way.
+      // A plain chip: the card's rule (a pull request whose checks run comes first) picks the
+      // main button, and the card is often the row just above.
+      if (!mergeBlock(mergeUi.states[mergeKey({ kind: 'plan', id: plan.id })]) && !mergeUi.merging.includes(plan.id)) {
+        const target = store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main';
+        const id = plan.id;
+        out.push({ label: `Merge into ${target}`, icon: 'merge', run: () => void mergePlan(id) });
+      }
       if (store.artifacts.some((a) => a.task_id && store.taskMap.get(a.task_id)?.plan_id === plan.id)) out.push({ label: 'See what they made', icon: 'image', run: () => ((ui.changesLens = 'artifacts'), ui.go('changes')) });
       out.push({ label: 'Anything risky in the diff?', run: () => sendChat(thread, 'Before I merge: is anything in the diff risky?') });
     } else if (plan?.status === 'done') {
@@ -92,9 +106,16 @@
     }
     return out;
   });
+  /** The summary of your time away is out of view (you came back at the thread's end): how long you were away. */
+  const awayMinutes = $derived(awayShown.hidden);
 </script>
 
 <div class="row" aria-live="off">
+  {#if awayMinutes != null}
+    <button class="nc away" onclick={() => awayShown.reveal(ui.reducedMotion)} data-tip="Show what came while you were away">
+      <Icon name="chevron-up" size={12} />While you were away ({awayFor(awayMinutes)})
+    </button>
+  {/if}
   {#if escAsked && agent}
     <p class="live esc" role="status">Press Esc again to stop {agent.name}</p>
   {:else if working && agent && n}
@@ -151,6 +172,7 @@
   .nc.primary:hover { filter: brightness(1.06); }
   .nc.stop { flex-shrink: 0; color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line-3); }
   .nc.stop:disabled { opacity: 1; color: var(--ink-3); }
+  .nc.away { flex-shrink: 0; color: var(--ink-1); box-shadow: inset 0 0 0 1px var(--line-2); }
   .nc.new { flex-shrink: 0; background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); }
   .nc.new:hover { background: var(--surface-2); }
   .k { opacity: 0.65; font-weight: var(--w-reg); }

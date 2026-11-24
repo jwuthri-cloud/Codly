@@ -5,7 +5,7 @@ import type { LastMerge } from '../gen/LastMerge';
 import type { Memory } from '../gen/Memory';
 import type { Plan } from '../gen/Plan';
 import type { RepoSync } from '../gen/RepoSync';
-import { isStarting, keepBranch, mergePlan, recheckTask, runPlan, setTrust, togglePinMemory, undoMerge } from '../state/actions';
+import { CONTINUE, continueAgent, isStarting, keepBranch, mergePlan, recheckTask, runPlan, saveApprovalRule, setTrust, togglePinMemory, undoMerge } from '../state/actions';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
@@ -160,3 +160,39 @@ describe('setTrust', () => {
     expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t change its trust', 'only a worker or a 1:1 agent can be trusted']]);
   });
 });
+
+describe('Continue, after a turn you stopped', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    store.agents = [];
+    for (const o of [...store.outbox]) store.dropOutgoing(o.id);
+  });
+
+  it('sends one message in the agent’s own conversation: a Lead’s request, or its 1:1 chat', async () => {
+    const send = vi.spyOn(api, 'sendChat').mockResolvedValue(undefined);
+    store.agents = [{ id: 'lead-b', role: 'lead', thread: 'lead:b' } as Agent, { id: 'ada', role: 'solo', thread: null } as Agent];
+    expect(continueAgent('lead-b')).toBe(true);
+    expect(continueAgent('ada')).toBe(true);
+    expect(continueAgent('nobody')).toBe(false);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls).toEqual([
+      ['lead:b', CONTINUE],
+      ['agent:ada', CONTINUE],
+    ]);
+  });
+});
+
+describe('Always allow in this repo', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const t of [...toasts.list]) toasts.dismiss(t.id);
+  });
+
+  it('its toast holds two sentences and a link: it stays as long as an attention toast', async () => {
+    vi.spyOn(api, 'addApprovalRule').mockResolvedValue({ id: 'r1', workspace_id: 'w', kind: 'prefix', command: 'npm install', created_at: 1 });
+    await saveApprovalRule('ap1', 'prefix');
+    const t = toasts.list.find((x) => x.title === 'Codly will not ask about this again');
+    expect([t?.kind, t?.duration, t?.action?.label]).toEqual(['attention', 8000, 'Open Settings']);
+  });
+});
+

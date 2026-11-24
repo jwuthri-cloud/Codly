@@ -53,6 +53,7 @@
   import WorkRow from './cards/WorkRow.svelte';
   import AwayRow from './AwayRow.svelte';
   import { Presence, awayKeys, awaySummary, withAway, type AwayNames, type Spot } from './away';
+  import { planEnd } from './planEnd';
   import { loadSeen, seenAt, stampSeen } from './lastSeen';
   import Composer from './Composer.svelte';
   import LoadEarlier from './LoadEarlier.svelte';
@@ -86,14 +87,15 @@
 
   // ── what came while you were away: one row, before the first row newer than your leave ──
   const office = $derived(store.workspace?.id ?? null);
-  /** Names for the summary, read without tracking: the rows change when what they name does. */
+  /** Names for the summary, read without tracking: the rows change when what they name does.
+   *  Where a plan stands is tracked: what stops its merge comes from the core after the row. */
   const names: AwayNames = {
     agent: (id) => untrack(() => store.agentMap.get(id)?.name ?? 'An agent'),
     task: (id) => untrack(() => {
       const t = store.taskMap.get(id);
       return t ? { key: t.key, assignee: t.assignee } : null;
     }),
-    planMerged: (id) => untrack(() => !!store.mergeOf(id)),
+    plan: planEnd,
   };
   const away = $derived.by(() => {
     const w = awayOf.get(awayKey(office, thread));

@@ -2,7 +2,8 @@
   The agent's own work between two messages, folded into one quiet line ("Read 6 files ·
   searched twice"). Open it for each step (with provenance) and the reasoning summary. A
   helper (subagent) is one step, with its own calls under it. A step that a subagent made
-  among the agent's own (Codex) says whose it is.
+  among the agent's own (Codex) says whose it is. A row of thoughts only, in a turn that failed
+  or was stopped before the agent answered, says that the turn ended while it was thinking.
 -->
 <script lang="ts">
   import { store, type Seg, type SubAgent, type Thought } from '../../lib/state/store.svelte';
@@ -14,6 +15,7 @@
   import Icon from '../../components/Icon.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import { splitHelpers } from '../helpers';
+  import { endedBeforeAnswer } from '../turnEnd';
   import { workSummary } from '../workSummary';
   import HelperRow from './HelperRow.svelte';
 
@@ -36,7 +38,14 @@
   const failed = $derived(split.own.filter((s) => s.ok != null).at(-1)?.ok === false);
   /** The CLI of the agent whose work this is: only a Claude agent's call of the plan tool is its plan. */
   const provider = $derived(store.agentMap.get(segs[0]?.agentId ?? '')?.provider ?? null);
-  const summary = $derived(workSummary(split.own, provider) || (thinking != null ? 'Thinking' : thoughts.length ? 'Thought it through' : ''));
+  const done = $derived(workSummary(split.own, provider));
+  /** Only thoughts, and the turn failed or was stopped before the agent answered: they were cut. */
+  const cut = $derived.by(() => {
+    if (done || thinking != null || !thoughts.length) return false;
+    void store.rev;
+    return endedBeforeAnswer(store.events, thoughts[0].eventId);
+  });
+  const summary = $derived(done || (thinking != null ? 'Thinking' : cut ? 'Was thinking when the turn ended' : thoughts.length ? 'Thought it through' : ''));
   const steps = $derived(split.own.length + thoughts.length);
 </script>
 
@@ -57,7 +66,7 @@
   <div class="work" class:running>
     <button class="line" onclick={() => (open = !open)} aria-expanded={open}>
       <span class="ic" class:live={running} class:bad={failed && !running}>
-        {#if running}<span class="pulse"></span>{:else}<Icon name={failed ? 'alert' : 'check'} size={12} stroke={2} />{/if}
+        {#if running}<span class="pulse"></span>{:else}<Icon name={failed ? 'alert' : cut ? 'pause' : 'check'} size={12} stroke={2} />{/if}
       </span>
       <span class="sum truncate">{summary}</span>
       {#if steps > 1}<span class="n num">{steps} steps</span>{/if}
