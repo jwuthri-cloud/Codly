@@ -17,7 +17,7 @@
 //   the open office is merged into what is held (`mergeSnapshot`), and a thread loads what is
 //   older on request (`loadEarlier`).
 import { SvelteMap } from 'svelte/reactivity';
-import { api, getTransport, type UiBatch } from '../api';
+import { api, getTransport, LinkLost, type UiBatch } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
 import type { RequestPrefs } from '../gen/RequestPrefs';
@@ -47,6 +47,7 @@ import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
 import { recordSaid } from './answers';
 import { controls } from './control.svelte';
+import { isDown, Reconnect, type Link } from './connection';
 import { withBackgroundTasks, withKnownStarts, withMcpServer, type BackgroundWork, type McpServer } from './session';
 
 export const LOG_CAP = 5000;
@@ -383,6 +384,14 @@ class CodlyStore {
 
   // ───────────── connection ─────────────
 
+  /** A browser page's link to `codly serve` (always "connected" in the app's window). */
+  link = $state.raw<Link>({ kind: 'connected' });
+  /** This page cannot reach Codly: the polls that call it skip. */
+  get offline(): boolean {
+    return isDown(this.link);
+  }
+  private reconnect = new Reconnect(() => this.connect(), (l) => (this.link = l));
+
   async connect(): Promise<void> {
     const gen = ++this.gen;
     this.syncing = true;
@@ -400,18 +409,25 @@ class CodlyStore {
       this.syncing = false;
       this.ready = true;
       this.error = null;
+      this.reconnect.reached();
       if (early.length) this.applyEvents(early);
     } catch (e) {
       if (gen !== this.gen) return; // a newer resync owns the state
-      this.error = e instanceof Error ? e.message : String(e);
       this.syncing = false;
       this.ready = true;
+      if (e instanceof LinkLost) this.reconnect.lost(e.signedOut);
+      else this.reconnect.reached(); // Codly answered, with why it could not start
+      // What is held stays on screen while the bar says the link is down.
+      if (e instanceof LinkLost && this.held !== undefined) return;
+      this.error = e instanceof Error ? e.message : String(e);
     }
   }
 
   /** "Try again" after a failed start. The app keeps a failed core start, so connecting again
    *  would only repeat its error: ask the app to start the core again first. */
   async retry(): Promise<void> {
+    // In a browser that lost `codly serve`, its core is not the problem: open the stream again.
+    if (isDown(this.link)) return this.reconnect.tryNow();
     this.ready = false; // the loading screen, while the core starts
     try {
       await api.retryCore();
@@ -426,6 +442,9 @@ class CodlyStore {
   /** Fresh snapshot (workspace switch, long hidden period). Old-generation batches are ignored.
    *  For the office already open it is merged into what is held: nothing older is dropped. */
   resync = () => this.connect();
+
+  /** "Try now" on the bar: one try at once (the waits go on if it fails). */
+  tryNow = () => this.reconnect.tryNow();
 
   private onBatch(gen: number, b: UiBatch) {
     if (gen !== this.gen) return;

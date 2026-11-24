@@ -38,7 +38,7 @@
   }
   onMount(() => {
     void load();
-    const t = setInterval(() => api.breakerStatus().then((s) => (status = s)).catch(() => {}), 5000);
+    const t = setInterval(() => store.offline || void api.breakerStatus().then((s) => (status = s)).catch(() => {}), 5000);
     return () => clearInterval(t);
   });
 

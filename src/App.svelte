@@ -23,6 +23,7 @@
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
   import ResumeWork from './components/ResumeWork.svelte';
+  import ConnectionBar from './shell/ConnectionBar.svelte';
   import DragGhost from './components/DragGhost.svelte';
   import { store, installVisibility } from './lib/state/store.svelte';
   import { ui } from './lib/state/ui.svelte';
@@ -119,6 +120,8 @@
 {#if workspaceTrust.asking}<TrustDialog />{/if}
 {#if intakeUi.dialog}<IntakeDialog />{/if}
 <ResumeWork />
+<!-- A browser on `codly serve` that lost it (the start-up error screen says so itself). -->
+{#if store.ready && !store.error}<ConnectionBar />{/if}
 <IdeOverlay />
 <Toasts />
 <TooltipHost />

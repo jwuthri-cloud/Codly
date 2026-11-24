@@ -100,7 +100,7 @@
     load().catch(fail('Could not load the neighbourhood'));
     el.focus({ preventScroll: true });
     // The other offices keep working: their lights follow.
-    const poll = setInterval(() => api.offices().then((o) => (offices = o), () => {}), 10_000);
+    const poll = setInterval(() => store.offline || void api.offices().then((o) => (offices = o), () => {}), 10_000);
     return () => {
       clearInterval(poll);
       scene?.dispose();

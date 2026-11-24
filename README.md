@@ -139,7 +139,9 @@ checks again, checks that it wrote only the files it was allowed to, and, if you
 to the worker to fix. Work that passes merges into the plan's integration branch.
 
 In the Changes room you can read each diff, comment on lines, tick files as viewed, and send a task
-back with your comments. **Last turn** shows only what an agent's last turn changed.
+back with your comments. **Last turn** shows only what an agent's last turn changed. On a finished
+plan that is not merged yet, **Send back** makes your comments one more task of the plan, for the
+agent that wrote those files; on merged work it opens a new request with them.
 
 ![A finished task with its test result, diff size and merge target](site/shots/done.jpg)
 
@@ -157,7 +159,9 @@ agent resolve it** gives the plan one more task. **Push to \<remote\>** pushes y
 
 **Undo merge** takes the last merge back while nothing was committed or pushed after it. Before
 each turn of an agent Codly keeps a checkpoint of its worktree: **Restore files to this point** (in
-the agent's Git tab) puts the files back, and can itself be undone.
+the agent's Git tab) puts the files back, and can itself be undone. In a 1:1 chat with an agent
+that rests, Esc Esc or `/undo` opens **Undo a turn**: pick one of its turns, and its files go back
+to how they were before it.
 
 ### Talk to one agent
 
@@ -170,7 +174,8 @@ compact, context, mode, model, undo the last turn, your terminal, its MCP server
 Code agent ⇧⇥ switches its mode (ask for edits, accept edits, plan first), and a mode or model
 change needs no restart. Its sheet lists its MCP servers with Reconnect, **Turn off** and **Turn
 on**, and its background commands and helpers (subagents) with **Stop**. Codly opens on the
-request you left. **Open in my
+request you left. When you come back to a conversation, one row before the first new one says what
+came while you were away. **Open in my
 terminal** hands a Claude Code agent's session to your terminal (`claude --resume`), and **Give it
 back** returns it to Codly.
 
@@ -197,14 +202,14 @@ workers can also use `codly_ask_user` to ask you a decision.
 - Silent agents: a turn with no output for 10 minutes is flagged and you are notified; at twice
   that, the turn is interrupted once; after as long again, the run is stopped. A tool call that
   gives no sign of life gets 60 minutes; Claude Code says every 30 s that a command, an MCP tool
-  or a helper still runs, so a hung one of those is noticed after 10. Settings → Safety → Silent
-  agents sets the times.
+  or a helper still runs, so a hung one of those is noticed after 10. Settings → Safety → Limits
+  sets the times.
 - A worker turn that fails is retried after a wait; at its third failure in a row the task is
   blocked with the error, and **Retry** is on the row that says so. A plan that cannot go on says
   so in its thread.
 - Notifications (Settings → General → Notifications): one switch per kind, and by default only
   while Codly is not in front.
-- Budgets (Settings → Safety → Autonomy & Budgets): a token budget and a cost budget for all agents
+- Budgets (Settings → Safety → Limits): a token budget and a cost budget for all agents
   together, both off by default. A used-up budget stops new work; it never kills an agent.
 
 ## Safety
@@ -233,7 +238,7 @@ For a command you trust, or a tool of an MCP server that a Claude Code agent ask
 **Always allow in this repo** on its card: Codly then stops asking every agent in that repo about
 it. A rule never covers deletes, `git push`, `sudo`, secrets, paths outside the worktree or a
 command that can lose work in your project folder.
-Settings → Safety lists the rules so you can remove them.
+Settings → Safety → Approvals lists the rules so you can remove them.
 
 ### OS sandboxes
 
@@ -245,7 +250,7 @@ Settings → Safety lists the rules so you can remove them.
   the network (a `git push`, a download) runs inside the sandbox without asking, so the approval
   rules do not see it.
 - Claude Code agents have no OS sandbox, unless you turn on **Sandbox Claude's shell** (Settings →
-  Safety → Claude Code; off by default). With it on, Claude Code runs the shell commands of workers
+  Safety → Sandbox; off by default). With it on, Claude Code runs the shell commands of workers
   and 1:1 agents in its own OS sandbox:
   - A sandboxed command can write only in the agent's folder (its worktree), a temporary folder and
     the repository's git data. It can still read your other files.
@@ -336,16 +341,16 @@ request a request starts from, reaches the Lead as quoted data, and the plans ma
   gets its own block of ports in `$CODLY_PORT_BASE`.
 - A repo can have a setup script, `.codly/setup.sh`, that Codly runs once in each new worktree (to
   install packages, or to write the worktree's ports into a local env file). It is off until you
-  turn it on in Settings → Safety → New worktrees, which shows you the script. Codly runs only the
+  turn it on in Settings → Safety → Worktrees, which shows you the script. Codly runs only the
   text you turned on: if the file changes, it asks you again. Use paths from the worktree's top
   folder, or `$CODLY_REPO_PATH` for your checkout. The script is not sandboxed.
 - You decide what passes. Write the commands that must pass in `.codly/checks`, one on each line
-  (`pnpm check`, `pnpm test`), and turn them on in Settings → Safety → Required checks, which shows
+  (`pnpm check`, `pnpm test`), and turn them on in Settings → Safety → Checks, which shows
   them. Codly then runs them for every task, after the checks the Lead wrote, and again on every
   finished plan; **Check the work**, in the Git tab of an agent you chat with, runs them on that
   agent's work. If the file changes, tasks wait until you read it again.
 - The Lead's verify commands go through the same risk rules: one with a risk waits for your OK on
-  its task. A check runs for at most 10 minutes by default (Settings → Safety → Review).
+  its task. A check runs for at most 10 minutes by default (Settings → Safety → Checks).
 
 ### Your sign-ins and keys
 
@@ -368,7 +373,7 @@ request a request starts from, reaches the Lead as quoted data, and the plans ma
 - The same goes for the variables that give Claude Code another sign-in than `claude auth login`:
   `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_OAUTH_TOKEN` (a token from
   `claude setup-token`). Codly removes them from agent environments unless you turn on **Use my
-  shell's Claude sign-in** (Settings → Safety → Claude Code). With it on, Claude agents keep them
+  shell's Claude sign-in** (Settings → Safety → Trust). With it on, Claude agents keep them
   from your login shell, as Claude Code does in your terminal, and that account pays. Codly does not
   store the token. Check Anthropic's terms before you use a subscription token this way. Every
   other `CLAUDE_CODE_*` variable is always removed, so that an agent never takes itself for a part
@@ -441,13 +446,13 @@ matters most:
 | Agents at once | Team | 3 |
 | Workers per account | Team → Accounts | 2 |
 | Show Claude usage before an agent runs | Team → Accounts | Off |
-| Sandbox Claude's shell | Safety → Claude Code | Off |
-| Use my shell's Claude sign-in | Safety → Claude Code | Off |
+| Sandbox Claude's shell | Safety → Sandbox | Off |
+| Use my shell's Claude sign-in | Safety → Trust | Off |
 | Let Codex agents use the network | Safety → Sandbox | Off |
-| Cross-vendor review before merge | Safety → Review | Off |
-| Time limit for checks | Safety → Review | 10 minutes |
-| Circuit breaker | Safety → Autonomy & Budgets | On; token and cost budgets off |
-| Silent agents | Safety → Silent agents | Flag after 10 min (60 with a silent tool call open), idle after 2 min |
+| Cross-vendor review before merge | Safety → Checks | Off |
+| Time limit for checks | Safety → Checks | 10 minutes |
+| Circuit breaker | Safety → Limits | On; token and cost budgets off |
+| Silent agents | Safety → Limits | Flag after 10 min (60 with a silent tool call open), idle after 2 min |
 | Webhooks | Automation | Each new endpoint off |
 
 ## Keyboard shortcuts
@@ -456,16 +461,20 @@ Press `?` in the app for the full sheet. The main ones:
 
 | Keys | Action |
 | --- | --- |
-| ⌘K | Search and commands |
+| ⌘K | Search and commands; it also finds what was said in this repo's conversations |
 | ⌘N, ⌘[ / ⌘] | New request; previous / next request |
+| ⇧⌘N | New task |
 | ⌘F | Find in the conversation |
 | ⌘↵ | Approve once, send a question's answer, or run the plan |
 | 1 … 9 | Pick an option of the question that waits |
 | ⌥⌘↵ | Allow for this session |
 | ⌘⌫, ⇧⌘⌫ | Deny; deny with a note |
-| Esc | Close, deselect; press twice to stop the running turn |
+| Esc | Close, deselect; Esc Esc stops the running turn, or, in a 1:1 with an agent that rests, opens **Undo a turn** |
+| ↑ | Bring back what you sent (on an empty line) |
+| @, # | Talk to one agent or mention a file; mention a task |
 | ⇧⇥ | Next request mode: Ask, Plan, Auto, Direct; in a 1:1 with Claude, its next mode |
 | ⌘1, ⌘2, ⌘3 | Full office, full work, the neighbourhood map |
+| ⌘. | Focus: dim the office |
 | G then H, P, C, K, T, S | Home, Plan, Changes, Knowledge, Terminal, Settings |
 | ⌘O, ⌘, | Open repository; Settings |
 
@@ -486,6 +495,13 @@ link on that machine. `--host <address>` with an address other machines can reac
 unless you add `--allow-remote`; the link then works for anyone on your network until Codly stops.
 Quit the app first: an app that is already open does not serve to the network. `codly --help`
 lists every command and `codly --version` prints the version.
+
+When `codly serve` stops or restarts, the page keeps what it shows, and a bar at the top says
+"Codly is not reachable. Trying again…" with the time of the last try. The page tries again after
+1, 2, 5 and 10 seconds, then every 10 seconds until Codly is back; **Try now** tries at once. Once
+it is back, the page catches up on what happened meanwhile. With `--allow-remote` each start
+prints a new link: the page then says it is signed out, and you open the new link. Notifications
+show on the Mac that runs Codly, not in the browser.
 
 ## Troubleshooting
 

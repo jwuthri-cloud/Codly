@@ -44,7 +44,7 @@
   const load = () => inbound.load();
   onMount(() => {
     void load();
-    const t = setInterval(load, 5000); // counts and the delivery log
+    const t = setInterval(() => store.offline || void load(), 5000); // counts and the delivery log
     return () => clearInterval(t);
   });
 
