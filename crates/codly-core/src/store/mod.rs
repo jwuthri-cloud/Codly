@@ -984,6 +984,22 @@ impl Store {
         Ok(closed)
     }
 
+    /// The messages of a workspace whose text holds `query` (ASCII case aside), newest first, at
+    /// most `limit`: open requests, 1:1 chats and closed requests alike. Only what was said is
+    /// matched, never ids, authors or the JSON around it; `%` and `_` are plain characters. A
+    /// query of fewer than 2 characters finds nothing.
+    pub fn search_chats(&self, workspace_id: &str, query: &str, limit: usize) -> Result<Vec<ChatMessage>> {
+        let query = query.trim();
+        if query.chars().count() < 2 {
+            return Ok(vec![]);
+        }
+        let pattern = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let conn = self.conn();
+        let mut found = conn.prepare_cached(CHAT_SEARCH_SQL)?;
+        let rows = found.query_map(params![workspace_id, pattern, limit as i64], |r| r.get::<_, String>(0))?;
+        decode_all(rows)
+    }
+
     /// One closed request to read again: its newest `limit` messages in the order they were
     /// written, how many it has in all, and the names of the agents who wrote them.
     pub fn closed_transcript(&self, workspace_id: &str, thread: &str, limit: i64) -> Result<ClosedTranscript> {
@@ -1220,6 +1236,12 @@ const CLOSED_TITLE_SQL: &str = "SELECT substr(json_extract(json, '$.text'), 1, 3
 
 /// How many messages one thread holds.
 const CHAT_COUNT_SQL: &str = "SELECT COUNT(*) FROM chat WHERE workspace_id IS ?1 AND thread = ?2";
+
+/// The newest ?3 messages of a workspace whose text is LIKE ?2 (SQLite's LIKE ignores ASCII
+/// case; `\` escapes the query's own `%` and `_`). It reads every message of the workspace:
+/// there is no text index on the chat table.
+const CHAT_SEARCH_SQL: &str = "SELECT json FROM chat
+     WHERE workspace_id IS ?1 AND json_extract(json, '$.text') LIKE ?2 ESCAPE '\\' ORDER BY ts DESC, rowid DESC LIMIT ?3";
 
 fn latest_task_run_sql() -> String {
     format!("{RUN_COLS} WHERE task_id = ?1 AND (?2 IS NULL OR role = ?2) ORDER BY started_at DESC, rowid DESC LIMIT 1")
@@ -1968,5 +1990,58 @@ mod tests {
         assert!(store.kv_delete_if("k", "new").unwrap());
         assert_eq!(store.kv_get("k").unwrap(), None);
         assert!(!store.kv_delete_if("k", "new").unwrap(), "nothing is left to delete");
+    }
+
+    /// One message said in `w` on `thread` at `ts`.
+    fn said(store: &Store, w: &Workspace, thread: &str, author: &str, text: &str, ts: i64) {
+        let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment: None, ts, item_id: None };
+        store.append_event(Some(&w.id), &row(EventKind::Chat { message })).unwrap();
+    }
+
+    // The search reads every message of the office (no text index). Measured once, not kept as a
+    // test: 50,000 messages of ~130 characters in one office, an in-memory database, a debug
+    // build on the 8-CPU build box: 64 ms, for a query with 40 hits, one with none, and one that
+    // every message holds.
+    #[test]
+    fn chats_are_searched_in_open_requests_1on1_chats_and_closed_requests() {
+        let store = Store::open_in_memory().unwrap();
+        let here = ws(&store);
+        let there = Workspace { id: new_id(), repo_path: "/tmp/other".into(), ..here.clone() };
+        store.upsert_workspace(&there).unwrap();
+        said(&store, &here, "lead:a", "user", "Fix the Login page", 1);
+        said(&store, &here, "agent:ada", "ada", "The login form posts twice.", 2);
+        said(&store, &here, "closed:lead:b:900", "lead1", "LOGIN works again.", 3);
+        said(&store, &here, "lead", "user", "Add a dark mode", 4);
+        said(&store, &there, "lead", "user", "login elsewhere", 5);
+        let hits = store.search_chats(&here.id, "login", 40).unwrap();
+        let found: Vec<_> = hits.iter().map(|m| (m.thread.as_str(), m.text.as_str())).collect();
+        // Newest first, whatever the case; the other office's message stays out.
+        assert_eq!(found, vec![("closed:lead:b:900", "LOGIN works again."), ("agent:ada", "The login form posts twice."), ("lead:a", "Fix the Login page")]);
+        assert_eq!(store.search_chats(&here.id, "login", 2).unwrap().len(), 2, "at most `limit`");
+        assert_eq!(store.search_chats(&there.id, "LOGIN", 40).unwrap().len(), 1, "each office has its own");
+    }
+
+    #[test]
+    fn a_chat_search_matches_the_text_only_and_literally() {
+        let store = Store::open_in_memory().unwrap();
+        let w = ws(&store);
+        said(&store, &w, "lead", "user", "Coverage is at 100% now", 1);
+        said(&store, &w, "lead", "user", "rename my_var", 2);
+        said(&store, &w, "lead", "user", "Coverage is at 1000 now", 3);
+        said(&store, &w, "lead", "user", "rename myXvar", 4);
+        said(&store, &w, "lead", "user", r"a path C:\temp", 5);
+        let texts = |q: &str| store.search_chats(&w.id, q, 40).unwrap().into_iter().map(|m| m.text).collect::<Vec<_>>();
+        // `%` and `_` are what they are, not wildcards; so is `\`.
+        assert_eq!(texts("100%"), vec!["Coverage is at 100% now"]);
+        assert_eq!(texts("my_var"), vec!["rename my_var"]);
+        assert_eq!(texts(r"C:\t"), vec![r"a path C:\temp"]);
+        // Not the author, the thread or the JSON keys around the text.
+        assert!(texts("user").is_empty());
+        assert!(texts("lead").is_empty());
+        assert!(texts("thread").is_empty());
+        // Too short to search: nothing, also after the spaces around it go.
+        assert!(texts("a").is_empty());
+        assert!(texts(" a ").is_empty());
+        assert_eq!(texts(" rename ").len(), 2);
     }
 }

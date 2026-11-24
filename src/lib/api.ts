@@ -57,6 +57,7 @@ import type { PreviewSource } from './gen/PreviewSource';
 import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
+import type { ChatMessage } from './gen/ChatMessage';
 import type { CliInfo } from './gen/CliInfo';
 import type { ClosedRequest } from './gen/ClosedRequest';
 import type { ClosedTranscript } from './gen/ClosedTranscript';
@@ -467,6 +468,8 @@ export const api = {
   triples: (entity: string | null = null) => call<Triple[]>('list_triples', { entity }),
   /** Literal, case-insensitive text search across the whiteboard, tasks and memories. */
   exactSearch: (query: string) => call<ExactHit[]>('exact_search', { query }),
+  /** The messages of the open repo whose text holds `query`, newest first (at most 40; fewer than 2 characters find nothing). */
+  searchChats: (query: string) => call<ChatMessage[]>('search_chats', { query }),
   /** Agents and the messages between them (edges by act), from the chats and notes Codly recorded. */
   messageGraph: () => call<MessageGraph>('message_graph'),
   /** An agent's memory file (a starter template until first saved); the core confines it to its memory folder. */

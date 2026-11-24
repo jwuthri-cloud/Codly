@@ -5,14 +5,35 @@
   Matches are painted with the CSS highlight API, which changes nothing in the page (where the
   webview has none, the paragraph of the current match gets an outline). History that is not
   loaded is not searched: the bar says so and offers to load it. Work folded into one line is
-  searched by that line.
+  searched by that line. With no match here, "Search all conversations" asks the palette; a
+  message found there opens its conversation with this bar on the same text.
 -->
+<script module lang="ts">
+  import { ui } from '../lib/state/ui.svelte';
+
+  /** The text the next find bar starts with (`findInConversation`). */
+  let seed: string | null = null;
+
+  /** Open the find bar on `text`, in the conversation on screen. It goes to the first match as
+   *  soon as one is on screen: the conversation may still be loading. */
+  export function findInConversation(text: string) {
+    seed = text;
+    ui.openFind();
+  }
+
+  function takeSeed(): string | null {
+    const s = seed;
+    seed = null;
+    return s;
+  }
+</script>
+
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import { store } from '../lib/state/store.svelte';
-  import { ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
   import { findMatches, stepMatch, type Piece } from './find';
+  import { SAID_FROM } from '../overlays/palette';
 
   interface Props {
     /** The conversation on screen: a thread, or a closed request. */
@@ -36,7 +57,11 @@
   /** Safari 17.2 and later; null on an older webview. */
   const registry = typeof CSS !== 'undefined' && 'highlights' in CSS ? CSS.highlights : null;
 
-  let query = $state('');
+  const first = takeSeed();
+  let query = $state(first ?? '');
+  /** The text came from the palette: go to its first match as soon as one is on screen, also
+   *  when the conversation shows only after the search (a closed request loads). */
+  let seeking = first !== null;
   let input: HTMLInputElement | undefined = $state();
   /** The matches, in the page's order (ranges follow the page as it changes). */
   let ranges: Range[] = [];
@@ -134,6 +159,10 @@
     }
     total = ranges.length;
     if (!total) more = false;
+    if (seeking && total) {
+      seeking = false;
+      jump = true;
+    }
     if (jump && root) current = firstInView(root);
     else {
       const same = was ? ranges.findIndex((r) => r.startContainer === was.startContainer && r.startOffset === was.startOffset) : -1;
@@ -191,9 +220,14 @@
     };
   });
 
-  // ⌘F again: back in the field, with its text selected.
+  // ⌘F again: back in the field, with its text selected; from the palette, with its text.
   $effect(() => {
     void ui.findFocus;
+    const s = takeSeed();
+    if (s !== null) {
+      query = s;
+      seeking = true;
+    }
     tick().then(() => {
       input?.focus();
       input?.select();
@@ -243,6 +277,7 @@
     <Icon name="search" size={14} />
     <input bind:this={input} bind:value={query} onkeydown={key} placeholder="Find in this conversation" aria-label="Find in this conversation" spellcheck="false" autocomplete="off" />
     <span class="count num" aria-live="polite">{#if query}{total ? `${current + 1} of ${total}${more ? '+' : ''}` : 'No matches'}{/if}</span>
+    {#if query.trim().length >= SAID_FROM && !total}<button class="btn ghost sm" onclick={() => ui.openPalette(query.trim())}>Search all conversations</button>{/if}
     <button class="icon-btn sm" disabled={!total} onclick={() => step(-1)} aria-label="Previous match" data-tip="Previous match" data-tip-kbd="⇧↵"><Icon name="chevron-up" size={14} /></button>
     <button class="icon-btn sm" disabled={!total} onclick={() => step(1)} aria-label="Next match" data-tip="Next match" data-tip-kbd="↵"><Icon name="chevron-down" size={14} /></button>
     <button class="icon-btn sm" onclick={close} aria-label="Close find" data-tip="Close" data-tip-kbd="Esc"><Icon name="x" size={14} /></button>

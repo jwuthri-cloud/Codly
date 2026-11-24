@@ -91,6 +91,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::recent_workspaces,
             commands::list_repos,
             commands::exact_search,
+            commands::search_chats,
             commands::message_graph,
             commands::memory_file,
             commands::save_memory_file,
@@ -159,6 +160,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     }
     assert!(invoke(&wv, "list_accounts", json!({})).is_err(), "refresh is required");
 
+    // "Said in conversations" needs an open repo, and says so.
+    let e = invoke(&wv, "search_chats", json!({ "query": "login" })).unwrap_err();
+    assert!(e.to_string().contains("open a repository first"), "{e}");
     let ws = invoke(&wv, "open_workspace", json!({ "repoPath": repo.to_str().unwrap() })).unwrap();
     assert_eq!(ws["name"], "repo");
 
@@ -241,6 +245,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     // Find / Files / Messages lenses: the memory just made is found by its words; no path escapes.
     let hits = invoke(&wv, "exact_search", json!({ "query": "PNPM" })).unwrap();
     assert!(hits.as_array().unwrap().iter().any(|h| h["kind"] == "memory"), "{hits}");
+    // Nothing was said in this office yet; a query that short searches nothing anyway.
+    assert_eq!(invoke(&wv, "search_chats", json!({ "query": "pnpm" })).unwrap(), json!([]));
+    assert_eq!(invoke(&wv, "search_chats", json!({ "query": "p" })).unwrap(), json!([]));
     let graph = invoke(&wv, "message_graph", json!({})).unwrap();
     assert!(graph["nodes"].is_array() && graph["edges"].is_array(), "{graph}");
     assert!(invoke(&wv, "memory_file", json!({ "agentId": "../../etc/passwd" })).is_err());

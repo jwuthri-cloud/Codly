@@ -14,7 +14,7 @@ fn main() {
         "list_memories", "add_memory", "delete_memory", "list_triples", "repo_map", "read_artifact", "keep_plan", "pin_memory", "pty_open", "pty_attach", "pty_write",
         "pty_resize", "pty_close",
         "dictation_status", "dictation_configure", "dictation_save_key", "dictation_clear_key", "dictation_transcribe",
-        "exact_search", "message_graph", "memory_file", "save_memory_file",
+        "exact_search", "search_chats", "message_graph", "memory_file", "save_memory_file",
         "list_blockers", "answer_blocker", "dismiss_blocker",
         "inbound_state", "inbound_create_webhook", "inbound_set_webhook", "inbound_revoke_webhook", "inbound_set_settings", "inbound_set_slack",
         "hire_review", "hire_launch_preview", "hire_draft_prompt", "hire_from_manifest", "hire_applicants", "pick_applicant", "export_agent", "export_office", "ghosts", "bring_back", "let_go", "offices", "transfer_agent", "office_shop", "office_place", "office_sell", "office_lot", "office_save_lot", "lots", "lot_of", "buy_lot", "sell_lot", "move_office", "close_office",

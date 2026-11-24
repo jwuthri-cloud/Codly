@@ -68,6 +68,7 @@ import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import type { MockApprovalRules } from './demo/approvalRules';
 import { repoMap } from './demo/repomap';
+import { searchDemoChats } from './demo/chatSearch';
 import { HOME, REPO, Sim } from './demo/sim';
 import { MockControls } from './demo/controls';
 import { demoCatalog } from './demo/models';
@@ -714,6 +715,10 @@ export class MockTransport implements Transport {
       }
       case 'exact_search':
         return exactSearch(String(a.query ?? ''), [...sim.tasks.values()], [...sim.memories.values()]);
+      case 'search_chats':
+        if (!sim.workspace) throw new Error('open a repository first');
+        // A closed request's messages are under its archive thread, as in the core.
+        return searchDemoChats([...this.desk.closed.flatMap((c) => c.messages.map((m) => ({ ...m, thread: c.thread }))), ...sim.chats], String(a.query ?? ''));
       case 'message_graph':
         return buildMessageGraph([...sim.agents.values()], sim.chats, [...sim.memories.values()], [...sim.tasks.values()]);
       case 'memory_file':

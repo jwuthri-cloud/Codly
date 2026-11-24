@@ -218,6 +218,7 @@ pub fn run() {
             ide_commands::ide_changes,
             ide_commands::ide_diff,
             commands::exact_search,
+            commands::search_chats,
             commands::message_graph,
             commands::memory_file,
             commands::save_memory_file,

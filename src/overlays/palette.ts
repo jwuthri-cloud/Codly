@@ -2,7 +2,8 @@
 // answer an approval): the first Enter or click only arms the row and shows what it will do, the
 // second one runs it. Any other key, or a different row, disarms. A held ↵ and a double-click
 // are one decision, not two: their repeats do nothing on such a row. Also the rows built from
-// the store's requests and the group "This agent", away from the component so they can be tested.
+// the store's requests, the group "This agent" and the group "Said in conversations", away from
+// the component so they can be tested.
 import { agentCommands, type AgentDo, type SlashContext } from '../home/composerActions';
 import { filterSlash } from '../home/composerMenu';
 import type { ApprovalSubject } from '../lib/gen/ApprovalSubject';
@@ -11,7 +12,8 @@ import { permissionsAsked } from '../lib/util/permissionsAsked';
 import { showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
 import { fuzzy } from '../lib/util/fuzzy';
-import { clean } from '../lib/util/sanitize';
+import { clean, oneLine } from '../lib/util/sanitize';
+import { isClosedThread, isRequestThread, threadAgentId } from '../lib/state/ui.svelte';
 
 /**
  * `armed`: the id of the row waiting for its second Enter (null: none). `again`: this press is
@@ -26,23 +28,61 @@ export function press(row: { id: string; confirm?: string }, armed: string | nul
 
 /**
  * The rows that match `q`, best first: a row whose title matches comes before every row that
- * matches only by its description ("merge" offers "Merge into main" before "Go to Knowledge",
- * whose description mentions merges). Within each group, by score; a recent row gets a small
- * lift. `hits`: the title's matched letters (none for a description match).
+ * matches only by its search words (`words`: "merge" finds the Changes room), and those before
+ * every row that matches only by its description ("merge" offers "Merge into main" before "Go
+ * to Knowledge", whose description mentions merges). Within each group, by score; a recent row
+ * gets a small lift. `hits`: the title's matched letters (none for another match). `titleOnly`:
+ * the title alone counts (an agent is found by its name, not by what it is doing).
  */
-export function rankRows<T extends { id: string; title: string; sub?: string }>(list: T[], q: string, recents: string[], limit: number): (T & { hits: number[] })[] {
+export function rankRows<T extends { id: string; title: string; sub?: string; words?: string }>(list: T[], q: string, recents: string[], limit: number, titleOnly = false): (T & { hits: number[] })[] {
   const lift = (r: T) => (recents.includes(r.id) ? 2 : 0);
   return list
     .map((r) => {
       const title = fuzzy(q, r.title);
-      const sub = !title && r.sub ? fuzzy(q, r.sub) : null;
-      return { r, byTitle: !!title, score: (title ?? sub)?.score ?? 0, hits: title?.hits ?? [], hit: !!(title ?? sub) };
+      const words = !title && !titleOnly && r.words ? fuzzy(q, r.words) : null;
+      const sub = !title && !words && !titleOnly && r.sub ? fuzzy(q, r.sub) : null;
+      const match = title ?? words ?? sub;
+      return { r, tier: title ? 2 : words ? 1 : 0, score: match?.score ?? 0, hits: title?.hits ?? [], hit: !!match };
     })
     .filter((x) => x.hit)
-    .sort((a, b) => Number(b.byTitle) - Number(a.byTitle) || b.score + lift(b.r) - (a.score + lift(a.r)))
+    .sort((a, b) => b.tier - a.tier || b.score + lift(b.r) - (a.score + lift(a.r)))
     .slice(0, limit)
     .map((x) => ({ ...x.r, hits: x.hits }));
 }
+
+/** Search words of the rooms' "Go to" rows, beside their titles. */
+export const ROOM_WORDS: Partial<Record<string, string>> = { changes: 'merge diff review' };
+
+/** The CLIs in the order the Add agent wizard lists them (AddAgentWizard.svelte): Claude Code first. */
+export const CLI_ORDER: readonly Provider[] = ['claude', 'codex', 'gemini', 'opencode', 'cursor', 'copilot'];
+
+/** `clis` in `CLI_ORDER`; a CLI it does not name goes last, in the order it came. */
+export function inCliOrder<T extends { provider: string }>(clis: T[]): T[] {
+  const at = (c: T) => {
+    const i = CLI_ORDER.indexOf(c.provider as Provider);
+    return i < 0 ? CLI_ORDER.length : i;
+  };
+  return [...clis].sort((a, b) => at(a) - at(b));
+}
+
+/**
+ * What Esc does in the palette once no row waits for its second ↵: in a scope ("@", ">"…) with
+ * text, the text goes and the scope stays; otherwise the palette closes.
+ */
+export const escStep = (scope: string | null, query: string): 'clear' | 'close' => (scope && query ? 'clear' : 'close');
+
+/**
+ * The question a row asks before it runs, if any (see `press`). `askFirst`: asked only when ↵
+ * took the row, never when it was clicked ("Ask the Lead…" when nothing else matched: free text
+ * and ↵ must not start a paid turn by accident). ⌘↵ runs the row's other action, which never
+ * needs that question.
+ */
+export function guard(row: { confirm?: string; askFirst?: string }, byKey: boolean, alt: boolean): string | undefined {
+  return row.confirm ?? (byKey && !alt ? row.askFirst : undefined);
+}
+
+/** The question of "Ask the Lead…" when it is the only row (`others`: the rows above it). */
+export const askFirst = (others: number): string | undefined => (others ? undefined : 'Send this to the Lead? It starts a turn of the Lead.');
 
 /** Whether the last row "Ask the Lead: …" is offered: for a query, with no scope or in commands,
  *  and only on a request (in a 1:1 there is no Lead you are talking to). */
@@ -121,4 +161,82 @@ export function agentGroup(c: SlashContext, on: AgentDo): AgentRow[] {
     icon: r.icon,
     ...('off' in r ? { sub: r.off } : { sub: r.hint, run: r.run }),
   }));
+}
+
+/** The group of messages that hold the query, under the commands. */
+export const SAID = 'Said in conversations';
+/** How many messages the group shows. */
+export const SAID_MOST = 6;
+/** The shortest query the group searches for. */
+export const SAID_FROM = 3;
+
+/** What `saidWhere` and `saidBy` know of the office. Null: not known. */
+export type SaidNames = {
+  /** A request's first message from you. */
+  request: (thread: string) => string | null;
+  /** A closed request's title (`closed_requests`). */
+  closed: (thread: string) => string | null;
+  agent: (id: string) => string | null;
+};
+
+/** The start of `text` on one line, cut at a word border near `max` characters. */
+export function firstWords(text: string, max = 40): string {
+  const line = clean(text).replace(/\s+/g, ' ').trim();
+  if (line.length <= max) return line;
+  const cut = line.lastIndexOf(' ', max);
+  return `${line.slice(0, cut > max / 2 ? cut : max).trimEnd()}…`;
+}
+
+/** Where a message was said, from its thread. A request with no message from you is its Lead's. */
+export function saidWhere(thread: string, names: SaidNames): string {
+  if (isClosedThread(thread)) {
+    const title = names.closed(thread);
+    return title ? `Closed request: ${firstWords(title)}` : 'Closed request';
+  }
+  const agent = threadAgentId(thread);
+  if (agent) return `1:1 with ${names.agent(agent) ?? 'an agent'}`;
+  const title = isRequestThread(thread) ? names.request(thread) : null;
+  return title ? `Request: ${firstWords(title)}` : 'Lead';
+}
+
+/** Who said it: you, Codly, or an agent by its name. */
+export function saidBy(author: string, names: SaidNames): string {
+  if (author === 'user') return 'You';
+  if (author === 'codly') return 'Codly';
+  return names.agent(author) ?? 'An agent';
+}
+
+/** Lower case for ASCII letters only, as the core's search compares: the length never changes. */
+const fold = (s: string) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+
+/**
+ * One line of `text` around the first place that holds `q` (ASCII case aside): only the line of
+ * the message the hit is on (a hit in a code block keeps that one line), cut at word borders to
+ * about `width` characters, with "…" where it was cut. `hits`: the letters of the hit in `line`;
+ * none when the text does not hold `q`.
+ */
+export function snippet(text: string, q: string, width = 72): { line: string; hits: number[] } {
+  const t = clean(text).replace(/[\t\r]/g, ' ');
+  const at = q ? fold(t).indexOf(fold(q)) : -1;
+  if (at < 0) return { line: oneLine(t, width), hits: [] };
+  const lineStart = t.lastIndexOf('\n', at) + 1;
+  const lineEnd = t.indexOf('\n', at + q.length);
+  const raw = t.slice(lineStart, lineEnd < 0 ? t.length : lineEnd);
+  const line = raw.trimStart();
+  const pos = at - lineStart - (raw.length - line.length);
+  const end = line.trimEnd().length;
+  // `width` characters around the hit, a third of the room left before it.
+  let from = Math.max(0, Math.min(pos - Math.floor(Math.max(0, width - q.length) / 3), end - width));
+  let to = Math.min(end, Math.max(from + width, pos + q.length));
+  if (from > 0 && line[from - 1] !== ' ') {
+    const space = line.indexOf(' ', from);
+    if (space >= 0 && space < pos) from = space + 1;
+  }
+  if (to < end && line[to] !== ' ') {
+    const space = line.lastIndexOf(' ', to);
+    if (space >= pos + q.length) to = space;
+  }
+  const head = from > 0 ? '…' : '';
+  const start = head.length + pos - from;
+  return { line: `${head}${line.slice(from, to).trimEnd()}${to < end ? '…' : ''}`, hits: Array.from({ length: q.length }, (_, i) => start + i) };
 }

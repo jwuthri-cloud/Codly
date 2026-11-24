@@ -526,6 +526,13 @@ pub async fn exact_search(state: State<'_, AppState>, query: String) -> R<Vec<co
     state.core().await?.exact_search(&query).await.map_err(err)
 }
 
+/// The messages of the open repo whose text holds `query`, newest first (the palette's "Said
+/// in conversations").
+#[tauri::command]
+pub async fn search_chats(state: State<'_, AppState>, query: String) -> R<Vec<ChatMessage>> {
+    state.core().await?.search_chats(&query).await.map_err(err)
+}
+
 /// Agents, and the messages between them by act (the Messages lens).
 #[tauri::command]
 pub async fn message_graph(state: State<'_, AppState>) -> R<codly_core::memory::panel::MessageGraph> {
