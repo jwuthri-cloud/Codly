@@ -9,11 +9,6 @@ from drv import OUT, CLAUDE, clean_env
 from r6_lib import raw
 
 
-def line_times(s, since, pred):
-    """Time stamps (seconds since the spawn) of every stdout line at or after `since` that matches."""
-    return [r["t"] for r in raw(s) if r["dir"] == "recv" and r["t"] >= since and isinstance(r["msg"], dict) and pred(r["msg"])]
-
-
 def last_sent(s):
     """Time stamp of the last line the host wrote."""
     t = [r["t"] for r in raw(s) if r["dir"] == "send"]

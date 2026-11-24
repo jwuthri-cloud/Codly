@@ -1,6 +1,7 @@
 """raw/<scenario>.ndjson -> fixtures/<scenario>.ndjson (sanitized for a public repo).
 
 Usage: python3 sanitize.py [raw file ...]      (default: every file in $CAPTURE_DIR/raw)
+       python3 sanitize.py --refresh <fixture ...>   (applies the newer file-name rule, machine_names(), to fixtures in place)
 Environment: CAPTURE_DIR (folder with raw/, fixtures/, work/; default: the parent of this folder),
              FIXTURES_DIR (where to write; default: $CAPTURE_DIR/fixtures),
              CLI_VERSION (text for the first line of each fixture; default: what `claude --version` prints),
@@ -32,7 +33,10 @@ HOOK_GONE = "<removed: output of a hook of the recording machine>"
 DOC_NAME = os.environ.get("DOC_NAME", "the document next to the fixtures")
 # MCP servers the scenarios themselves configure. Every other server name is this machine's and is removed.
 OWN_MCP = ("exits-at-once", "no-such-command", "needs-login", "ping-project",
-           "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user", "ping-live", "ping-http", "ping-local")
+           "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user", "ping-live", "ping-http", "ping-local",
+           "plugin:ping-plugin:ping-plugged", "plugin_ping-plugin_ping-plugged")
+# Plugins the scenarios themselves install (in a throw-away HOME). Every other plugin is this machine's and is removed.
+OWN_PLUGINS = ("ping-plugin",)
 
 
 def cli_version():
@@ -146,7 +150,7 @@ def transform(v, ids, sig, key=None):
     if d.get("type") == "system" and d.get("subtype") == "init":
         d["slash_commands"] = keep_commands(d.get("slash_commands", []))
         d["skills"] = []
-        d["plugins"] = []
+        d["plugins"] = [p for p in d.get("plugins", []) if isinstance(p, dict) and p.get("name") in OWN_PLUGINS]
         d["agents"] = [a for a in d.get("agents", []) if a == "general-purpose"]
         if "terminal_slash_commands" in d:
             d["terminal_slash_commands"] = d["terminal_slash_commands"][:1]
@@ -194,6 +198,15 @@ def transform(v, ids, sig, key=None):
     return {k: transform(x, ids, sig, k) for k, x in d.items()}
 
 
+def machine_names(s):
+    """File names that the CLI makes from a process id, a hash or the clock (they say nothing about the protocol and
+    differ on every machine): its session lock files, the backups of ~/.claude.json, the MCP log files."""
+    s = re.sub(r"sessions/\d+\.[0-9a-f]{64}\.key", "sessions/<pid>.<hash>.key", s)
+    s = re.sub(r"sessions/\d+\.json", "sessions/<pid>.json", s)
+    s = re.sub(r"\.claude\.json\.backup\.\d{10,}", ".claude.json.backup.<time>", s)
+    return re.sub(r"(mcp-logs-[^/\"]+/)\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z\.jsonl", r"\1<time>.jsonl", s)
+
+
 def scrub(s, ids, name_map):
     u = re.escape(USER)
     for p in WORK_DASHED:
@@ -217,7 +230,7 @@ def scrub(s, ids, name_map):
     s = re.sub(r"\b(?:srv)?toolu_[A-Za-z0-9]{10,}", lambda m: ids.get(m.group(0), "toolu"), s)
     s = re.sub(r"\breq_[A-Za-z0-9]{10,}", lambda m: ids.get(m.group(0), "apireq"), s)
     s = UUID_RE.sub(lambda m: m.group(0) if m.group(0) == ZERO_UUID else ids.get(m.group(0), "uuid"), s)
-    return s
+    return machine_names(s)
 
 
 def rechunk_stream_deltas(recs, ids):
@@ -311,7 +324,22 @@ LEGACY_TIME_MARKS = bool(os.environ.get("LEGACY_TIME_MARKS"))  # set it to rebui
 TODAY = datetime.date.today().isoformat()
 RECORDED = {}
 
+def refresh(path):
+    """Apply machine_names() to a fixture that was sanitized before that rule existed (its raw file is gone)."""
+    lines = open(path).read().splitlines()
+    out = [machine_names(l) for l in lines]
+    for l in out:
+        json.loads(l)
+    with open(path, "w") as f:
+        f.write("\n".join(out) + "\n")
+    return sum(1 for a, b in zip(lines, out) if a != b)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--refresh"]:
+        for p in sys.argv[2:]:
+            print("%-50s %3d lines changed" % (os.path.basename(p), refresh(p)))
+        sys.exit(0)
     VERSION = cli_version()
     paths = sys.argv[1:] or sorted(glob.glob(os.path.join(OUT, "raw", "*.ndjson")))
     RECORDED = {p: datetime.date.fromtimestamp(os.path.getmtime(p)).isoformat() for p in paths}

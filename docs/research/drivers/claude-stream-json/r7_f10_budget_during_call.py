@@ -37,7 +37,7 @@ TURN = ("Do these steps in order. 1) Use the Agent tool with run_in_background s
         "`echo go; sleep 61.5` in the foreground with a timeout of 120000 ms. 3) Then reply with the single word: done")
 PRICE = {"input_tokens": 0.1e-6, "output_tokens": 0.5e-6, "cache_read_input_tokens": 0.01e-6, "ephemeral_5m_input_tokens": 0.125e-6,
          "ephemeral_1h_input_tokens": 0.2e-6}
-sleeps = Procs("[s]leep 61.5")
+sleeps = Procs("sleep 61.5")
 
 
 def request_cost(u):

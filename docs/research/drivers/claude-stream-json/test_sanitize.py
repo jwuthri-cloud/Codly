@@ -48,6 +48,26 @@ class Sanitize(unittest.TestCase):
         self.assertEqual(out["mcp_servers"], [{"name": "ping-user"}])
         self.assertEqual(out["tools"], ["Bash", "mcp__ping-user__ping"])
 
+    def test_init_keeps_only_the_scenarios_plugin(self):
+        init = {"type": "system", "subtype": "init", "plugins": [{"name": "ping-plugin", "source": "ping-plugin@codly-test-market"},
+                                                                 {"name": "my-own-plugin", "path": "/x"}, "a-plain-name"],
+                "mcp_servers": [{"name": "plugin:ping-plugin:ping-plugged"}, {"name": "plugin:my-own-plugin:srv"}],
+                "tools": ["mcp__plugin_ping-plugin_ping-plugged__ping", "mcp__plugin_my-own-plugin_srv__x"]}
+        out = clean(init)
+        self.assertEqual(out["plugins"], [{"name": "ping-plugin", "source": "ping-plugin@codly-test-market"}])
+        self.assertEqual(out["mcp_servers"], [{"name": "plugin:ping-plugin:ping-plugged"}])
+        self.assertEqual(out["tools"], ["mcp__plugin_ping-plugin_ping-plugged__ping"])
+
+    def test_machine_made_file_names_are_replaced(self):
+        note = ('{"files_changed":["h/.claude.json","h/.claude/backups/.claude.json.backup.1795472505724",'
+                '"h/.claude/sessions/13447.' + "cb" * 32 + '.key","h/.claude/sessions/13447.json",'
+                '"h/Library/Caches/claude-cli-nodejs/-tmp-work-x/mcp-logs-ping-live/2026-11-23T22-21-45-801Z.jsonl","x/started.txt"]}')
+        out = sanitize.machine_names(note)
+        self.assertEqual(out, '{"files_changed":["h/.claude.json","h/.claude/backups/.claude.json.backup.<time>",'
+                              '"h/.claude/sessions/<pid>.<hash>.key","h/.claude/sessions/<pid>.json",'
+                              '"h/Library/Caches/claude-cli-nodejs/-tmp-work-x/mcp-logs-ping-live/<time>.jsonl","x/started.txt"]}')
+        self.assertEqual(sanitize.scrub(note, sanitize.Ids(), None), out)
+
 
 if __name__ == "__main__":
     unittest.main()

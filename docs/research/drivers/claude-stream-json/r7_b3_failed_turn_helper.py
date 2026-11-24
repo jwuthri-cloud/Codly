@@ -15,7 +15,7 @@ from drv import Session
 from r5_lib import Procs, open_tasks, results, task_started
 from r6_lib import is_result, kinds, system, tool_call, wait_alive
 run = sys.argv[1] if len(sys.argv) > 1 else "1"
-helper = Procs("[s]leep 41")
+helper = Procs("sleep 41")
 s = Session("r7-failed-turn-helper-%s" % run, extra=["--tools", "Bash,Agent", "--max-turns", "2"], hard_timeout=240)
 s.user("Use the Agent tool with run_in_background set to true to have a subagent run the Bash command "
        "`echo begin; sleep 41; echo end` and report its output. Do not wait for the subagent: right after starting it, "

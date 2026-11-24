@@ -19,7 +19,7 @@ cwd = make_repo(name)
 script = "tick_%s.sh" % variant.replace("-", "_")
 with open(os.path.join(cwd, script), "w") as f:
     f.write("while true; do date +%s >> ticks.log; sleep 1; done\n")
-ticks = Procs("[t]ick_%s.sh" % variant.replace("-", "_"))
+ticks = Procs("tick_%s.sh" % variant.replace("-", "_"))
 system = "You are a worker in a team of coding agents. When your task is done, end your turn with a short report."
 if variant.startswith("rule"):
     system += " " + RULE

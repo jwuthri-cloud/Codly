@@ -19,7 +19,7 @@ from r6_lib import answer_to, is_init, is_result, kinds, sent_at, stamps, system
 variant = sys.argv[1] if len(sys.argv) > 1 else "two"
 run = sys.argv[2] if len(sys.argv) > 2 else "1"
 s = Session("r7-interrupt-%s-%s" % ("two-helpers" if variant == "two" else "helper-model", run), extra=["--tools", "Bash,Agent"], hard_timeout=200)
-a, b = Procs("[s]leep 181"), Procs("[s]leep 191")
+a, b = Procs("sleep 181"), Procs("sleep 191")
 
 
 def helper_ids():
@@ -40,7 +40,6 @@ else:
            "lighthouse keeper, using no tools at all, and report the story. Do not wait for the subagent: right after starting it, "
            "reply with the single word: started")
     t = task_started(s, task_type="local_agent")
-    tool_use_id = t and t.get("tool_use_id")
     print("result 1:", s.wait_results(1, 60))
     time.sleep(1.5)
     how = "1.5 s after the result of turn 1"
