@@ -23,7 +23,7 @@ use serde_json::json;
 
 use super::merge_conflict::{self, NOT_COMMITTED, REVIEW, next_key};
 use super::pull_request::{PrSource, PrState};
-use super::{Inner, prompts};
+use super::{Inner, chat_row, prompts, row};
 use crate::git::name_list;
 use crate::model::*;
 
@@ -197,31 +197,37 @@ impl Inner {
         let untracked = self.git.untracked(&wt).await?;
         let task = review_task(&plan, next_key(&tasks, REVIEW), comments, scope, verify, writer.as_ref().map(|(a, _)| a.id.clone()), &branch, &wt);
         let ws_id = Some(ws.id.as_str());
-        self.add_in_place(ws_id, &plan, &task, &before, untracked)?;
         let who = writer.as_ref().map(|(agent, wrote)| (agent.name.as_str(), wrote.key.as_str()));
-        if let Err(e) = self.say_sent_back(ws_id, &plan, &task, who, comments, files) {
-            // It never started: it does not wait in a finished plan, and the record of where the
-            // plan stood goes with it, so that no later pass takes anything back for it.
-            if let Err(undo) = self.cancel_in_place(ws_id, &plan, &task.id) {
-                tracing::warn!("task {} of plan {} could not be cancelled after its start failed: {undo:#}", task.key, plan.id);
-            }
-            return Err(e);
-        }
+        self.start_sent_back(ws_id, &plan, &task, &before, untracked, who, comments, files)?;
         drop(_g);
         self.kick();
         self.task(&task.id)
     }
 
-    /// The records of a plan sent back with review comments, and then the plan runs again: it
-    /// finishes when the new task is done. `who`: the agent the task is for, and the task of the
-    /// plan it did.
-    fn say_sent_back(&self, ws_id: Option<&str>, plan: &Plan, task: &Task, who: Option<(&str, &str)>, comments: &str, files: &[String]) -> Result<()> {
+    /// The plan sent back with review comments, in one store transaction: the task and the
+    /// record of where the plan stands (`add_in_place_tx`), the decision, Codly's line with your
+    /// comments, and then the plan runs again: it finishes when the new task is done. A write
+    /// that fails leaves none of them, so no later pass takes anything back for a task that
+    /// never ran. `who`: the agent the task is for, and the task of the plan it did.
+    #[allow(clippy::too_many_arguments)]
+    fn start_sent_back(
+        &self,
+        ws_id: Option<&str>,
+        plan: &Plan,
+        task: &Task,
+        before: &str,
+        untracked: Vec<String>,
+        who: Option<(&str, &str)>,
+        comments: &str,
+        files: &[String],
+    ) -> Result<()> {
         let summary = match who {
             Some((name, _)) => format!("you sent the plan back with review comments: task {} for {name}", task.key),
             None => format!("you sent the plan back with review comments: task {}", task.key),
         };
         let detail = json!({ "plan_id": plan.id, "files": files, "assignee": task.assignee });
-        self.decide_by(ws_id, Some(&task.id), "review", "human", summary, detail)?;
+        let decision =
+            EventKind::Decision { id: new_id(), decision_type: "review".into(), method: "human".into(), summary, detail };
         let said = match who {
             Some((name, wrote)) => format!(
                 "Your review comments are task {} of this plan, for {name} (who wrote {wrote}): it works in the plan's worktree, \
@@ -238,13 +244,26 @@ impl Inner {
         // not as a message of yours: your last own words in a request are what lets its Lead go
         // on after a message from outside Codly (`Store::since_user`), and these say nothing
         // about such a message.
-        self.chat(ws_id, &plan.thread, "codly", &format!("{said}\n\nWhat you sent:\n\n{comments}"), None)?;
-        // It builds on what it built on before: its diff is still the plan's work only.
-        self.update_plan(&plan.id, |p| {
-            p.status = PlanStatus::Running;
-            Ok(())
-        })
-        .map(drop)
+        let line = chat_row(&plan.thread, "codly", &format!("{said}\n\nWhat you sent:\n\n{comments}"), None, None);
+        let rows = self.store.tx(|tx| {
+            let mut rows = vec![merge_conflict::add_in_place_tx(tx, ws_id, plan, task, before, untracked)?];
+            rows.push(row(None, Some(&task.id), None, decision));
+            rows.push(line);
+            // It builds on what it built on before: its diff is still the plan's work only.
+            let json: String = tx.query_row("SELECT json FROM plan WHERE id = ?1", [&plan.id], |r| r.get(0))?;
+            let mut running: Plan = serde_json::from_str(&json)?;
+            running.status = PlanStatus::Running;
+            running.updated_at = now_ms();
+            rows.push(row(None, None, None, EventKind::PlanChanged { plan: running }));
+            for ev in &mut rows[1..] {
+                ev.id = crate::store::insert_event(tx, ws_id, ev)?;
+            }
+            Ok(rows)
+        })?;
+        for ev in &rows {
+            self.publish(ws_id, ev);
+        }
+        Ok(())
     }
 
     /// The agent that did the plan's finished task which changed most of `files` (by the

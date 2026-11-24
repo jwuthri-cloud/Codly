@@ -441,28 +441,28 @@ async fn a_review_task_that_does_not_finish_leaves_the_plan_as_it_was() {
     core.shutdown().await;
 }
 
-/// Send back fails after its task was added: Codly's line with your comments cannot be written.
-/// The task is cancelled and its record goes with it, so the next merge attempt takes nothing
-/// back: a file that came into the plan's worktree since stays, and Codly says nothing about
-/// changes that never ran.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_send_back_that_fails_leaves_nothing_behind() {
+/// Send back fails at one of its writes (`refused`: the store write refused, in SQL). It is one
+/// store transaction, so nothing of it is left: no task, no record of where the plan stood, and
+/// the plan is done as it was. So the next merge attempt takes nothing back: a file that came
+/// into the plan's worktree since stays, and Codly says nothing about changes that never ran.
+async fn a_send_back_that_fails_leaves_nothing_behind(refused: &str) {
     let dir = tempfile::tempdir().unwrap();
     let (core, repo, plan, _) = finished_plan(dir.path(), REVIEWED, Default::default()).await;
     let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
     let db = store(dir.path());
-    // The store refuses that line, as a full disk would.
-    db.execute_batch("CREATE TRIGGER no_review_line BEFORE INSERT ON chat WHEN NEW.json LIKE '%What you sent:%' BEGIN SELECT RAISE(ABORT, 'disk full'); END;")
-        .unwrap();
+    // The store refuses that write, as a full disk would.
+    db.execute_batch(&format!("CREATE TRIGGER refused BEFORE {refused} BEGIN SELECT RAISE(ABORT, 'disk full'); END;")).unwrap();
     let err = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap_err();
     assert!(format!("{err:#}").contains("disk full"), "{err:#}");
-    db.execute_batch("DROP TRIGGER no_review_line;").unwrap();
-    let review = task(&core, "review").await;
-    assert_eq!((review.status, review.status_reason.as_deref()), (TaskStatus::Cancelled, Some("Codly could not start it")));
+    db.execute_batch("DROP TRIGGER refused;").unwrap();
+    let snap = core.snapshot().await.unwrap();
+    assert!(!snap.tasks.iter().any(|t| t.key.starts_with("review")), "no review task is left");
     let key = format!("resolution:{}", plan.id);
     let left: Option<String> = db.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get(0)).optional().unwrap();
     assert_eq!(left, None, "no record of the task is left");
-    assert_eq!(core.snapshot().await.unwrap().plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Done);
+    assert_eq!(snap.plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Done);
+    assert!(!said(&core, "lead", "codly").await.iter().any(|l| l.contains("What you sent:")));
+    assert!(!decisions(&core).await.iter().any(|d| d.contains("sent the plan back")));
 
     // Later: a new file in the plan's worktree, and a merge that conflicts with your branch.
     std::fs::write(integ_wt.join("notes.txt"), "mine\n").unwrap();
@@ -470,10 +470,22 @@ async fn a_send_back_that_fails_leaves_nothing_behind() {
     core.merge_plan(&plan.id).await.unwrap_err();
     assert_eq!(std::fs::read_to_string(integ_wt.join("notes.txt")).unwrap(), "mine\n", "the new file stays");
     let lines = said(&core, "lead", "codly").await;
-    assert!(!lines.iter().any(|l| l.contains("were not finished")), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("were not finished") || l.contains("was not resolved")), "{lines:?}");
     let record = decisions(&core).await;
     assert!(!record.iter().any(|d| d.contains("did not finish")), "{record:?}");
     core.shutdown().await;
+}
+
+/// The last write of the record (Codly's line with your comments) is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_back_whose_line_cannot_be_written_leaves_nothing_behind() {
+    a_send_back_that_fails_leaves_nothing_behind("INSERT ON chat WHEN NEW.json LIKE '%What you sent:%'").await;
+}
+
+/// The write of the task itself is refused, after the record of where the plan stood.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_back_whose_task_cannot_be_written_leaves_nothing_behind() {
+    a_send_back_that_fails_leaves_nothing_behind("INSERT ON event WHEN NEW.type = 'task_changed' AND NEW.payload LIKE '%\"key\":\"review\"%'").await;
 }
 
 /// The store of the core in `root`, opened beside it.

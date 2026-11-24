@@ -120,6 +120,38 @@ fn resolution_key(plan_id: &str) -> String {
     format!("resolution:{plan_id}")
 }
 
+impl Resolution {
+    /// The record of where `plan` stands when `task` starts on its own branch, at `before`.
+    fn of(plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Self {
+        Resolution {
+            task: task.id.clone(),
+            tip: before.into(),
+            base_commit: plan.base_commit.clone(),
+            base_branch: plan.base_branch.clone(),
+            untracked: Some(untracked),
+        }
+    }
+}
+
+/// What `add_in_place` writes, in the caller's store transaction (`review_back.rs`): the
+/// record of where the plan stands, the new task, and the commit its work is measured from. A
+/// caller that writes more for the task in the same transaction leaves none of it when one
+/// write fails: a record without its task, or for a task that never started, would make a
+/// later `settle_resolution` take back work that never ran. Returns the task's event, to
+/// publish after the commit.
+pub(super) fn add_in_place_tx(tx: &rusqlite::Connection, ws_id: Option<&str>, plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Result<EventRow> {
+    let undo = serde_json::to_string(&Resolution::of(plan, task, before, untracked))?;
+    tx.execute(
+        "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [resolution_key(&plan.id), undo],
+    )?;
+    let mut ev = row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() });
+    ev.id = crate::store::insert_event(tx, ws_id, &ev)?;
+    // What the task changes is measured from the plan's branch as it was.
+    tx.execute("UPDATE task SET base_commit = ?2 WHERE id = ?1", [task.id.as_str(), before])?;
+    Ok(ev)
+}
+
 /// A resolution that Codly starts (kv `merge_start:<plan>`): written before the user's branch
 /// is brought into the plan's branch, removed when the plan runs again. One that is still
 /// there while the plan does not build on `head` was cut short: the merge may be on the
@@ -729,47 +761,11 @@ impl Inner {
     /// worktree. If it does not finish, the plan goes back to where it is now
     /// (`settle_resolution`): its branch at `before`, and no new file but those in `untracked`.
     pub(super) fn add_in_place(&self, ws_id: Option<&str>, plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Result<()> {
-        let undo = Resolution {
-            task: task.id.clone(),
-            tip: before.into(),
-            base_commit: plan.base_commit.clone(),
-            base_branch: plan.base_branch.clone(),
-            untracked: Some(untracked),
-        };
+        let undo = Resolution::of(plan, task, before, untracked);
         self.store.kv_set(&resolution_key(&plan.id), &serde_json::to_string(&undo)?)?;
         self.emit(ws_id, row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() }))?;
         // What the task changes is measured from the plan's branch as it was.
         self.store.set_task_commits(&task.id, Some(before), None)
-    }
-
-    /// A task that `add_in_place` added and that could not start: it is cancelled, and the
-    /// record of where the plan stood goes with it, in one store write. A record left behind
-    /// would make a later `settle_resolution` take back the work of a task that never ran: the
-    /// new files that came into the plan's worktree since. A task that started is left as it is.
-    pub(super) fn cancel_in_place(&self, ws_id: Option<&str>, plan: &Plan, task_id: &str) -> Result<()> {
-        use rusqlite::OptionalExtension;
-        let key = resolution_key(&plan.id);
-        let ev = self.store.tx(|tx| {
-            let json: String = tx.query_row("SELECT json FROM task WHERE id = ?1", [task_id], |r| r.get(0))?;
-            let mut t: Task = serde_json::from_str(&json)?;
-            if !matches!(t.status, TaskStatus::Pending | TaskStatus::Ready) {
-                bail!("task {} is {} already", t.key, crate::store::enum_str(&t.status));
-            }
-            t.status = TaskStatus::Cancelled;
-            t.status_reason = Some("Codly could not start it".into());
-            t.updated_at = now_ms();
-            let saved: Option<String> = tx.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get(0)).optional()?;
-            if let Some(saved) = saved
-                && serde_json::from_str::<Resolution>(&saved)?.task == t.id
-            {
-                tx.execute("DELETE FROM kv WHERE key = ?1", [&key])?;
-            }
-            let mut ev = row(t.assignee.as_deref(), Some(&t.id), None, EventKind::TaskChanged { task: t.clone() });
-            ev.id = crate::store::insert_event(tx, ws_id, &ev)?;
-            Ok(ev)
-        })?;
-        self.publish(ws_id, &ev);
-        Ok(())
     }
 
     /// The new paths that were in the plan's worktree before `task` started on the plan's own
