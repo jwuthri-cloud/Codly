@@ -21,44 +21,61 @@ export type Trouble = {
 };
 
 /**
- * The agent's troubles, oldest first. A failed turn takes the last error of that turn as its
- * reason (one line, not two). `byYou(turnStart)`: you stopped that turn yourself, so its
- * "interrupted" end is not reported.
+ * The agent's troubles, read one event at a time (`add`, oldest first): the conversation reads
+ * only the events that came since its last read. A failed turn takes the last error of that turn
+ * as its reason (one line, not two): that trouble changes in place when the end comes.
+ * An interrupted end is in `out` also when you stopped that turn yourself: `troublesOf` leaves
+ * those out, as you can take a stop back at any time.
  */
-export function troublesOf(events: EventRow[], agentId: string, byYou: (turnStart: number) => boolean): Trouble[] {
-  const out: Trouble[] = [];
-  let turn: { start: number; input: string | null; error: Trouble | null } | null = null;
-  const within = () => (turn ? { start: turn.start, input: turn.input } : null);
-  for (const ev of events) {
-    if (ev.agent_id !== agentId) continue;
+export class TroubleReader {
+  readonly out: Trouble[] = [];
+  private turn: { start: number; input: string | null; error: Trouble | null } | null = null;
+  constructor(private readonly agentId: string) {}
+
+  add(ev: EventRow) {
+    if (ev.agent_id !== this.agentId) return;
     const k = ev.kind;
+    const turn = this.turn;
+    const within = () => (turn ? { start: turn.start, input: turn.input } : null);
     switch (k.type) {
       case 'turn_started':
-        turn = { start: ev.ts, input: k.input, error: null };
+        this.turn = { start: ev.ts, input: k.input, error: null };
         break;
       case 'error': {
         const t: Trouble = { eventId: ev.id, ts: ev.ts, what: k.fatal ? 'stopped' : 'problem', reason: k.message, turn: within() };
-        out.push(t);
+        this.out.push(t);
         if (turn) turn.error = t;
         break;
       }
       case 'turn_completed': {
-        const end = (what: TroubleKind) => out.push({ eventId: ev.id, ts: ev.ts, what, reason: null, turn: within() });
+        const end = (what: TroubleKind) => this.out.push({ eventId: ev.id, ts: ev.ts, what, reason: null, turn: within() });
         if (k.status === 'failed') {
           // "stopped" already says more than "failed".
           if (turn?.error?.what === 'problem') turn.error.what = 'failed';
           else if (!turn?.error) end('failed');
         } else if (k.status === 'max_turns') end('limit');
-        else if (k.status === 'interrupted' && !(turn && byYou(turn.start))) end('interrupted');
-        turn = null;
+        else if (k.status === 'interrupted') end('interrupted');
+        this.turn = null;
         break;
       }
       case 'exited':
-        turn = null;
+        this.turn = null;
         break;
     }
   }
-  return out;
+}
+
+/** Whether a trouble is reported: not the end of a turn you stopped yourself (`byYou(turnStart)`). */
+export const reported = (t: Trouble, byYou: (turnStart: number) => boolean): boolean => t.what !== 'interrupted' || !(t.turn && byYou(t.turn.start));
+
+/**
+ * The agent's troubles, oldest first. `byYou(turnStart)`: you stopped that turn yourself, so its
+ * "interrupted" end is not reported.
+ */
+export function troublesOf(events: EventRow[], agentId: string, byYou: (turnStart: number) => boolean): Trouble[] {
+  const r = new TroubleReader(agentId);
+  for (const ev of events) r.add(ev);
+  return r.out.filter((t) => reported(t, byYou));
 }
 
 /** The line's headline, in plain words. */

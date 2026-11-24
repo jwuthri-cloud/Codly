@@ -111,3 +111,60 @@ export function scrolledUpByHand(s: { before: number; now: number; own: number |
   if (s.own != null && Math.abs(s.now - s.own) < 1) return false;
   return !s.atEnd && s.now < s.before - 1;
 }
+
+/**
+ * `newBelow` for a long thread, at the cost of a search: `tops` are the rows' tops in the
+ * thread's order (they never go down), `unseen[i]` how many of the rows from `i` on are new
+ * (`unseenFrom`). Both are kept while the rows and their sizes stay the same, so a scroll reads
+ * nothing of the rows. `viewBottom` in the same frame as `tops`.
+ */
+export function newBelowSorted(tops: readonly number[], unseen: readonly number[], viewBottom: number): number {
+  let lo = 0;
+  let hi = tops.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (tops[mid] >= viewBottom) hi = mid;
+    else lo = mid + 1;
+  }
+  return unseen[lo] ?? 0;
+}
+
+/** For each row, how many of the rows from it on are not among the keys you had seen (one more entry, 0, at the end). */
+export function unseenFrom(keys: readonly string[], seen: ReadonlySet<string>): number[] {
+  const out = new Array<number>(keys.length + 1);
+  out[keys.length] = 0;
+  for (let i = keys.length - 1; i >= 0; i--) out[i] = out[i + 1] + (seen.has(keys[i]) ? 0 : 1);
+  return out;
+}
+
+/**
+ * Where a key scrolls the thread when the focus is on the page (on no field, button or card):
+ * PageDown and Space a page down, PageUp and Shift+Space a page up, Home to the start, End to
+ * the end. Null: the key is not one of these. `page`: the height of the view.
+ */
+export function pageKey(key: string, shift: boolean, top: number, page: number, height: number): number | null {
+  const step = Math.max(40, page - 60);
+  if (key === 'PageDown' || (key === ' ' && !shift)) return top + step;
+  if (key === 'PageUp' || (key === ' ' && shift)) return top - step;
+  if (key === 'Home') return 0;
+  if (key === 'End') return height;
+  return null;
+}
+
+/** A box under the pointer, as the wheel sees it. */
+export type WheelBox = { scrollTop: number; scrollHeight: number; clientHeight: number; overflowY: string; overscrollY: string };
+
+/**
+ * The wheel over a box in a row: how far the thread scrolls by itself. Null: the box does not
+ * scroll, so a box further out decides. A box that keeps the wheel (overscroll-behavior other than
+ * auto) and is at its end in the wheel's direction moves nothing, so the thread takes the wheel
+ * (0: the box scrolls, or passes the wheel on by itself). `deltaMode`: 0 pixels, 1 lines (16 px),
+ * 2 pages (`page`: the thread's view).
+ */
+export function wheelPass(box: WheelBox, deltaY: number, deltaMode: number, page: number): number | null {
+  if (box.scrollHeight <= box.clientHeight || !/auto|scroll/.test(box.overflowY)) return null;
+  if (box.overscrollY === 'auto') return 0;
+  const atItsEnd = deltaY > 0 ? box.scrollTop + box.clientHeight >= box.scrollHeight - 1 : box.scrollTop <= 0;
+  if (!atItsEnd) return 0;
+  return deltaMode === 1 ? deltaY * 16 : deltaMode === 2 ? deltaY * page : deltaY;
+}

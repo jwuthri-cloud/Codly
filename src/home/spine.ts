@@ -16,6 +16,7 @@
 import type { Agent } from '../lib/gen/Agent';
 import type { Approval } from '../lib/gen/Approval';
 import type { ChatMessage } from '../lib/gen/ChatMessage';
+import type { EventRow } from '../lib/gen/EventRow';
 import type { MessagePhase } from '../lib/gen/MessagePhase';
 import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
 import { store, type AgentMsg, type Outgoing, type Seg, type SubAgent, type Thought } from '../lib/state/store.svelte';
@@ -25,9 +26,9 @@ import { killedAt, killLine, stoppedByYou, stoppedTurns } from '../lib/state/sto
 import { isRequestThread } from '../lib/state/ui.svelte';
 import { contextReads } from '../lib/state/control.svelte';
 import type { Away } from './away';
-import { controlRows } from './controlRows';
-import { noticeRows, type Note } from './notices';
-import { canRetry, endedByKill, messageOf, troublesOf, type TroubleKind } from './outcomes';
+import { ControlReader, withoutSaid } from './controlRows';
+import { NoticeReader, type Note } from './notices';
+import { TroubleReader, canRetry, endedByKill, messageOf, reported, type TroubleKind } from './outcomes';
 
 /** A summary's first word stays as it is when it is a task's key or an agent's name ("t1 …", "eli …"), as in History. */
 const isName = (word: string) => store.tasks.some((t) => t.key === word) || store.agents.some((a) => a.name === word);
@@ -175,7 +176,52 @@ export const planIdOf = (att: JsonValue | null | undefined): string | null => {
 // started, so the message comes first.
 const RANK: Record<Item['kind'], number> = { user: 0, system: 1, say: 2, ask: 2, work: 3, trouble: 4, notice: 4, control: 4, approval: 5, 'task-done': 6, away: 7 };
 
-export function buildSpine(thread: string): Item[] {
+/** What a build of the spine visited: the rows of the event log it read (a test counts them). */
+export type SpineCost = { events: number };
+
+/**
+ * What the event log says of a thread's agent for its rows: its troubles, its CLI's notices,
+ * what you did to it. One pass for the three, and only over the events that came since the
+ * thread's last build (`next`, an index into `log`). The log only grows at its end; when it is
+ * trimmed or replaced (a snapshot), or the thread has another agent now, it is read again from
+ * its start.
+ */
+type LogRead = {
+  log: EventRow[];
+  next: number;
+  agent: string;
+  name: string;
+  troubles: TroubleReader;
+  notices: NoticeReader;
+  controls: ControlReader;
+};
+const logReads = new Map<string, LogRead>();
+
+/** How many threads' reads are kept (a test counts them). */
+export const logReadsKept = (): number => logReads.size;
+
+function readLog(thread: string, owner: Agent, cost?: SpineCost): LogRead {
+  const log = store.events;
+  let r = logReads.get(thread);
+  if (!r || r.log !== log || r.next > log.length || r.agent !== owner.id || r.name !== owner.name) {
+    // A read of another log (one trimmed or replaced, another office's) is of no use any more,
+    // and it would keep that log alive.
+    for (const [key, other] of logReads) if (other.log !== log) logReads.delete(key);
+    r = { log, next: 0, agent: owner.id, name: owner.name, troubles: new TroubleReader(owner.id), notices: new NoticeReader(owner.id), controls: new ControlReader({ id: owner.id, name: owner.name }, isName) };
+    logReads.set(thread, r);
+  }
+  for (; r.next < log.length; r.next++) {
+    const ev = log[r.next];
+    if (cost) cost.events++;
+    if (ev.agent_id !== owner.id) continue;
+    r.troubles.add(ev);
+    r.notices.add(ev);
+    r.controls.add(ev);
+  }
+  return r;
+}
+
+export function buildSpine(thread: string, cost?: SpineCost): Item[] {
   const owner = store.threadAgent(thread);
   const isLead = isRequestThread(thread);
   const items: Item[] = [];
@@ -287,11 +333,12 @@ export function buildSpine(thread: string): Item[] {
     }
 
     // ── what went wrong, where it happened (added last: a problem never splits a work row) ──
+    const log = readLog(thread, owner, cost);
     const yours = chats.filter((c) => c.author === 'user');
     // A turn you killed says so in its own line ("You killed …"): its end is not a trouble.
     const kills = killedAt(owner.id);
-    for (const t of troublesOf(store.events, owner.id, (start) => stoppedByYou(owner.id, start)))
-      if (!endedByKill(t, kills)) items.push({
+    for (const t of log.troubles.out)
+      if (reported(t, (start) => stoppedByYou(owner.id, start)) && !endedByKill(t, kills)) items.push({
         kind: 'trouble', key: `e:${t.eventId}`, ts: t.ts, agentId: owner.id, eventId: t.eventId, what: t.what, reason: t.reason,
         retry: canRetry(t.what) ? messageOf(t.turn, yours) : null,
       });
@@ -301,14 +348,15 @@ export function buildSpine(thread: string): Item[] {
 
     // ── what its CLI told about the run: one row for a turn, where the newest was told (so
     // after the work it was told in) ──
-    for (const notes of noticeRows(store.events, owner.id)) {
+    for (const notes of log.notices.rows) {
       const row: Item = { kind: 'notice', key: `n:${notes[0].eventId}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes };
       items.push(row);
       began.set(row, notes[0].ts);
     }
 
     // ── what you did to it: a compaction, a mode, a model, a context reading ──
-    for (const notes of controlRows(store.events, owner, isName, contextReads[owner.id] ?? null))
+    const said = chats.filter((c) => c.author === 'codly');
+    for (const notes of withoutSaid(log.controls.rows(contextReads[owner.id] ?? null), said, owner.name))
       items.push({ kind: 'control', key: `x:${notes[0].eventId}:${notes[0].ts}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes });
   }
 
@@ -348,10 +396,12 @@ export function buildSpine(thread: string): Item[] {
 }
 
 /**
- * A line for each turn of `agent` that you stopped (Stop, Interrupt, Send now) while one of its
- * `cards` waited for your answer: the card's closed row says that its CLI stopped, which is how
- * the CLI tells it; this line says that you did. A turn that a Kill ended has its own line
- * ("You killed …").
+ * A line for each turn of `agent` that you stopped with a button (Interrupt, or Send now on a
+ * queued message: `stoppedTurns`) while one of its `cards` waited
+ * for your answer: the card's closed row says that its CLI stopped, which is how the CLI tells
+ * it; this line says that you did. A stop with Esc is not one (state/stops.ts: the key leaves
+ * nothing on screen, so the turn's own row says it was interrupted), and a turn that a Kill
+ * ended has its own line ("You killed …").
  */
 function stoppedWhileWaiting(agent: Agent, cards: Approval[]): Item[] {
   const stopped = stoppedTurns(agent.id);
@@ -428,11 +478,13 @@ export function keepRows(prev: Item[], next: Item[]): Item[] {
 
 /**
  * Which messages and thoughts the agent is writing right now (not their words). Read it in a
- * `$derived`: it changes when one starts or ends, which is when its thread is built again.
+ * `$derived`: it changes when one starts or ends, which is when its thread is built again. A
+ * new word does not make it read again (`openRevBy`, not `liveRevBy`): the rows that depend on
+ * it are not even asked.
  */
 export function openStreams(agentId: string): string {
   void store.revBy.get(agentId);
-  void store.liveRevBy.get(agentId);
+  void store.openRevBy.get(agentId);
   let open = '';
   for (const s of store.streams.values()) if (s.agentId === agentId) open += `${s.kind} ${s.itemId} ${s.ts}\n`;
   return open;

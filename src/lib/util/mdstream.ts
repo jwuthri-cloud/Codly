@@ -16,8 +16,17 @@ import { clean } from './sanitize';
 export type Block = { type: string; raw: string };
 /** `entangled`: the text has raw HTML or a link definition. */
 export type Blocks = { blocks: Block[]; entangled: boolean };
-/** `done`: the HTML of each finished part, in order; a part never changes once it is here. */
-export type Parts = { done: string[]; tail: string };
+/**
+ * `done`: the HTML of each finished part, in order; a part never changes once it is here.
+ * `wait`: 0, or the tail is of an earlier text and the text as it is now renders when the
+ * renderer is called again in `wait` ms (see `SLOW_TAIL`).
+ */
+export type Parts = { done: string[]; tail: string; wait: number };
+
+/** A tail longer than this (in characters) renders at most once per `SLOW_EVERY` ms: a long
+ *  list, or a text with raw HTML, is all tail and costs more with each new word. */
+export const SLOW_TAIL = 4000;
+export const SLOW_EVERY = 100;
 
 /** An empty line ends at `end`. */
 function blankBefore(text: string, end: number): boolean {
@@ -47,15 +56,22 @@ export function finishedLength(text: string, blocks: Block[]): number {
  * The renderer of one message. `render` makes HTML from markdown, `split` reads markdown into
  * its blocks. Call the result with the text so far each time it grows; `mark` is put at the very
  * end of the text (the caret). A text that is not the last one plus more starts again.
+ * `clock` (ms): with it, a tail longer than `SLOW_TAIL` renders at most once per `SLOW_EVERY`
+ * ms, and the result says when to call again (`wait`) so that the last text renders too.
  */
-export function streamRenderer(render: (src: string) => string, split: (src: string) => Blocks): (src: string, mark?: string) => Parts {
+export function streamRenderer(render: (src: string) => string, split: (src: string) => Blocks, clock?: () => number): (src: string, mark?: string) => Parts {
   let seen = '';
   /** The finished start of `seen`. */
   let head = '';
   let done: string[] = [];
   /** Raw HTML or a link definition was read: nothing is finished before the end. */
   let whole = false;
+  /** The tail last rendered (its source and HTML), and when. */
+  let tailSrc = '';
+  let tailHtml = '';
+  let tailAt = -Infinity;
   return (src, mark = '') => {
+    const was = done;
     if (!src.startsWith(seen)) {
       head = '';
       done = [];
@@ -77,6 +93,14 @@ export function streamRenderer(render: (src: string) => string, split: (src: str
         }
       }
     }
-    return { done, tail: render(src.slice(head.length) + mark) };
+    const tail = src.slice(head.length) + mark;
+    if (tail === tailSrc && done === was) return { done, tail: tailHtml, wait: 0 };
+    const now = clock?.() ?? 0;
+    // Only the same parts before it: a tail kept from before must not hold a block now in `done`.
+    if (clock && done === was && tail.length > SLOW_TAIL && now - tailAt < SLOW_EVERY) return { done, tail: tailHtml, wait: SLOW_EVERY - (now - tailAt) };
+    tailSrc = tail;
+    tailHtml = render(tail);
+    tailAt = now;
+    return { done, tail: tailHtml, wait: 0 };
   };
 }

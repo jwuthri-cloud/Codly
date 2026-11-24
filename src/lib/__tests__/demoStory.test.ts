@@ -535,18 +535,20 @@ describe('the MCP servers of a Lead you stop', () => {
 
 describe('the demo states of docs/DEMO.md', () => {
   it('reads each parameter, and a value it does not know starts nothing', () => {
-    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on&turn=failed&pr=open&search=fail&requests=two&cards=3'));
+    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on&turn=failed&pr=open&search=fail&requests=two&cards=3&long=300'));
     expect(all).toEqual({
       trustAsk: true, mergeConflict: true, mergeChecks: false, previewRunning: true, checksOn: true, slowHelper: true, planMode: true, intake: 'pull_request', approval: 'question-long', hour: 21.5,
-      resumeAsk: true, background: true, turnFailed: true, prOpen: true, searchFails: true, twoRequests: true, threeCards: true,
+      resumeAsk: true, background: true, turnFailed: true, prOpen: true, searchFails: true, twoRequests: true, threeCards: true, longThread: 300,
     });
     expect(demoStates(new URLSearchParams('merge=checks'))).toMatchObject({ mergeConflict: false, mergeChecks: true });
     expect(demoStates(new URLSearchParams('intake=issue')).intake).toBe('issue');
     const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off&turn=ok&pr=closed&search=ok&requests=2&cards=2'));
     expect(none).toEqual({
       trustAsk: false, mergeConflict: false, mergeChecks: false, previewRunning: false, checksOn: false, slowHelper: false, planMode: false, intake: null, approval: null, hour: null,
-      resumeAsk: false, background: false, turnFailed: false, prOpen: false, searchFails: false, twoRequests: false, threeCards: false,
+      resumeAsk: false, background: false, turnFailed: false, prOpen: false, searchFails: false, twoRequests: false, threeCards: false, longThread: null,
     });
+    // `?long` with no count is 2000 turns.
+    expect(['long', 'long=', 'long=0', 'long=12'].map((q) => demoStates(new URLSearchParams(q)).longThread)).toEqual([2000, 2000, 2000, 12]);
     // Midnight is an hour; a parameter with no value, or with words, is none.
     expect(['hour=0', 'hour=', 'hour=noon', 'hour=-1'].map((q) => demoStates(new URLSearchParams(q)).hour)).toEqual([0, null, null, null]);
     // A state opens the demo repo at once; the trust question is asked when you open it, and the hour only moves the clock.
@@ -559,6 +561,7 @@ describe('the demo states of docs/DEMO.md', () => {
     expect(opensRepo({ ...none, resumeAsk: true })).toBe(true);
     expect(opensRepo({ ...none, background: true })).toBe(true);
     for (const on of ['mergeChecks', 'turnFailed', 'prOpen', 'searchFails', 'twoRequests', 'threeCards'] as const) expect(opensRepo({ ...none, [on]: true })).toBe(true);
+    expect(opensRepo({ ...none, longThread: 2000 })).toBe(true);
   });
 
   it('a helper shows its kind, its own calls and its report; `?checks=on` runs your checks for each task', async () => {

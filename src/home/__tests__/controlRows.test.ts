@@ -9,7 +9,7 @@ import type { Snapshot } from '../../lib/gen/Snapshot';
 import { contextReads } from '../../lib/state/control.svelte';
 import { store } from '../../lib/state/store.svelte';
 import { mkAgent } from '../../office/demo/script';
-import { controlRows } from '../controlRows';
+import { controlRows, withoutSaid } from '../controlRows';
 import { buildSpine } from '../spine';
 
 const T = 1_760_000_080_000; // 40 s into a minute
@@ -65,9 +65,21 @@ describe('controlRows', () => {
     ]);
   });
 
-  it('rows of the same minute join into one, oldest first; the next minute is a row of its own', () => {
-    const log = [decision('Ada now works in the mode "Accept edits"', T), changed('opus', T - 900_000), turn(T - 800_000), changed('sonnet', T + 10_000), decision('steer note for Ada: keep it short', T + 30_000)];
-    expect(words(log)).toEqual([['Ada now works in the mode "Accept edits"', 'Ada now works with Sonnet'], ['Steer note for Ada: keep it short']]);
+  it('notes of one kind in the same minute join into one row, oldest first; another kind or the next minute is a row of its own', () => {
+    const log = [
+      decision('Ada now works in the mode "Accept edits"', T), decision('you turned postgres off for Ada\'s run', T + 5_000), changed('opus', T - 900_000), turn(T - 800_000),
+      changed('sonnet', T + 10_000), decision('steer note for Ada: keep it short', T + 30_000),
+    ];
+    expect(words(log)).toEqual([
+      ['Ada now works in the mode "Accept edits"', 'You turned postgres off for Ada\'s run'],
+      ['Ada now works with Sonnet'],
+      ['Steer note for Ada: keep it short'],
+    ]);
+  });
+
+  it('a mode switch keeps its place before a compaction of the same minute (round 8 review: it went behind "and 2 more")', () => {
+    const log = [decision('Ada now works in the mode "Accept edits"', T), decision('asked Ada to compact its conversation', T + 5_000), ev({ type: 'compacting', pre_tokens: 90_000, post_tokens: 12_000 }, T + 10_000)];
+    expect(words(log)).toEqual([['Ada now works in the mode "Accept edits"'], ['You asked Ada to compact its conversation', 'Ada’s conversation was compacted · 90k → 12k tokens']]);
   });
 
   it('a row keeps its notes while nothing changed, so the thread does not draw it again', () => {
@@ -77,6 +89,16 @@ describe('controlRows', () => {
 });
 
 describe('in the thread', () => {
+  it('a model switch the thread already says in a line of Codly is one sentence', () => {
+    const rows = controlRows([changed('opus', T - 600_000), turn(T - 500_000), decision('Ada now works in the mode "Plan first"', T), changed('sonnet', T + 2)], ada, keeps, null);
+    const line = { ts: T, text: 'Ada now works with sonnet, in the same conversation: no restart was needed.' };
+    expect(withoutSaid(rows, [line], 'Ada').map((r) => r.map((n) => n.text))).toEqual([['Ada now works in the mode "Plan first"']]);
+    // A line of another time, of another agent, or about something else leaves the note.
+    expect(withoutSaid(rows, [{ ...line, ts: T - 60_000 }], 'Ada')).toBe(rows);
+    expect(withoutSaid(rows, [{ ...line, text: 'Bo now works with sonnet, in the same conversation.' }], 'Ada')).toBe(rows);
+    expect(withoutSaid(rows, [{ ts: T, text: 'Plan ready' }], 'Ada')).toBe(rows);
+  });
+
   beforeEach(() => {
     const solo = mkAgent('ada', 'Ada', 'claude', 'solo', 0, 'idle');
     const snap = { as_of: 0, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [solo], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [] };
@@ -95,5 +117,16 @@ describe('in the thread', () => {
       ['Context: 12k of 200k tokens (6%)'],
     ]);
     expect(new Set(rows.map((r) => r.key)).size).toBe(3);
+  });
+
+  it('a live model switch in the 1:1 is the line of Codly alone, not a second row', () => {
+    const solo = mkAgent('ada', 'Ada', 'claude', 'solo', 0, 'idle');
+    const line = { id: 'm1', thread: 'agent:ada', author: 'codly', text: 'Ada now works with sonnet, in the same conversation: no restart was needed.', attachment: null, ts: T };
+    const events = [changed('opus', T - 600_000), turn(T - 500_000), changed('sonnet', T + 3)];
+    const snap = { as_of: id, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents: [solo], plans: [], tasks: [], approvals: [], chats: [line], memories: [], triples: [], artifacts: [], events };
+    (store as unknown as { applySnapshot(s: Snapshot): void }).applySnapshot(snap as unknown as Snapshot);
+    const rows = buildSpine('agent:ada');
+    expect(rows.filter((r) => r.kind === 'control')).toEqual([]);
+    expect(rows.filter((r) => r.kind === 'system').map((r) => r.kind === 'system' && r.text)).toEqual([line.text]);
   });
 });

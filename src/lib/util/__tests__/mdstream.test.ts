@@ -3,7 +3,7 @@
 import { Marked } from 'marked';
 import { describe, expect, it } from 'vitest';
 import { markdownBlocks } from '../markdown';
-import { finishedLength, streamRenderer } from '../mdstream';
+import { SLOW_EVERY, SLOW_TAIL, finishedLength, streamRenderer } from '../mdstream';
 import { clean } from '../sanitize';
 
 // The tests run without a browser, so without the sanitizer: this is the parser `renderMarkdown`
@@ -106,6 +106,49 @@ describe('a message being written', () => {
     const again = streamRenderer(render, markdownBlocks);
     again('a <i>b\n\nc\n\nd');
     expect(again('one\n\ntwo\n\nthree').done).toHaveLength(1);
+  });
+
+  it('renders a long tail at most every 100 ms, says when to come back, and ends as the whole text renders', () => {
+    // A list is never finished before the end: all of it is the tail.
+    const doc = Array.from({ length: 400 }, (_, i) => `- item ${i} of a long list`).join('\n');
+    expect(doc.length).toBeGreaterThan(SLOW_TAIL);
+    let now = 0;
+    const rendered: number[] = [];
+    const next = streamRenderer((src) => (rendered.push(src.length), render(src)), markdownBlocks, () => now);
+    let parts = next(doc.slice(0, 100));
+    // Short: each new word renders.
+    expect(next(doc.slice(0, 120)).wait).toBe(0);
+    now += SLOW_EVERY;
+    parts = next(doc.slice(0, SLOW_TAIL + 10));
+    expect(parts.wait).toBe(0);
+    const at = rendered.length;
+    now += 30;
+    parts = next(doc.slice(0, SLOW_TAIL + 40));
+    // Rendered 30 ms ago: the tail is the one before, and it comes back in 70 ms.
+    expect(rendered.length).toBe(at);
+    expect(parts.wait).toBe(SLOW_EVERY - 30);
+    expect(parts.tail).toBe(render(doc.slice(0, SLOW_TAIL + 10)));
+    now += 70;
+    parts = next(doc.slice(0, SLOW_TAIL + 40));
+    expect(parts.wait).toBe(0);
+    expect(parts.done.join('') + parts.tail).toBe(render(doc.slice(0, SLOW_TAIL + 40)));
+    // The last state, once the clock allows it: the HTML of the whole text.
+    now += 5;
+    expect(next(doc).wait).toBeGreaterThan(0);
+    now += SLOW_EVERY;
+    parts = next(doc);
+    expect(parts.done.join('') + parts.tail).toBe(render(doc));
+  });
+
+  it('a long tail that waits never holds a block that is finished now', () => {
+    let now = 0;
+    const big = 'x'.repeat(SLOW_TAIL + 100);
+    const next = streamRenderer(render, markdownBlocks, () => now);
+    next(`${big}\n\n`);
+    now += 10;
+    const parts = next(`${big}\n\nnext`);
+    expect(parts.wait).toBe(0);
+    expect(parts.done.join('') + parts.tail).toBe(render(`${big}\n\nnext`));
   });
 
   it('puts the caret mark at the very end, in the part being written', () => {

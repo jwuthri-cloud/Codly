@@ -10,51 +10,66 @@ export type Note = { eventId: number; ts: number; text: string };
 const noteOf = new WeakMap<EventRow, Note>();
 
 /**
- * The agent's notices as the rows that show them, oldest first (in a row: oldest first too).
+ * The agent's notices as the rows that show them, oldest first (in a row: oldest first too),
+ * read one event at a time (`add`, oldest first): the conversation reads only the events that
+ * came since its last read. A row that gets a note is a new list, so a row that did not change
+ * keeps its list.
  * Everything told between the start and the end of one turn is one row. A notice outside any
  * turn is a row of its own; the same words told again right after it join its row.
  * The log may begin inside a turn whose start it does not hold any more (a long turn): until
  * the log says that a turn started or ended, what is told is one row too, as in a turn. Nothing
  * between those notices says that they are of different turns, and the row lists them all.
  */
-export function noticeRows(events: EventRow[], agentId: string): Note[][] {
-  const rows: Note[][] = [];
+export class NoticeReader {
+  readonly rows: Note[][] = [];
   /** The log says that no turn runs: a turn or the process ended, and no turn started since.
    *  At the log's start it does not say so: a turn may run whose start left the log. */
-  let outside = false;
-  /** The row of the turn that runs, or that may run. */
-  let inTurn: Note[] | null = null;
-  /** The newest row outside a turn, while nothing came after it. */
-  let alone: Note[] | null = null;
-  for (const ev of events) {
-    if (ev.agent_id !== agentId) continue;
+  private outside = false;
+  /** Where in `rows` the row of the turn that runs (or that may run) is (-1: none yet). */
+  private inTurn = -1;
+  /** Where in `rows` the newest row outside a turn is, while nothing came after it (-1: none). */
+  private alone = -1;
+  constructor(private readonly agentId: string) {}
+
+  add(ev: EventRow) {
+    if (ev.agent_id !== this.agentId) return;
     const k = ev.kind;
     switch (k.type) {
       case 'turn_started':
-        outside = false;
-        inTurn = alone = null;
+        this.outside = false;
+        this.inTurn = this.alone = -1;
         break;
       case 'turn_completed':
-        outside = true;
-        inTurn = alone = null;
+        this.outside = true;
+        this.inTurn = this.alone = -1;
         break;
       case 'exited':
-        outside = true;
-        inTurn = null;
+        this.outside = true;
+        this.inTurn = -1;
         break;
       case 'notice': {
         let note = noteOf.get(ev);
         if (!note) noteOf.set(ev, (note = { eventId: ev.id, ts: ev.ts, text: k.text }));
-        if (!outside) {
-          if (!inTurn) rows.push((inTurn = []));
-          inTurn.push(note);
-        } else if (alone && alone[0].text === note.text) alone.push(note);
-        else rows.push((alone = [note]));
+        if (!this.outside) {
+          if (this.inTurn < 0) this.inTurn = this.rows.push([note]) - 1;
+          else this.join(this.inTurn, note);
+        } else if (this.alone >= 0 && this.rows[this.alone][0].text === note.text) this.join(this.alone, note);
+        else this.alone = this.rows.push([note]) - 1;
         break;
       }
     }
   }
-  return rows;
+
+  private join(at: number, note: Note) {
+    this.rows[at] = [...this.rows[at], note];
+  }
+}
+
+/** The agent's notices as the rows that show them (see `NoticeReader`). */
+export function noticeRows(events: EventRow[], agentId: string): Note[][] {
+  const r = new NoticeReader(agentId);
+  for (const ev of events) r.add(ev);
+  return r.rows;
 }
 
 /**

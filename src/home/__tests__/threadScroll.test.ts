@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
 import type { Item } from '../spine';
-import { meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, scrolledUpByHand, type Rect, type ScrollState } from '../threadScroll';
+import { meets, newBelow, newBelowSorted, nextMove, oldestWaiting, pageKey, pillSpot, revealTop, scrolledUpByHand, unseenFrom, wheelPass, type Rect, type ScrollState, type WheelBox } from '../threadScroll';
 
 const card = (key: string, status: string): Item => ({ kind: 'approval', key, ts: 0, approval: { status } as unknown as Approval, twins: [] });
 const sys = (key: string): Item => ({ kind: 'system', key, ts: 0, text: 'x', card: null });
@@ -149,5 +149,65 @@ describe('where the "new below" pill goes (`pillSpot`)', () => {
     expect(pillSpot([centre, edge, above(buttons.top)], tall, buttons)).toBe(2);
     // No spot off the buttons: the last one.
     expect(pillSpot([centre, edge], parts, r(0, 0, 1000, 1000))).toBe(1);
+  });
+});
+
+describe('newBelowSorted', () => {
+  it('counts what newBelow counts, with a search over the kept tops', () => {
+    const rows = Array.from({ length: 40 }, (_, i) => ({ key: `r${i}`, top: i * 50 + (i % 3) * 7 }));
+    const seen = new Set(rows.filter((_, i) => i % 4 === 0 || i < 10).map((r) => r.key));
+    const tops = rows.map((r) => r.top);
+    const unseen = unseenFrom(rows.map((r) => r.key), seen);
+    for (const bottom of [-10, 0, 49, 50, 333, 1000, 1957, 1958, 5000]) expect(newBelowSorted(tops, unseen, bottom), String(bottom)).toBe(newBelow(rows, seen, bottom));
+    expect(newBelowSorted([], [0], 10)).toBe(0);
+  });
+
+  it('unseenFrom counts the new rows from each row on', () => {
+    expect(unseenFrom(['a', 'b', 'c'], new Set(['b']))).toEqual([2, 1, 1, 0]);
+  });
+});
+
+describe('pageKey', () => {
+  it('moves a page less some overlap, or to an end; other keys are not its', () => {
+    expect(pageKey('PageDown', false, 100, 600, 5000)).toBe(640);
+    expect(pageKey(' ', false, 100, 600, 5000)).toBe(640);
+    expect(pageKey(' ', true, 1000, 600, 5000)).toBe(460);
+    expect(pageKey('PageUp', false, 1000, 600, 5000)).toBe(460);
+    expect(pageKey('Home', false, 1000, 600, 5000)).toBe(0);
+    expect(pageKey('End', false, 1000, 600, 5000)).toBe(5000);
+    expect(pageKey('ArrowDown', false, 1000, 600, 5000)).toBeNull();
+    expect(pageKey('Enter', false, 1000, 600, 5000)).toBeNull();
+  });
+});
+
+describe('wheelPass', () => {
+  // A card body of 300 px that holds 900 px and keeps the wheel.
+  const body = (scrollTop: number, more: Partial<WheelBox> = {}): WheelBox => ({ scrollTop, scrollHeight: 900, clientHeight: 300, overflowY: 'auto', overscrollY: 'contain', ...more });
+
+  it('a body at its end in the wheel’s direction gives the wheel to the thread', () => {
+    expect(wheelPass(body(600), 40, 0, 500)).toBe(40);
+    expect(wheelPass(body(599.5), 40, 0, 500)).toBe(40);
+    expect(wheelPass(body(0), -40, 0, 500)).toBe(-40);
+  });
+
+  it('a body that can still scroll that way keeps the wheel', () => {
+    expect(wheelPass(body(0), 40, 0, 500)).toBe(0);
+    expect(wheelPass(body(600), -40, 0, 500)).toBe(0);
+    expect(wheelPass(body(300), 40, 0, 500)).toBe(0);
+  });
+
+  it('a body that passes the wheel on by itself is left to the browser', () => {
+    expect(wheelPass(body(600, { overscrollY: 'auto' }), 40, 0, 500)).toBe(0);
+  });
+
+  it('a box that does not scroll lets a box further out decide', () => {
+    expect(wheelPass(body(0, { scrollHeight: 300 }), 40, 0, 500)).toBeNull();
+    expect(wheelPass(body(600, { overflowY: 'hidden' }), 40, 0, 500)).toBeNull();
+    expect(wheelPass(body(600, { overflowY: 'visible' }), 40, 0, 500)).toBeNull();
+  });
+
+  it('lines and pages are turned into pixels', () => {
+    expect(wheelPass(body(600), 3, 1, 500)).toBe(48);
+    expect(wheelPass(body(600), 1, 2, 500)).toBe(500);
   });
 });
