@@ -448,6 +448,7 @@ impl Inner {
     pub(super) async fn switch_live_model(&self, agent: &Agent, model: Option<&str>, switch: LiveSwitch) -> Result<Option<Agent>> {
         let id = agent.id.as_str();
         let (name, mut effort) = classify::split_model_effort(model);
+        let mid_turn = lock(&self.live).get(id).is_some_and(|l| l.turn_active);
         // The model the CLI's answer names: for its default model, the only name there is.
         let mut resolved = None;
         if let Some(ask) = &switch.model {
@@ -483,7 +484,11 @@ impl Inner {
         }
         // (Recorded: after a model switch the next request reads the conversation with no cached tokens.)
         let reads_again = if switch.model.is_some() { " Its next turn reads the whole conversation again with the new model." } else { "" };
-        let text = format!("{} now works with {}, in the same conversation: no restart was needed.{reads_again}", agent.name, now.join(" and "));
+        // (Not recorded: which effort the model requests left in a running turn carry. The
+        // CLI's settings name the new level at once: part 6 §12.)
+        let effort_changed = switch.effort.is_some() && effort_kept.is_none();
+        let running = if mid_turn && effort_changed { " Claude Code does not say whether the turn that runs already uses it." } else { "" };
+        let text = format!("{} now works with {}, in the same conversation: no restart was needed.{reads_again}{running}", agent.name, now.join(" and "));
         let ws = self.store.agent_workspace(id)?;
         self.chat(ws.as_deref(), &format!("agent:{id}"), "codly", &text, None)?;
         // The agent's row: the name the user picked; for the CLI's default, the model the CLI
@@ -503,7 +508,9 @@ impl Inner {
     /// `high` or `max`: part 4 §4 and part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2
     /// each). So that switch did not take only when the settings still name `before`, the
     /// level the agent's row had, and that level is not the default one; any other answer is
-    /// the CLI's default for the model.
+    /// the CLI's default for the model. That rule rests on recordings of one model (Haiku):
+    /// another model's default level is not recorded, and may not be "medium". The same holds
+    /// while a turn runs (part 6 §12, `r8-effort-mid-turn-null-*` and `-high-*`, n=2 each).
     async fn set_live_effort(&self, agent_id: &str, level: Option<&str>, before: Option<&str>) -> Result<()> {
         let answer = self.ask_session(agent_id, SessionRequest::Effort(level.map(str::to_owned)))?;
         Self::session_answer(answer).await?;

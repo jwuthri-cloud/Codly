@@ -30,7 +30,13 @@
 //! there are not ones you trusted:
 //! - Claude Code starts with your user settings alone: no project settings, no local
 //!   settings unless that file is your own, and only Codly's MCP servers (the one switch that
-//!   keeps the repo's `.mcp.json` out, `--strict-mcp-config`, keeps your own servers out too);
+//!   keeps the repo's `.mcp.json` out, `--strict-mcp-config`, keeps your own servers out too).
+//!   Letting your own servers in there without that switch stays on hold. Recorded (2.1.311
+//!   part 6, section 1): the folder's own `.mcp.json` server started in none of 40
+//!   recordings, but with the local settings file loaded (`--setting-sources user,local`) a
+//!   folder's `.claude/settings.local.json` switched on a plugin you had turned off, and that
+//!   plugin's MCP server started (4 of 4). A plugin you never installed, named by a file of
+//!   the folder, is not recorded;
 //! - Codex keeps its own gate: it loads a project's `.codex/` only in a folder you trusted in
 //!   Codex itself, and Codly changes nothing there. The MCP servers of your own Codex config
 //!   are yours, not the folder's: they start whatever you chose here (`runs.rs` ties

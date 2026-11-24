@@ -66,10 +66,11 @@ impl Inner {
             .or_else(|| cli.path.as_ref().map(PathBuf::from))
             .ok_or_else(|| anyhow!("{} binary not found", provider.label()))?;
         let (byok_key, byok_command) = self.byok_for(provider).await?;
-        // An ACP agent reports its session's cost as a running total. The adapter takes off what
-        // the session's earlier runs cost, so a resumed session is not counted a second time.
+        // An ACP agent reports its session's cost as a running total, and so does Claude Code
+        // where a result has no cost of the turn's own. The adapter takes off what the
+        // session's earlier runs cost, so a resumed session is not counted a second time.
         let session_cost_usd = match &req.session {
-            SessionMode::Resume { session_id } if !matches!(provider, Provider::Claude | Provider::Codex) => {
+            SessionMode::Resume { session_id } if provider != Provider::Codex => {
                 self.store.session_cost(&req.agent.id, session_id)?
             }
             _ => 0.0,
@@ -478,14 +479,14 @@ impl Inner {
     /// or both with no restart (`switch_live_model`). The model request is recorded between
     /// turns and, for a named model, during one; for the CLI's default model it is recorded
     /// between turns only (part 2 of the 2.1.311 recordings, scenario 13) and is sent during
-    /// a turn all the same. The effort request is recorded between turns only, and is sent
-    /// only then: a new level, and no level for a session that has one (`effortLevel: null`
-    /// takes the level away at once and for the next turns, "medium" after it, on a process
-    /// started with `--effort low`, `high` or `max`: part 4 §4 and part 5 §8,
-    /// `r7-effort-null-low-*` and `-max-*`, n=2 each; it is read back, as a level is:
-    /// `set_live_effort`). None = the switch
-    /// needs the restart: another CLI, no live process, a change of effort while the agent
-    /// works, or an effort level Claude Code does not list.
+    /// a turn all the same. The effort request: a new level, and no level for a session that
+    /// has one (`effortLevel: null` takes the level away at once and for the next turns,
+    /// "medium" after it, on a process started with `--effort low`, `high` or `max`: part 4 §4
+    /// and part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2 each; it is read back, as a
+    /// level is: `set_live_effort`). It is sent while a turn runs or prompts wait too: the CLI
+    /// takes both forms during a tool call of a turn, and its settings name the new level at
+    /// once (part 6 §12, `r8-effort-mid-turn-*`, n=2 each). None = the switch needs the
+    /// restart: another CLI, no live process, or an effort level Claude Code does not list.
     fn live_model_switch(&self, agent: &Agent, model: Option<&str>) -> Option<LiveSwitch> {
         let (name, effort) = classify::split_model_effort(model);
         let live = lock(&self.live);
@@ -496,7 +497,7 @@ impl Inner {
             Some(e) => (effort_now.as_ref() != Some(&e)).then_some(Some(e)),
         };
         let unknown = |e: &Option<String>| e.as_ref().is_some_and(|e| !claude::EFFORT_LEVELS.contains(&e.as_str()));
-        if effort.as_ref().is_some_and(|e| unknown(e) || l.turn_active || l.queued > 0) {
+        if effort.as_ref().is_some_and(unknown) {
             return None;
         }
         // The session's model has two names: the one the run was started with or last

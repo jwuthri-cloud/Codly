@@ -168,7 +168,9 @@ impl Inner {
     /// task): a task's worker and reviewer are not told to send a message, since Codly moves
     /// their task on (`run_limit_turn_end`), and a Lead's turn may have been started by Codly
     /// (a worker's question, a follow-up), not by a message of yours. Any other agent: the
-    /// run's own words, which ask you to send your message again.
+    /// run's own words, which ask you to send your message again. The run's words end, in each
+    /// form, with the sentence that the run can end a little above its limit
+    /// (`claude::run_limit_reached_then`; recorded 19% and 45% above: part 6, section 6).
     pub(super) fn run_limit_words(&self, run_id: &str, role: Role, task: bool, kind: &mut EventKind) {
         let said = match kind {
             EventKind::Error { message, .. } => message,
