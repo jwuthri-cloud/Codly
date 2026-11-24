@@ -204,6 +204,10 @@ Differences from the part 6 method:
   conversation is copied.
 - Section 7 runs the interactive `claude` in a pseudo-terminal (`r9_lib.Terminal`). Its screen is read only to wait
   for words and is never written to a fixture; those fixtures (`-a`, `-c`) hold the driver's notes only.
+- Section 7 ran under the owner's REAL HOME and accepted the CLI's trust question there ("Yes, I trust this
+  folder"): the CLI saved a trust entry for each of the two work folders (`projects["<capture folder>/work/r9-terminal-1"]`
+  and `-2` of the real `~/.claude.json`). Part 6's rule asks for a throw-away HOME for every run that writes a
+  setting; this run did not keep it, and was not approved in advance. A later recording needs the owner's OK first.
 - In quoted lines `"…":"…"` stands for keys left out; `# t=` lines are seconds since the process started.
 """ % (N_NEVER, sum(len(R1["user-declared", s]) for s in SRC1), N_REPO_ON, N_REPO_ON, 0, len(R1["off-repo-local", "user"]), N_USER_ALONE,
        len(USER_ALONE[4]), len(USER_ALONE[5]), len(USER_ALONE[6]), len(USER_ALONE[7]), len(ALL), SPENT, RUNNING))
@@ -427,7 +431,11 @@ for lab in L3:
           "the fork's notification in " + b)
     empty = [r for r in results(b) if r["num_turns"] == 0]
     check(len(empty) == 1 and empty[0]["total_cost_usd"] == 0, "the fork's empty result in " + b)
-    LIVE.append(lab)
+    first_sent = next(i for i, l in enumerate(fx(b)) if "_sent" in l)
+    check(first_sent < min(i for i, l in enumerate(fx(b)) if is_cli(l)), "the host's message is sent before the fork's first line in " + b)
+    check(xb["first_sessions_last_total_cost_usd"] > 0 and abs(xb["total_cost_usd"] - xb["cost_of_this_turn"]) < 1e-9,
+          "the live fork's total is its own turn only in " + b)
+    LIVE.append((lab, xb))
 b = "r9-fork-live-%s-b" % L3[0]
 w("\nThe fork of the live session (`%s`): its first lines, up to the empty `result` (no model request: `num_turns` 0), the answer and the "
   "note:\n" % b)
@@ -440,15 +448,22 @@ w("""What the adapter can rely on (n=2):
 - A fork while the first process still runs with a background command: the first process is untouched. No line came
   to it while the fork ran; its command still ran and stayed in its list; its next turn ran in its own session and
   knew its words; `stop_task` then ended the command.
-- The FORK, at its start and before the host's message, writes a `task_notification` `"status":"stopped"` for that
-  command, `"summary":"Background shell command didn't finish before the previous session ended"`, and a `result`
-  with `num_turns` 0 and no model request (cost 0); its answer to the host's message is the NEXT `result`. The
-  command was NOT stopped: it still ran in the first process. A host must not end that command's row on this line,
-  and must not take the empty `result` as the answer to its message.
+- The FORK, after the host's first message and before its answer, writes a `task_notification` `"status":"stopped"`
+  for that command, `"summary":"Background shell command didn't finish before the previous session ended"`, and a
+  `result` with `num_turns` 0 and no model request (cost 0); its answer to the host's message is the NEXT `result`.
+  In both runs the host's message was the first line sent, before any line of the CLI: whether the fork writes these
+  lines by itself when no message comes is not recorded. The command was NOT stopped: it still ran in the first
+  process. A host must not end that command's row on this line, and must not take the empty `result` as the answer
+  to its message.
 - The fork knew `harbor` (the first process's turn before the fork) and nothing after it.
+- The live fork's `total_cost_usd` is its own turn only (%s), not the first session's total
+  (%s) plus its turn, unlike the fork of an ended session above: a host that adds up a
+  session's cost must not read the fork's total as carrying the first session's.
 - Not recorded: a fork while the first process's TURN runs; a fork of a session whose helper still runs in the
-  background.
-""")
+  background; a fork that gets no message at once; a fork of a session whose last turn was interrupted in a tool call
+  (the forks here are of a new two-turn session, not of section 2's session); a plain `--resume` of a live session
+  (the control for whether the `stopped` line belongs to the fork).
+""" % (" / ".join("%.8f" % x["total_cost_usd"] for _, x in LIVE), " / ".join("%.8f" % x["first_sessions_last_total_cost_usd"] for _, x in LIVE)))
 
 # ================================================================= 4
 w("## 4. The CLI's own file rewind beyond the Edit tool\n")
@@ -617,14 +632,19 @@ for r in PX:
     check(note(r[2], "proxy_connects") >= 1 and note(r[2], "exit_code") == 0, "the proxy carried turn 2 of " + r[2])
 DNS_TEXT = sorted({r[3]["result"] for r in DN})
 DNS_RETRIES = sorted({len(r[4]) for r in DN})
+ATTEMPTS6 = sorted({x["attempt"] for r in ROWS6 for x in r[4]})
+WAITS6 = ", ".join("%d: %.1f-%.1f s" % (a, min(x["retry_delay_ms"] for r in ROWS6 for x in r[4] if x["attempt"] == a) / 1000.0,
+                                         max(x["retry_delay_ms"] for r in ROWS6 for x in r[4] if x["attempt"] == a) / 1000.0) for a in ATTEMPTS6)
 synthetic = [l for l in fx(PX[0][2]) if l.get("type") == "assistant" and l["message"].get("model") == "<synthetic>"]
 check(len(synthetic) == 1 and synthetic[0].get("error") == "server_error" and synthetic[0].get("is_api_error_message"), "the synthetic assistant line of " + PX[0][2])
 w("""
 What the adapter can rely on (n=2 per way):
 - With the service unreachable the turn does not fail at once: the CLI retries. Each try is a line
   `{"type":"system","subtype":"api_retry","attempt":N,"max_retries":10,"retry_delay_ms":…,"error_status":null,"error":"unknown"}`.
-  A refused proxy gave all 10 tries, and the turn's `result` came %s s after the message. The waits grow (about 0.5 s,
-  1 s, 2 s, 4 s, 10 s, 18 s, then about 35 to 39 s). Through the refused proxy each try itself also took some seconds
+  A refused proxy gave all 10 tries, and the turn's `result` came %s s after the message. The waits
+  (`retry_delay_ms`, lowest and highest per attempt over the %d runs of both ways) grow:
+  %s.
+  Through the refused proxy each try itself also took some seconds
   (the first retry line came %s s after the message); for the name that does not resolve it failed at once (%s s).
 - The end of the turn: an assistant line with `"model":"<synthetic>"`, `"error":"server_error"`,
   `"is_api_error_message":true` and the text, then the `result` with `"subtype":"success"` (not an error subtype),
@@ -637,9 +657,12 @@ What the adapter can rely on (n=2 per way):
 - So the adapter can tell "cannot reach the service" by `terminal_reason` `api_error` with `api_error_status` null
   after `api_retry` lines whose `error_status` is null; the words alone (`Request timed out`) are not enough. A host
   that shows each `api_retry` line can say "trying again (N of 10)" for up to about 5 minutes.
-- Not recorded: a network that comes back during the retries; `CLAUDE_CODE_MAX_RETRIES` or another limit on them; a
-  proxy that answers with an error; a TLS failure.
-""" % (" / ".join("%.1f" % r[3]["seconds_to_the_result"] for r in PX), " / ".join("%.1f" % r[4][0]["_seconds"] for r in PX),
+- The two ways gave two different texts and durations, so a third way may give a third: the adapter should not
+  rely on the text.
+- Not recorded: a machine with no network at all (no route, Wi-Fi off), the case a user meets most; a failed name
+  lookup of the DEFAULT API host (the `dns` runs set `ANTHROPIC_BASE_URL`); a network that comes back during the
+  retries; `CLAUDE_CODE_MAX_RETRIES` or another limit on them; a proxy that answers with an error; a TLS failure.
+""" % (" / ".join("%.1f" % r[3]["seconds_to_the_result"] for r in PX), len(ROWS6), WAITS6, " / ".join("%.1f" % r[4][0]["_seconds"] for r in PX),
        " / ".join("%.1f" % r[4][0]["_seconds"] for r in DN), " / ".join("`%s`" % x for x in DNS_TEXT), " / ".join(str(x) for x in DNS_RETRIES),
        " / ".join("%.1f" % r[3]["seconds_to_the_result"] for r in DN), " / ".join(sorted({str(note(r[2], "exit_code")) for r in DN}))))
 
@@ -777,10 +800,10 @@ w("""## Can the waiting code be built now? (as of the day of recording)
 |---|---|---|
 | 1 | `claude-part5-truth` item 1 (`claude.rs` `build_args`, `orchestrator/trust.rs`): drop `--strict-mcp-config` in a folder you have not trusted when "Use my Claude setup" is on | yes for `--setting-sources user` alone: no file of the folder started or loaded anything in %d recordings of parts 4 to 7, and a plugin a repo file names but the user never installed is not loaded (n=%d). NO for `user,local`: the folder's `.claude/settings.local.json` runs the hooks and the server of a plugin the user turned off (n=%d), and part 4 saw that file's own hooks run. Never pass `local` in an untrusted folder |
 | 2 | "Undo a turn" for the conversation (`checkpoints.rs`, `src/home/rewind.ts`) | yes: `--resume <id> --resume-session-at <uuid of the LAST complete assistant line of the last turn to keep>` works after tool calls, a helper and an interrupted turn (n=2 each), with no line about a cut call. Never a stream event's uuid; not a user message's uuid (the next turn redoes that message). Rewind only to points of the latest branch; `--resume-drops-turn <U>` can guard that exactly one turn goes |
-| 3 | "Try again from here" / "branch this agent" | yes: as part 6, also with tool calls and a helper (n=2). A fork of a LIVE session leaves the first process untouched, but the fork itself reports the first's background command as `stopped` and sends an empty `result` first (n=2): the adapter must ignore both |
+| 3 | "Try again from here" / "branch this agent" | yes: as part 6, also with tool calls and a helper (n=2). A fork of a LIVE session leaves the first process untouched, but the fork itself reports the first's background command as `stopped` and sends an empty `result` before its answer to the host's first message (n=2): the adapter must ignore both. Not recorded: a fork of a session whose last turn was interrupted |
 | 4 | Codly's restore note (`with_restore_note`, `checkpoints.rs`) vs the CLI's own rewind | no: `rewind_files` puts back only the main thread's file tools (a Write's new file deleted; part 6: an Edit), not Bash's writes and not a helper's edit, and tells the agent nothing (n=2). Keep Codly's restore and its note |
 | 5 | The composer's "/" menu (`composerMenu.ts`) and `slash_commands` / `skills` of `init` | yes: `init.slash_commands` lists the user's and the project's commands and skills for the sources on (n=2 per variant); a listed command's prompt runs, echoed as `<command-message>…`; an unknown "/" text goes to the model as plain text (n=2): it gives a model turn, not an error. The menu can offer what `init` lists |
-| 6 | The failure words for "cannot reach the service" (`claude.rs`) | yes: up to 10 `api_retry` lines with `error_status` null, then `terminal_reason` `api_error`, `is_error` true, `api_error_status` null, text `Request timed out` (refused proxy, n=2, about 4.6 minutes) or %s (name that does not resolve, n=2, about 3 minutes); the next turn works when the network is back (n=2 per way) |
+| 6 | The failure words for "cannot reach the service" (`claude.rs`) | yes for these two forms (a machine with no network at all, and a failed lookup of the default host, are not recorded): up to 10 `api_retry` lines with `error_status` null, then `terminal_reason` `api_error`, `is_error` true, `api_error_status` null, text `Request timed out` (refused proxy, n=2, about 4.6 minutes) or %s (name that does not resolve, n=2, about 3 minutes); the next turn works when the network is back (n=2 per way) |
 | 7 | A list of an agent's earlier conversations; "pick up what I started in my terminal" | yes: `~/.claude/projects/<folder path with '-'>/<session id>.jsonl`; stream-json `--resume <id>` of a terminal session works and knows its turns (n=2) |
 | 8 | The watchdog's limits for HTTP tools (`watchdog.rs`) | yes (n=1): a silent HTTP tool ends at 300 s with the CLI's own error naming `timeout` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`; the 30 s heartbeats go on until then |
 """ % (N_USER_ALONE, N_NEVER, N_REPO_ON, " / ".join("`%s`" % x for x in DNS_TEXT)))
@@ -813,11 +836,13 @@ Not recorded in this part (still open):
   a plugin's skills and commands; the plugin forms with `project` among the sources.
 - 2: a rewind while a background command or helper of the dropped part still runs; `--resume-drops-turn` with queued
   messages or task notifications in the dropped part.
-- 3: a fork while the first process's turn runs; a fork of a session whose helper runs in the background.
+- 3: a fork while the first process's turn runs; a fork of a session whose helper runs in the background; a fork
+  that gets no message at once; a fork of a session whose last turn was interrupted; a plain `--resume` of a live
+  session (control for whether the `stopped` line is the fork's).
 - 4: a file a helper made new; a file Bash deleted; a background helper's edit.
 - 5: a user command's prompt with a login; a command with its own `allowed-tools`; a plugin's command.
-- 6: a network that comes back during the retries; a limit on the retries; a proxy that answers with an error; a
-  TLS failure.
+- 6: a machine with no network at all (no route), and a failed name lookup of the default API host; a network that
+  comes back during the retries; a limit on the retries; a proxy that answers with an error; a TLS failure.
 - 7: a resume while the terminal `claude` still runs the session; the terminal resuming a session Codly started.
 - 8: a stdio server's silence; the per-server `timeout` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` themselves (named by
   the error text, not recorded).

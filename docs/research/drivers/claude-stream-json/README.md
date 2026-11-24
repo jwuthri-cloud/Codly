@@ -152,7 +152,9 @@ Part 7 (`r9_*.py`), what is new:
   3 to 5 minutes for the CLI's retries.
 - `r9_f7_terminal_session.py` runs the INTERACTIVE `claude` in a pseudo-terminal in its work folder. The first start in
   a folder asks whether you trust it: the script picks "Yes, I trust this folder", which the CLI saves for that work
-  folder in your `~/.claude.json` (as for any folder you trust). The screen is never written to a recording; the
+  folder in your `~/.claude.json` (as for any folder you trust). That is a lasting change to your own Claude Code
+  setup: get the owner's OK before you run it, and remove the entries `projects["<CAPTURE_DIR>/work/r9-terminal-<label>"]`
+  of `~/.claude.json` afterwards if you do not want them. The screen is never written to a recording; the
   script notes the names and line types of the folder's sessions under `~/.claude/projects/`.
 - Sessions resumed and forked: `r9_f2_rewind_tools.py` and `r9_f3_fork_tools.py` resume their own sessions; they and
   `r9_f4_file_rewind_more.py` read the session's transcript for counts and line types (`r9_lib.transcript_types`).

@@ -16,6 +16,10 @@ Process b (…-b): `--resume <that session>` in stream-json (the driver's usual 
 Process c (…-c: notes only): the interactive `claude --resume <a uuid no session has>` in a pseudo-terminal: the text
            it prints (escape codes taken out, cut to 300 characters) and its exit code.
 
+This script runs with the owner's REAL HOME and login, and answering the trust question writes a lasting entry
+`projects["<CAPTURE_DIR>/work/r9-terminal-<label>"]` into the real `~/.claude.json`: get the owner's OK before you
+record again, and tell them which entries to remove afterwards.
+
 argv[1]: a label for the recording (1, 2).
 """
 import glob, json, os, sys, time, uuid
