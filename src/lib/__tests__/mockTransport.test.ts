@@ -23,6 +23,7 @@ import { REPO } from '../demo/sim';
 import { MockTransport } from '../mock';
 import { intakeUi } from '../state/intake.svelte';
 import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
+import { rustStr } from './support/source';
 
 /** The demo, as the page with this query string starts it. */
 function open(search: string): MockTransport {
@@ -133,8 +134,8 @@ describe('the demo transport', () => {
       expect(s.workspace?.name).toBe('acme/web');
       expect(s.plans.map((p) => p.status)).toEqual(['running']);
       const held = await tasks(t);
-      // Each says why it waits, in the core's own words.
-      expect(HELD).toBe(/pub const HELD: &str = "([^"]+)";/.exec(resumeRs)?.[1]);
+      // Each says why it waits, in the core's own words (`HELD` of resume.rs).
+      expect(HELD).toBe(rustStr(resumeRs, 'HELD'));
       expect([held.t1, held.t2].map((x) => [x.status, x.status_reason, x.attempt, x.branch])).toEqual([
         ['ready', HELD, 1, 'codly/dark-mode/t1'],
         ['ready', HELD, 1, 'codly/dark-mode/t2'],

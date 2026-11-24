@@ -14,8 +14,29 @@ use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -99,7 +120,7 @@ async fn start(root: &Path) -> (Arc<Core>, Arc<Mutex<Log>>) {
     let log = Arc::new(Mutex::new(Log::default()));
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts =
-        StartOptions { spawner: Some(Arc::new(FakeSpawner(log.clone()))), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+        StartOptions { spawner: Some(Arc::new(FakeSpawner(log.clone()))), env: Some(core_env()), clis: Some(vec![claude()]), index: false };
     (Core::start_with(cfg, opts).await.unwrap(), log)
 }
 
@@ -169,7 +190,7 @@ async fn a_reviewed_manifest_becomes_an_isolated_agent_with_a_standing_goal() {
     core.send_chat(&format!("agent:{}", a.id), "and again").await.unwrap();
     wait_until("the second prompt", || log.lock().unwrap().prompts.len() == 2).await;
     assert!(log.lock().unwrap().prompts[1].contains("Your standing goal"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -191,7 +212,7 @@ async fn without_isolation_the_agent_works_in_the_project_folder_and_is_told_so(
     drop(l);
     // No worktree was created for it.
     assert!(!std::fs::read_dir(dir.path().join("data")).unwrap().flatten().any(|e| e.path().join("solo").exists()));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -224,7 +245,7 @@ async fn the_core_checks_again_whatever_the_wizard_said() {
     assert!(e.contains("already exists"), "{e}");
     // Nothing half-made was left behind by the refusals.
     assert_eq!(core.snapshot().await.unwrap().agents.iter().filter(|a| a.role == Role::Solo).count(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -253,7 +274,7 @@ async fn an_exported_agent_comes_back_with_its_career_traits_and_memory() {
     let mut career = back.career.clone().unwrap();
     career.xp = 300; // as if it had worked a while
     back.career = Some(career);
-    core.shutdown().await;
+    shut_down(&core).await;
 
     let dir2 = tempfile::tempdir().unwrap();
     let repo2 = temp_repo(dir2.path());
@@ -262,7 +283,7 @@ async fn an_exported_agent_comes_back_with_its_career_traits_and_memory() {
     let b = core2.hire_from_manifest(back, false).await.unwrap();
     assert_eq!((b.name.as_str(), b.career.rank, b.career.traits.len()), ("Mina", Rank::Senior, 2));
     assert!(core2.memory_file(&b.id).await.unwrap().text.contains("make docs"));
-    core2.shutdown().await;
+    shut_down(&core2).await;
 }
 
 /// What a career adds (the traits' work rules, the track record) is said once in a run, on its
@@ -309,5 +330,5 @@ async fn the_career_block_is_on_the_first_prompt_of_a_run_only() {
     assert_eq!(l.spawns.len(), 2, "a new run");
     assert!(l.prompts[2].contains(block), "{}", l.prompts[2]);
     drop(l);
-    core.shutdown().await;
+    shut_down(&core).await;
 }

@@ -11,13 +11,35 @@ use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
 
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 /// Records every spec it is asked to start; the agent does nothing.
 struct Recorder(Arc<Mutex<Vec<SpawnSpec>>>);
 
 impl Spawner for Recorder {
-    fn spawn(&self, spec: SpawnSpec, _events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+    fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
-        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        // It exits when it is told to stop, as a CLI does: a run that does not outlives `Core::shutdown`.
+        let (agent_id, run_id) = (spec.agent_id.clone(), spec.run_id.clone());
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if matches!(cmd, AgentCmd::Shutdown) {
+                    let _ = events.send(AdapterEvent { agent_id, run_id, kind: EventKind::Exited { code: Some(0) } });
+                    break;
+                }
+            }
+        });
         let handle = AgentHandle { agent_id: spec.agent_id.clone(), run_id: spec.run_id.clone(), tx };
         self.0.lock().unwrap().push(spec);
         Box::pin(async move { Ok(handle) })
@@ -25,7 +47,7 @@ impl Spawner for Recorder {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -50,7 +72,7 @@ async fn start() -> (tempfile::TempDir, Arc<Core>, Arc<Mutex<Vec<SpawnSpec>>>) {
         default_model: None,
     };
     let specs = Arc::new(Mutex::new(vec![]));
-    let opts = StartOptions { spawner: Some(Arc::new(Recorder(specs.clone()))), env: Some(std::env::vars().collect()), clis: Some(vec![claude]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(Recorder(specs.clone()))), env: Some(core_env()), clis: Some(vec![claude]), index: false };
     let core = Core::start_with(CoreConfig { data_dir: root.path().join("data"), app_exe: PathBuf::from("/usr/bin/true") }, opts).await.unwrap();
     core.open_workspace(&repo.to_string_lossy()).await.unwrap();
     (root, core, specs)

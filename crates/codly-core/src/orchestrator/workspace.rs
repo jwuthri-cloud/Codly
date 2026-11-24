@@ -378,6 +378,7 @@ impl Inner {
         }
         // The commands you ran to try work end with the app, inside the same wait.
         tokio::join!(self.wait_for_runs(tokio::time::Instant::now() + RUNS_GRACE), super::preview::stop_all(&self.cfg.data_dir));
+        self.runs_given_up.store(lock(&self.live).len(), Ordering::SeqCst);
         // Codex agents share one app-server per account; it outlives its threads.
         let codex_stopped = tokio::time::timeout(CODEX_GRACE, crate::adapters::codex::shutdown_server()).await.is_ok();
         if !codex_stopped {

@@ -7,6 +7,14 @@ use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, StartOptions};
 use codly_core::triggers::*;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
 async fn start(dir: &std::path::Path) -> std::sync::Arc<Core> {
     let cfg = CoreConfig { data_dir: dir.to_path_buf(), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions { spawner: None, env: Some(std::env::vars().collect()), clis: Some(Vec::<CliInfo>::new()), index: false };
@@ -30,11 +38,11 @@ async fn triggers_persist_and_gate_follows_the_mode() {
     assert_eq!(saved.schedules[0].last_fired_at, None, "the UI cannot set a clock");
     assert_eq!(core.network_gate(NetworkAction::Message, "ana").await, Gate::Allow);
     assert_eq!(core.network_gate(NetworkAction::Delegate, "ana").await, Gate::Deny);
-    core.shutdown().await;
+    shut_down(&core).await;
 
     let again = start(dir.path()).await;
     let loaded = again.triggers().await.unwrap();
     assert_eq!(loaded.schedules, saved.schedules);
     assert_eq!(loaded.network.mode, NetworkMode::Converse);
-    again.shutdown().await;
+    shut_down(&again).await;
 }

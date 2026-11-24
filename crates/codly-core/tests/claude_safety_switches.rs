@@ -15,6 +15,19 @@ use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
 
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 /// Records every spec it is asked to start; the agent does nothing. With `no_sandbox`, a run
 /// that asks for the shell sandbox is not started: what the Claude adapter answers when the
 /// CLI's sandbox is not on.
@@ -24,21 +37,30 @@ struct Recorder {
 }
 
 impl Spawner for Recorder {
-    fn spawn(&self, spec: SpawnSpec, _events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
+    fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         self.specs.lock().unwrap().push(spec.clone());
         if self.no_sandbox && spec.sandbox_shell && !spec.read_only {
             let refused = anyhow::Error::new(SandboxNotOn("Claude Code did not turn its sandbox on, so Codly did not start this agent".into()));
             return Box::pin(async move { Err(refused) });
         }
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
-        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        // It exits when it is told to stop, as a CLI does: a run that does not outlives `Core::shutdown`.
+        let (agent_id, run_id) = (spec.agent_id.clone(), spec.run_id.clone());
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if matches!(cmd, AgentCmd::Shutdown) {
+                    let _ = events.send(AdapterEvent { agent_id, run_id, kind: EventKind::Exited { code: Some(0) } });
+                    break;
+                }
+            }
+        });
         let handle = AgentHandle { agent_id: spec.agent_id, run_id: spec.run_id, tx };
         Box::pin(async move { Ok(handle) })
     }
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -65,7 +87,7 @@ async fn start(no_sandbox: bool) -> (tempfile::TempDir, Arc<Core>, Arc<Mutex<Vec
         install: codly_core::env::install_hint(Provider::Claude),
         default_model: None,
     };
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+    let mut env: HashMap<String, String> = core_env();
     env.insert("CLAUDE_CODE_USE_BEDROCK".into(), "1".into());
     env.insert("CLAUDE_CODE_ENTRYPOINT".into(), "cli".into());
     let specs = Arc::new(Mutex::new(vec![]));

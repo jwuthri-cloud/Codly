@@ -1,19 +1,18 @@
 // The secondary inks carry small text the user must read: times, the queue and status lines,
 // the model and permission labels, diff line numbers. WCAG AA asks 4.5:1 for such text. This
 // reads the real token values and computes the ratios, so a new value that looks fine but
-// measures 4.3:1 fails here.
+// measures 4.3:1 fails here. Pins the two theme blocks of src/styles/tokens.css, found by their
+// selectors whatever their spacing or line breaks.
 import { describe, expect, it } from 'vitest';
+import { cssBlock } from '../../lib/__tests__/support/source';
 import css from '../tokens.css?raw';
 
 type Rgb = [number, number, number];
 type Rgba = { rgb: Rgb; alpha: number };
 
-/** The declarations of the block that starts with `selector`. */
+/** The declarations of the rule for `selector`. */
 function block(selector: string): Map<string, string> {
-  const start = css.indexOf(`${selector} {`);
-  expect(start, selector).toBeGreaterThanOrEqual(0);
-  const body = css.slice(start, css.indexOf('\n}', start));
-  return new Map([...body.matchAll(/(--[\w-]+):\s*([^;]+);/g)].map((m): [string, string] => [m[1], m[2].trim()]));
+  return new Map([...cssBlock(css, selector).matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m): [string, string] => [m[1], m[2].trim()]));
 }
 
 function color(value: string): Rgba {

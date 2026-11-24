@@ -5,8 +5,21 @@ use std::process::Command;
 
 use codly_core::git::{Git, MergeOutcome};
 
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -30,7 +43,7 @@ fn repo(identity: bool) -> (tempfile::TempDir, PathBuf) {
 #[tokio::test]
 async fn reads() {
     let (_d, repo) = repo(true);
-    let git = Git::from_process_env();
+    let git = Git::new("git".into(), core_env());
     assert!(git.is_repo(&repo).await);
     assert!(!git.is_repo(repo.parent().unwrap()).await);
     assert_eq!(std::fs::canonicalize(git.toplevel(&repo.join(".")).await.unwrap()).unwrap(), std::fs::canonicalize(&repo).unwrap());
@@ -50,10 +63,7 @@ async fn reads() {
 #[tokio::test]
 async fn worktree_commit_merge_cycle() {
     let (d, repo) = repo(false); // no identity: Codly's fallback identity must kick in
-    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    env.insert("GIT_CONFIG_GLOBAL".into(), "/dev/null".into());
-    env.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
-    let git = Git::new("git".into(), env);
+    let git = Git::new("git".into(), core_env());
     let base = git.head(&repo).await.unwrap().unwrap();
     let wt_root = d.path().join("worktrees");
 
@@ -99,7 +109,7 @@ async fn worktree_commit_merge_cycle() {
 #[tokio::test]
 async fn conflicts_are_detected_aborted_and_resolvable() {
     let (d, repo) = repo(true);
-    let git = Git::from_process_env();
+    let git = Git::new("git".into(), core_env());
     let base = git.head(&repo).await.unwrap().unwrap();
     let root = d.path().join("wt");
     let integ = root.join("integration");
@@ -143,7 +153,7 @@ async fn conflicts_are_detected_aborted_and_resolvable() {
 #[tokio::test]
 async fn dirty_worktrees_are_kept_unless_forced() {
     let (d, repo) = repo(true);
-    let git = Git::from_process_env();
+    let git = Git::new("git".into(), core_env());
     let base = git.head(&repo).await.unwrap().unwrap();
     let wt = d.path().join("wt");
     git.worktree_add(&repo, &wt, "w", &base).await.unwrap();
@@ -163,7 +173,7 @@ async fn dirty_worktrees_are_kept_unless_forced() {
 #[tokio::test]
 async fn user_hooks_do_not_run_on_codly_commits() {
     let (_d, repo) = repo(true);
-    let git = Git::from_process_env();
+    let git = Git::new("git".into(), core_env());
     let hook = repo.join(".git/hooks/pre-commit");
     std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
     #[cfg(unix)]

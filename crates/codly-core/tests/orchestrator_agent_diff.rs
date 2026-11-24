@@ -12,8 +12,29 @@ use codly_core::hire::{HireManifest, SCHEMA};
 use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, StartOptions};
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -48,7 +69,7 @@ async fn office(dir: &Path) -> (Arc<Core>, PathBuf) {
     git(&repo, &["config", "user.email", "test@example.com"]);
     commit(&repo, "README.md", "# demo\n");
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: None, env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: None, env: Some(core_env()), clis: Some(vec![claude()]), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     let repo = PathBuf::from(core.open_workspace(repo.to_str().unwrap()).await.unwrap().repo_path);
     (core, repo)
@@ -82,7 +103,7 @@ async fn a_1_to_1_agents_diff_has_its_commits_its_edits_and_its_new_files() {
     assert!(diff.contains("+++ b/new.txt") && diff.contains("+a new file"), "{diff}");
     assert!(!diff.contains("mine.txt"), "your commit on main is not the agent's: {diff}");
     assert_eq!(state(&wt), before, "the worktree and its index are as they were");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -125,7 +146,7 @@ async fn an_agent_in_the_project_folder_shows_its_uncommitted_changes() {
     assert!(!diff.contains("build.log"), "an ignored file is not work: {diff}");
     assert_eq!(state(&repo), before, "your checkout and its index are as they were");
     assert_eq!(git(&repo, &["count-objects", "-v"]), objects, "no object was written into your repository");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -138,5 +159,5 @@ async fn an_agent_whose_worktree_is_gone_has_an_empty_diff() {
     let wt = agent.worktree.clone().unwrap();
     git(&repo, &["worktree", "remove", "--force", &wt]);
     assert_eq!(core.agent_diff(&agent.id).await.unwrap(), "");
-    core.shutdown().await;
+    shut_down(&core).await;
 }

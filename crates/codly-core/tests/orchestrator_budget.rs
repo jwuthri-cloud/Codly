@@ -17,13 +17,34 @@ use codly_core::orchestrator::breaker::BreakerConfig;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 /// What one turn of the fake worker uses.
 const TURN_TOKENS: i64 = 5000;
 const BUDGET: i64 = 1000;
 const HOLD: &str = "paused: the token budget of 1000 work tokens is used up; raise it or press Reset counters in Settings → Autonomy & Budgets";
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -129,7 +150,7 @@ async fn start_with(dir: &Path, repo: &Path, spawner: Arc<dyn Spawner>, provider
 async fn start_on(dir: &Path, repo: &Path, spawner: Arc<dyn Spawner>, providers: &[Provider]) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let clis = providers.iter().map(|p| cli(*p)).collect();
-    let opts = StartOptions { spawner: Some(spawner), env: Some(std::env::vars().collect()), clis: Some(clis), index: false };
+    let opts = StartOptions { spawner: Some(spawner), env: Some(core_env()), clis: Some(clis), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     core.update_settings(Settings { lead_followups: false, ..Default::default() }).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
@@ -193,7 +214,7 @@ async fn past_the_budget_no_task_starts_also_after_a_restart() {
     assert!(told[0].contains("work tokens, over the budget of 1000. No new task starts.") && told[0].contains("Reset counters"), "{}", told[0]);
 
     // Quit and start again: the count is the same, so the budget still holds.
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     let core = start(dir.path(), &repo, &runs).await;
     assert_eq!(core.breaker_status().await.unwrap().used, before.used, "a restart does not give the budget back");
@@ -212,7 +233,7 @@ async fn past_the_budget_no_task_starts_also_after_a_restart() {
     wait_for("a waiting task to start", async || (runs.load(Ordering::SeqCst) > 1).then_some(())).await;
     assert_eq!(said(&core, "The budget has room again").await.len(), 1);
     assert!(core.breaker_status().await.unwrap().today.tokens >= before.today.tokens, "today's total is not a budget: Reset keeps it");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// What one turn of the fake OpenCode agent costs.
@@ -297,7 +318,7 @@ async fn a_resumed_opencode_session_is_told_what_it_cost_before() {
             (used > cost && used == turns.load(Ordering::SeqCst) as f64 * TURN_COST).then_some(())
         })
         .await;
-        core.shutdown().await;
+        shut_down(&core).await;
     }
     assert_eq!(*told.lock().unwrap(), before, "each run is told what the session cost before it");
     assert_eq!(before[0], 0.0, "a new session cost nothing before");
@@ -466,7 +487,7 @@ async fn a_claude_run_starts_with_what_is_left_of_the_cost_budget() {
     assert_eq!(hire_and_talk(&core, &fake, Provider::Codex).await, None);
     core.set_breaker_config(BreakerConfig { enabled: false, cost_budget_usd: 1.0, ..Default::default() }).await.unwrap();
     assert_eq!(hire_and_talk(&core, &fake, Provider::Claude).await, None);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A turn that reaches its run's own limit says why, and Codly ends that run: the process
@@ -508,7 +529,7 @@ async fn a_turn_that_reaches_its_runs_own_limit_ends_that_run() {
     core.send_chat(&thread, "Hi").await.unwrap();
     wait_for("a third run", async || (fake.limits().len() == 3).then_some(())).await;
     assert_eq!(fake.limits(), [(Provider::Claude, Some(1.0)), (Provider::Claude, Some(3.95)), (Provider::Claude, Some(3.85))]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A task's worker whose run reaches its limit fails as a worker does, never to the gate: its
@@ -535,7 +556,7 @@ async fn a_worker_whose_run_reaches_its_limit_waits_for_the_budget() {
     })
     .await;
     assert_eq!((fake.stops(), fake.limits()), (1, vec![(Provider::Claude, Some(1.0))]), "its run ended, and no other started");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The decisions of `decision_type` so far, oldest first.
@@ -584,7 +605,7 @@ async fn a_worker_stopped_at_the_budget_again_after_a_raise_still_waits_for_the_
     let limits: Vec<Option<f64>> = fake.limits().into_iter().map(|(_, l)| l).collect();
     assert_eq!(limits, [Some(1.0), Some(0.95), Some(0.95)], "each run starts with what is left then");
     assert_eq!(decisions(&core, "retry").await, Vec::<String>::new(), "no failure counted, no restart promised");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker's run can reach its limit while the team's budget has room (you raised it while the
@@ -613,7 +634,7 @@ async fn a_worker_whose_run_reaches_its_limit_with_budget_left_starts_again() {
         errors_of(&core, &worker).await,
         [format!("This run of {name} reached the limit it started with (1.00 USD of your budget were left then). Codly ends this run; the task's card says what comes next.")]
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A task's reviewer whose run reaches its limit before its verdict: the review stops, and the
@@ -643,7 +664,7 @@ async fn a_reviewer_whose_run_reaches_its_limit_stops_the_review() {
     let review = decisions(&core, "review").await;
     assert!(review.iter().any(|d| d.ends_with(reason)), "{review:?}");
     assert!(!review.iter().any(|d| d.contains("no verdict")), "not merged without its review: {review:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Recorded (part 5 §10, `r7-budget-during-call-*`, n=2): right after the turn that reaches the

@@ -17,8 +17,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{Notify, mpsc};
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -158,7 +179,7 @@ async fn start_with(data: &Path, seen: &Arc<Mutex<Seen>>, repo: &Path, team: Vec
     let cfg = CoreConfig { data_dir: data.to_path_buf(), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![cli(Provider::Claude), cli(Provider::Gemini)]),
         index: false,
     };
@@ -267,7 +288,7 @@ async fn an_idle_agent_goes_to_your_terminal_and_comes_back_on_the_same_session(
     assert_eq!(agent_now(&core, &id).await.session_id.as_deref(), Some("sess-1"));
 
     // It outlives a restart of Codly: a terminal of your own may still have the session.
-    core.shutdown().await;
+    shut_down(&core).await;
     let seen = Arc::new(Mutex::new(Seen::default()));
     let core = start(&dir.path().join("data"), &seen, &repo).await;
     assert_eq!(core.takeovers().await.unwrap(), [took.clone()]);
@@ -281,7 +302,7 @@ async fn an_idle_agent_goes_to_your_terminal_and_comes_back_on_the_same_session(
     say(&core, &seen, &id, "welcome back").await;
     assert_eq!(seen.lock().unwrap().starts, ["resume sess-1"]);
     assert_eq!(agent_now(&core, &id).await.session_id.as_deref(), Some("sess-1"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -309,7 +330,7 @@ async fn an_agent_in_a_turn_stays_with_codly() {
     wait_for("its process to end", async || agent_now(&core, &id).await.run_id.is_none().then_some(())).await;
     let took = core.take_over_agent(&id).await.unwrap().takeover.expect("it is in your terminal");
     assert_eq!(took.command, "claude --resume sess-1");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -347,7 +368,7 @@ async fn a_worker_goes_only_when_its_task_stopped_and_the_retry_waits_for_the_gi
     core.give_back_agent(&worker).await.unwrap();
     wait_for("the worker to go on", async || (seen.lock().unwrap().prompts.len() == 2).then_some(())).await;
     assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -367,7 +388,7 @@ async fn a_cli_without_a_resume_command_stays_with_codly() {
     assert_eq!(seen.lock().unwrap().shutdowns, 0, "its process is left alone");
     // Not marked: it still takes messages.
     say(&core, &seen, &id, "still here?").await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A start on its way is a turn on its way: the message it starts for is not lost to a
@@ -405,7 +426,7 @@ async fn an_agent_whose_process_is_starting_stays_with_codly() {
     sending.await.unwrap().unwrap();
     wait_for("the message to arrive", async || seen.lock().unwrap().prompts.iter().any(|p| p.ends_with("one more thing")).then_some(())).await;
     assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The agent is in your terminal only when Codly's process for its session is gone. Until
@@ -449,7 +470,7 @@ async fn an_agent_is_in_your_terminal_only_once_its_process_is_gone() {
     let took = core.take_over_agent(&id).await.unwrap().takeover.expect("it is in your terminal");
     assert_eq!(core.takeovers().await.unwrap(), [took]);
     assert_eq!(seen.lock().unwrap().starts, ["new"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The guard of every start, past the ones in front of it: a Lead's message to a team member
@@ -488,5 +509,5 @@ async fn a_leads_message_starts_nothing_for_a_member_in_your_terminal() {
     wait_for("Ana to read it", async || seen.lock().unwrap().prompts.iter().any(|p| p.contains("What did you change?")).then_some(())).await;
     assert_eq!(seen.lock().unwrap().starts, ["new", "new", "resume sess-1"]);
     assert_eq!(agent_now(&core, &ana).await.session_id.as_deref(), Some("sess-1"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }

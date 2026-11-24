@@ -1,5 +1,7 @@
 // Lots as data: the Studio from its JSON is the office it always was, the Garage and the Small
 // office have what the work needs within reach of their door, and rooms are found from walls.
+// Pins the station ids that office/behavior.ts sends agents to (read from its source, in any
+// quote style): each must be a station of the Studio with slots, or an agent walks to nowhere.
 import { describe, expect, it } from 'vitest';
 import type { Lot } from '../../lib/gen/Lot';
 import type { Placed } from '../../lib/gen/Placed';
@@ -15,7 +17,7 @@ const reachable = (L: OfficeLayout, x: number, z: number) => {
 };
 
 /** Station ids the behaviour layer sends agents to. */
-const USED = [...new Set([...BEHAVIOR.matchAll(/'((?:library|nap|meeting|server|games|lead)\.[a-z]+|board|mail|archive|kitchen)'/g)].map((m) => m[1]))] as StationId[];
+const USED = [...new Set([...BEHAVIOR.matchAll(/(['"`])((?:library|nap|meeting|server|games|lead)\.[a-z]+|board|mail|archive|kitchen)\1/g)].map((m) => m[2]))] as StationId[];
 
 describe('the Studio, from studio.json', () => {
   const L = officeLayout(TEMPLATES.studio);

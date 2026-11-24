@@ -15,8 +15,29 @@ use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOpti
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -313,7 +334,7 @@ async fn hired_agent(dir: &Path, seen: &Arc<Mutex<Seen>>) -> (Arc<Core>, String)
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -416,7 +437,7 @@ async fn a_mode_switches_the_live_session_and_is_set_again_on_the_next_run() {
     assert_eq!(seen.lock().unwrap().log.iter().filter(|l| l.starts_with("mode:")).count(), 2);
 
     assert!(core.set_agent_permission_mode("nobody", PermissionMode::Plan).await.is_err());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -432,7 +453,7 @@ async fn a_mode_chosen_while_the_agent_rests_is_set_when_it_starts() {
     let log = seen.lock().unwrap().log.clone();
     assert_eq!(log[0], "mode:acceptEdits", "{log:?}");
     assert!(log[1].starts_with("prompt:") && log[1].ends_with("hello"), "{log:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -457,7 +478,7 @@ async fn a_mode_the_cli_refuses_is_not_kept() {
             if message.contains("could not go back to the mode \"plan first\"") && message.contains("It asks before every edit instead"))),
         "{events:?}"
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -493,7 +514,7 @@ async fn a_live_claude_agent_changes_its_model_without_a_restart() {
         assert_eq!((s.runs.len(), s.shutdowns), (1, 0), "the same process goes on");
     }
     assert!(codly_said(&core, &id, "now works with opus and thinking effort high, in the same conversation").await);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Does the agent's thread have a line of Codly's with this text?
@@ -559,7 +580,7 @@ async fn a_live_claude_agent_changes_its_effort_and_takes_the_default_model_with
         assert!(!s.log.iter().any(|l| l == "effort:minimal"), "{:?}", s.log);
         assert_eq!(s.shutdowns, 2);
     }
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Before, a thinking effort could not be taken away from a live session: the agent was
@@ -599,7 +620,7 @@ async fn a_live_claude_agent_gives_up_its_effort_without_a_restart() {
     stop(&core, &id).await;
     turn(&core, &id, "again").await;
     assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("opus".to_string())));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A 1:1 agent with a short model name and an effort ("opus:high"). Claude Code names the
@@ -639,7 +660,7 @@ async fn the_agents_row_keeps_its_effort_and_an_effort_alone_is_no_change_of_mod
     turn(&core, &id, "again").await;
     assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("claude-opus-5-5:low".to_string())));
     assert_eq!(agent(&core, &id).await.model.as_deref(), Some("claude-opus-5-5:low"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Before, a model change was refused while a turn ran ("is still working"). Claude Code takes
@@ -672,7 +693,7 @@ async fn a_model_switch_reaches_the_live_session_during_a_turn() {
     settled(&core, &id, 2).await;
     assert_eq!(agent(&core, &id).await.run_id, run);
     assert_eq!(seen.lock().unwrap().runs.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Before, a 1:1 agent on a task could not change its model ("is on a task": a restart would
@@ -706,7 +727,7 @@ async fn a_1_to_1_agent_on_a_task_changes_its_model_without_a_restart() {
     assert!(e.contains("is on a task"), "{e}");
     assert_eq!(last_seen(&seen), "model:default");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// "Plan first" promises that nothing changes before you accept the plan. The approval rules
@@ -752,7 +773,7 @@ async fn an_agent_that_plans_first_gets_only_reads_approved_until_its_plan_is_ac
     wait_for("the agent's mode to follow the CLI", async || (agent(&core, &id).await.permission_mode == Some(PermissionMode::Ask)).then_some(())).await;
     turn(&core, &id, "ASK-TO-RUN: touch notes.txt").await;
     assert_eq!(last_seen(&seen), "allowed:touch notes.txt");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// In "accept edits" Claude Code does not ask about edits or file-writing shell commands in the
@@ -816,7 +837,7 @@ async fn accept_edits_is_refused_and_ends_where_every_change_asks_you() {
     core.set_request_prefs(&thread, own(ApprovalMode::Strict)).await.unwrap();
     assert_eq!(mode().await, Some(PermissionMode::Ask));
     assert_eq!(modes_asked(&seen).len(), asked);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// An agent in "accept edits" moves to an office where every change asks you. Its first run
@@ -853,7 +874,7 @@ async fn accept_edits_does_not_follow_an_agent_into_an_office_where_every_change
             if decision_type == "agent_control" && summary.contains("asks for edits again") && summary.contains("\"Ask first\""))),
         "the change is on record in the new office: {events:?}"
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -880,7 +901,7 @@ async fn compact_now_is_a_turn_of_its_own_between_turns() {
     stop(&core, &id).await;
     let e = core.compact_agent(&id).await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -897,7 +918,7 @@ async fn the_context_reading_comes_from_the_live_session() {
     stop(&core, &id).await;
     let e = core.agent_context_usage(&id).await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Your acts on a live agent, as the History shows them.
@@ -934,7 +955,7 @@ async fn a_reconnect_reaches_the_live_session_and_its_answer_is_yours() {
     stop(&core, &id).await;
     let e = core.reconnect_agent_mcp(&id, "linear").await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -977,7 +998,7 @@ async fn a_background_command_is_stopped_through_the_live_session() {
     stop(&core, &id).await;
     let e = core.stop_agent_task(&id, "tid-2").await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// "Turn off" and "Turn on" of an MCP server reach the live session, and each is on record
@@ -1021,7 +1042,7 @@ async fn an_mcp_server_is_turned_off_and_on_through_the_live_session() {
     stop(&core, &id).await;
     let e = core.set_agent_mcp_enabled(&id, "docs", false).await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Claude Code answers a reconnect when its try to connect is over, and a server can take
@@ -1036,7 +1057,7 @@ async fn a_reconnect_waits_for_a_server_that_is_slow_to_connect() {
     assert_eq!(e, "Claude Code answered: Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}");
 
     stop(&core, &id).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The rows of a snapshot's `session_events`, as "<server> <state>" and, for a list of
@@ -1088,7 +1109,7 @@ async fn a_fresh_snapshot_has_the_servers_and_the_background_work_of_a_long_run(
     // The process is gone, and its servers and its background work with it.
     stop(&core, &id).await;
     assert_eq!(session_lines(&core.snapshot().await.unwrap().session_events), Vec::<String>::new());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Every run reports each of its MCP servers when it starts. A server that stands where the
@@ -1139,7 +1160,7 @@ async fn a_new_run_with_the_same_servers_writes_no_rows_and_still_shows_them() {
     turn(&core, &id, "DOCS-FAILS").await;
     assert_eq!(server_rows().await.len(), 4);
     stop(&core, &id).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Recorded (part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2 each; part 4 §4 for `high`):

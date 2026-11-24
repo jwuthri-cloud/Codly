@@ -29,11 +29,32 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 /// Where the store keeps the tasks that wait for your Resume.
 const HOLD_ROW: &str = "resume_hold";
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -189,7 +210,7 @@ fn works() -> Script {
 async fn start_core(dir: &Path, seen: &Arc<Mutex<Seen>>, script: Script) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let fake = Fake { seen: seen.clone(), script };
-    let opts = StartOptions { spawner: Some(Arc::new(fake)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(fake)), env: Some(core_env()), clis: Some(vec![claude()]), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -546,7 +567,7 @@ async fn work_that_was_under_way_goes_on_only_after_your_resume() {
     // A second Resume has nothing to do.
     core.resume_work().await.unwrap();
     assert_eq!(resumed(&core).await.len(), 2);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// With "never" there is no question, and the rule is the same: nothing starts before Resume
@@ -577,7 +598,7 @@ async fn work_that_was_about_to_start_waits_for_your_resume_too() {
     let task = task_ended(&core, &task_id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert!(resumed(&core).await.is_empty(), "it started for the first time: nothing was resumed");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The office was paused when Codly closed. The task that was in work still waits for your
@@ -612,7 +633,7 @@ async fn a_task_of_a_paused_office_is_resumed_and_waits_for_the_office() {
     core.update_settings(Settings { paused: false, ..core.settings() }).await.unwrap();
     let task = task_ended(&core, &task_id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// You close Codly again without an answer: the next start asks again, for the same tasks.
@@ -641,7 +662,7 @@ async fn a_question_you_left_open_is_asked_again_at_the_next_start() {
         Some(task_now(&core, &retried.0).await).filter(|t| t.status_reason.as_deref() == Some(HELD))
     })
     .await;
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap().is_some(), "the tasks that wait are in the store");
 
@@ -668,7 +689,7 @@ async fn a_question_you_left_open_is_asked_again_at_the_next_start() {
     }
     let lines = ["Resumed after restart: Codly checks its work again", "Resumed after restart: its worker goes on where it stopped"];
     assert_eq!(resumed(&core).await, lines, "the retried task started over: it was not resumed");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "your Resume ended the hold");
 }
@@ -694,7 +715,7 @@ async fn a_question_left_open_in_a_paused_office_is_asked_again() {
         Some(task_now(&core, &task_id).await).filter(|t| t.status_reason.as_deref().is_some_and(|r| r.starts_with("paused: no new tasks start")))
     })
     .await;
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     let core = start_core(dir.path(), &seen, works()).await;
@@ -708,7 +729,7 @@ async fn a_question_left_open_in_a_paused_office_is_asked_again() {
     let task = task_ended(&core, &task_id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(resumed(&core).await.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Codly asked, and you closed it without an answer. At the next start the settings say
@@ -731,7 +752,7 @@ async fn work_you_left_waiting_goes_on_at_the_next_start_once_you_chose_always()
     passes(&core).await;
     assert!(seen.lock().unwrap().runs.is_empty(), "nothing goes on before your Resume");
     let always = Settings { resume_on_launch: ResumeOnLaunch::Always, ..core.settings() };
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     store_of(dir.path()).save_settings(&always).unwrap();
 
@@ -749,7 +770,7 @@ async fn work_you_left_waiting_goes_on_at_the_next_start_once_you_chose_always()
     }
     let lines = ["Resumed after restart: Codly checks its work again", "Resumed after restart: its worker goes on where it stopped"];
     assert_eq!(resumed(&core).await, lines);
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "nothing waits any more");
 }
@@ -781,7 +802,7 @@ async fn a_finished_plan_runs_its_checks_only_after_your_resume() {
     wait_for("the plan to finish", async || (plan_now(&core, &plan_id).await.status == PlanStatus::Done).then_some(())).await;
     assert_eq!(checks_run(&core).await, [(PLAN_CHECK.to_string(), true)]);
     assert!(seen.lock().unwrap().runs.is_empty(), "no worker was needed");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A task used its first fix round, and Codly restarts while its worker is on the fix. The
@@ -805,7 +826,7 @@ async fn fix_rounds_used_before_a_restart_stay_used() {
     wait_for("the worker's turn on the first fix", async || (seen.lock().unwrap().prompts.len() == 1).then_some(())).await;
     let before = fix_rounds(&core).await;
     assert!(before.len() == 1 && before[0].starts_with("a1: fix round 1/2"), "{before:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     let kept: Value = serde_json::from_str(&store_of(dir.path()).kv_get(&rounds_key).unwrap().expect("the count is in the store")).unwrap();
     assert_eq!(kept["fix"], 1, "{kept}");
@@ -818,7 +839,7 @@ async fn fix_rounds_used_before_a_restart_stay_used() {
     assert_eq!(all.len(), 3, "{all:?}");
     assert!(all[1].starts_with("a1: fix round 2/2"), "the round used before the restart was not handed out again: {all:?}");
     assert!(all[2].contains("after 2 fix rounds"), "{all:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(&rounds_key).unwrap(), None, "a task that is over keeps no count");
 }
@@ -840,7 +861,7 @@ async fn a_task_that_waits_for_your_answer_keeps_its_files_after_a_restart() {
     core.move_task(&asks.id, TaskStatus::Ready).await.unwrap();
     let card = wait_for("the question", async || open_question(&core).await).await;
     wait_for("the task to wait for you", async || (task_now(&core, &asks.id).await.status == TaskStatus::Blocked).then_some(())).await;
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     let core = start_core(dir.path(), &seen, script).await;
@@ -865,7 +886,7 @@ async fn a_task_that_waits_for_your_answer_keeps_its_files_after_a_restart() {
     }
     let answered = seen.lock().unwrap().prompts[1].clone();
     assert!(answered.starts_with("[User] Answer to your question \"Which greeting?\": casual please"), "{answered}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// You cancel the tasks that were in work instead of resuming them. The question counts only
@@ -898,7 +919,7 @@ async fn a_hold_ends_by_itself_once_you_cancelled_the_tasks_it_held() {
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(seen.lock().unwrap().runs.len(), 1, "only the new task's worker ran");
     assert!(resumed(&core).await.is_empty(), "nothing was resumed");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "the hold is over in the store too");
 }
@@ -936,7 +957,7 @@ async fn the_scheduler_ends_a_hold_whose_tasks_you_cancelled() {
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(seen.lock().unwrap().runs.len(), 1, "only the new task's worker ran");
     assert!(resumed(&core).await.is_empty(), "nothing was resumed");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "the hold is over in the store too");
 }
@@ -968,7 +989,7 @@ async fn a_pause_does_not_end_the_hold() {
     .await;
     assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "a pause is no reason to end the hold");
     // You close Codly with the pause on: the next start keeps the hold too.
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     let core = start_core(dir.path(), &seen, works()).await;
     assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 0 }), "the hold that Codly closed on is still on");
@@ -986,7 +1007,7 @@ async fn a_pause_does_not_end_the_hold() {
     let task = task_ended(&core, &task_id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(seen.lock().unwrap().runs.len(), 1, "the plan's task started after your Resume");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "your Resume ended the hold");
 }
@@ -1020,7 +1041,7 @@ async fn an_office_whose_folder_is_not_there_holds_nothing() {
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(seen.lock().unwrap().runs.len(), 1, "only the new task's worker ran");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     let left = store_of(dir.path()).task(&waiting).unwrap().expect("the other office's task");
     assert_eq!((left.status, left.status_reason), (TaskStatus::Ready, None), "it waits for its folder, and shows no hold");
@@ -1044,7 +1065,7 @@ async fn a_task_whose_worktree_was_removed_goes_on_through_its_worker() {
     let core = start_core(dir.path(), &seen, works()).await;
     assert_eq!(core.resume_offer(), Some(ResumeOffer { tasks: 1 }));
     let worktree = PathBuf::from(task_now(&core, &task_id).await.worktree.expect("the task has a worktree"));
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     std::fs::remove_dir_all(&worktree).unwrap();
 
@@ -1060,7 +1081,7 @@ async fn a_task_whose_worktree_was_removed_goes_on_through_its_worker() {
         assert!(seen.prompts[0].contains("resuming after Codly restarted"), "{}", seen.prompts[0]);
     }
     assert_eq!(resumed(&core).await, ["Resumed after restart: its worker goes on where it stopped"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Codly closed while a task was in its review. No run outlives Codly: the reviewer's is
@@ -1101,7 +1122,7 @@ async fn a_review_that_was_under_way_is_done_again_by_a_new_reviewer() {
         assert!(run != &lost_run && matches!(session, SessionMode::New { .. }), "{choice:?}: a new run, not the one that was lost: {given:?}");
         assert_eq!(verdicts(&core).await, [(Some(run.clone()), "approve".to_string())], "{choice:?}: its verdict is the one on record");
         assert_eq!(resumed(&core).await, ["Resumed after restart: Codly checks its work again"], "{choice:?}");
-        core.shutdown().await;
+        shut_down(&core).await;
     }
 }
 
@@ -1139,7 +1160,7 @@ async fn setting_always_while_work_waits_resumes_it_now() {
         "Resumed after restart: you set Codly to always resume",
     ];
     assert_eq!(resumed(&core).await, lines);
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     assert_eq!(store_of(dir.path()).kv_get(HOLD_ROW).unwrap(), None, "the store forgot the hold");
 }
@@ -1193,7 +1214,7 @@ async fn a_hold_whose_end_is_not_written_stays_on_until_the_next_resume() {
     }
     let runs = seen.lock().unwrap().runs.clone();
     assert!(runs.len() == 1 && runs[0].0 == mid.1, "only the waiting task's worker ran, after the second Resume: {runs:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Codly asked, and the task that only had its checks left has unfinished work: its check
@@ -1243,7 +1264,7 @@ async fn a_task_its_gate_sent_back_goes_to_its_worker_at_the_next_resume() {
     let mut ran = checks_run(&core).await;
     ran.sort();
     assert_eq!(ran, [(check.clone(), false), (check, true)], "once on the unfinished work, once after the worker's turn");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// "Never" (or "ask"), and you had paused everything before you closed Codly: a plan was
@@ -1275,7 +1296,7 @@ async fn work_is_held_also_when_everything_was_paused_at_the_launch() {
         let task = task_ended(&core, &task_id).await;
         assert_eq!(task.status, TaskStatus::Done, "{choice:?}: {:?}", task.status_reason);
         assert_eq!(seen.lock().unwrap().runs.len(), 1, "{choice:?}: the plan's task started after your Resume");
-        core.shutdown().await;
+        shut_down(&core).await;
     }
 }
 
@@ -1318,11 +1339,11 @@ async fn a_resolution_cut_short_by_a_quit_is_taken_back_at_the_next_start() {
         let stood = json!({ "task": task_id, "tip": tip, "base_commit": base, "base_branch": "main", "untracked": [] });
         store.kv_set(&format!("merge_start:{plan_id}"), &start.to_string()).unwrap();
         store.kv_set(&format!("resolution:{plan_id}"), &stood.to_string()).unwrap();
-        let merged = Command::new("git").arg("-C").arg(&wt).args(["merge", "-q", "main"]).env("LC_ALL", "C").output().unwrap();
+        let merged = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(&wt).args(["merge", "-q", "main"]).env("LC_ALL", "C").output().unwrap();
         assert!(!merged.status.success(), "the merge conflicts");
         (plan_id, task_id, base, tip, wt)
     };
-    let in_merge = |wt: &Path| Command::new("git").arg("-C").arg(wt).args(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).output().unwrap().status.success();
+    let in_merge = |wt: &Path| Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(wt).args(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).output().unwrap().status.success();
     assert!(in_merge(&wt));
 
     let seen = Arc::new(Mutex::new(Seen::default()));
@@ -1343,7 +1364,7 @@ async fn a_resolution_cut_short_by_a_quit_is_taken_back_at_the_next_start() {
     assert_eq!(record.iter().filter(|d| **d == taken_back).count(), 1, "{record:?}");
     assert_eq!(core.resume_offer(), None, "nothing waits for a Resume");
     assert!(seen.lock().unwrap().runs.is_empty());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Re-checks of your required checks that a quit cut short hold a start only when one of them
@@ -1385,7 +1406,7 @@ async fn rechecks_that_would_not_run_hold_nothing() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let core = start_core(dir.path(), &seen, works()).await;
     assert_eq!(core.resume_offer(), None, "no re-check would run: there is nothing to ask");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     let store = store_of(dir.path());
     assert_eq!(store.kv_get(&gone_row).unwrap(), None, "the row that cannot be read is taken out");

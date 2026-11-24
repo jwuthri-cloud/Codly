@@ -14,8 +14,29 @@ use codly_core::store::Store;
 use serde_json::json;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -114,8 +135,14 @@ impl Spawner for Fake {
                                 };
                                 send(EventKind::ApprovalRequested { approval });
                                 // The answer arrives as the next command.
-                                if let Some(AgentCmd::Approval { decision, .. }) = rx.recv().await {
-                                    answers.lock().unwrap().push((what, decision.choice));
+                                match rx.recv().await {
+                                    Some(AgentCmd::Approval { decision, .. }) => answers.lock().unwrap().push((what, decision.choice)),
+                                    // Told to stop while it waited for the answer: no answer comes, and the run ends.
+                                    Some(AgentCmd::Shutdown) => {
+                                        send(EventKind::Exited { code: Some(0) });
+                                        break;
+                                    }
+                                    _ => {}
                                 }
                             }
                             send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
@@ -150,7 +177,7 @@ async fn two_agents(dir: &Path, answers: &Answers) -> (Arc<Core>, String, String
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(answers.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -263,7 +290,7 @@ async fn a_saved_rule_answers_every_agent_of_the_repo_until_it_is_removed() {
     assert_eq!(offered(&core, &again).await.prefix.as_deref(), Some("pnpm install"));
     core.resolve_approval(&again.id, deny()).await.unwrap();
     assert_eq!(answered(&answers, 4).await[3], ("pnpm install".to_string(), ApprovalChoice::Deny));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -288,7 +315,7 @@ async fn the_same_request_from_two_agents_is_answered_together_and_the_rule_is_k
     assert_eq!(core.approval_rules().unwrap(), vec![rule.clone()]);
 
     // The rule is in Codly's store, not in a worktree: it is there after the app stops.
-    core.shutdown().await;
+    shut_down(&core).await;
     let store = Store::open(&dir.path().join("data/codly.sqlite")).unwrap();
     assert_eq!(store.approval_rules(&rule.workspace_id).unwrap(), vec![rule]);
 }
@@ -335,7 +362,7 @@ async fn a_tool_of_another_mcp_server_asks_once_and_its_rule_is_for_claude_agent
     let cfg = CoreConfig { data_dir: dir.path().join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(answers.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![cli(Provider::Claude), cli(Provider::Gemini)]),
         index: false,
     };
@@ -396,5 +423,5 @@ async fn a_tool_of_another_mcp_server_asks_once_and_its_rule_is_for_claude_agent
     assert!(core.approval_rule_offer(&again.id).unwrap().is_empty());
     core.resolve_approval(&again.id, deny()).await.unwrap();
     assert_eq!(answered(&answers, 5).await[4], answer(ApprovalChoice::Deny));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
