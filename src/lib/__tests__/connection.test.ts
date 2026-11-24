@@ -202,8 +202,10 @@ const snap = (events: EventRow[]): Snapshot =>
     agents: [lead], plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events,
   }) as unknown as Snapshot;
 
-/** What `codly serve` answers to the cheap command the page asks after a failed stream. */
-let probe: () => Promise<Response>;
+/** What `codly serve` answers to a command: the cheap one the page asks after a failed
+ *  stream, and the others (`url`). */
+let probe: (url: string) => Promise<Response>;
+const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
 
 /** A page (the store's modules listen to its size and ask whether it shows), with `flag`. */
 function page(flag: Record<string, unknown>) {
@@ -215,7 +217,7 @@ async function webStore() {
   vi.resetModules();
   page({ __CODLY_WEB__: true });
   vi.stubGlobal('EventSource', FakeEventSource);
-  vi.stubGlobal('fetch', vi.fn(() => probe()));
+  vi.stubGlobal('fetch', vi.fn((url: string) => probe(url)));
   return (await import('../state/store.svelte')).store;
 }
 
@@ -322,6 +324,96 @@ describe('a browser page that loses codly serve', () => {
     expect(fetch).not.toHaveBeenCalledWith('/api/cmd/retry_core', expect.anything());
   });
 
+  it('goes on trying when a newer connect takes over a try that never ended', async () => {
+    const store = await webStore();
+    const done = store.connect();
+    await flush();
+    last().send('snapshot', snap([]));
+    await done;
+    last().fail();
+    await flush();
+    last().fail();
+    await flush();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flush();
+    expect(streams()).toHaveLength(3); // a try whose stream neither opens nor fails (a dead tunnel)
+    expect(store.link).toMatchObject({ kind: 'down', trying: true });
+
+    void store.resync(); // the tab came back after a long time hidden
+    await flush();
+    expect(streams()[2].closed).toBe(true);
+    last().fail();
+    await flush();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+    expect(streams().length).toBeGreaterThan(4); // the waits went on
+    expect(store.link).toMatchObject({ kind: 'down' });
+    last().send('snapshot', snap([]));
+    await flush();
+    expect(store.link).toEqual({ kind: 'back' });
+  });
+
+  it('asks again what waits for Resume when it is back, and not on a plain resync', async () => {
+    const store = await webStore();
+    // App.svelte asks the core what waits for Resume each time this number changes to one >= 0.
+    const sessions: number[] = [];
+    const seen = () => sessions.push(store.coreSession);
+    seen();
+    const done = store.connect();
+    await flush();
+    last().send('snapshot', snap([]));
+    await done;
+    seen();
+
+    void store.resync(); // the tab came back: the link was never lost
+    await flush();
+    last().send('snapshot', snap([]));
+    await flush();
+    seen();
+
+    last().fail(); // `codly serve` restarts (it holds the work again)
+    await flush();
+    last().fail();
+    await flush();
+    seen();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flush();
+    last().send('snapshot', snap([]));
+    await flush();
+    expect(store.link).toEqual({ kind: 'back' });
+    seen();
+    await vi.advanceTimersByTimeAsync(BACK_MS);
+    seen(); // "Connected again" going is no reason to ask
+    expect(sessions).toEqual([-1, 0, 0, 0, 1, 1]);
+  });
+
+  it('says so, and keeps the office, when the core fails to start after a restart', async () => {
+    const store = await webStore();
+    const { connectionBarRoom } = await import('../../shell/ConnectionBar.svelte');
+    probe = (url) => (url === '/api/cmd/retry_core' ? Promise.resolve(json(null)) : Promise.reject(new TypeError('Failed to fetch')));
+    const done = store.connect();
+    await flush();
+    last().send('snapshot', snap([said(1, 'm1')]));
+    await done;
+    expect(connectionBarRoom()).toBe(0);
+
+    last().fail(); // the server restarted, and its core could not open the database
+    await flush();
+    last().send('failed', 'unable to open database file');
+    await flush();
+    expect([store.error, store.workspace?.id, store.offline]).toEqual(['unable to open database file', 'w1', true]);
+    expect(store.live.lead1.messages.map((m) => m.itemId)).toEqual(['m1']);
+    expect(connectionBarRoom()).toBeGreaterThan(0); // the bar says it, and the toasts make room
+
+    const again = store.retry(); // "Try again" on the bar
+    await flush();
+    expect(store.ready).toBe(true); // the office stays on screen while the core starts
+    expect(fetch).toHaveBeenCalledWith('/api/cmd/retry_core', expect.anything());
+    last().send('snapshot', snap([said(1, 'm1')]));
+    await again;
+    expect([store.error, store.offline, connectionBarRoom()]).toEqual([null, false, 0]);
+  });
+
   it('does not let the polls call Codly while it is down', async () => {
     const store = await webStore();
     const done = store.connect();
@@ -357,6 +449,7 @@ describe('the app’s window', () => {
     await flush();
     watch();
     expect(links).toEqual(['connected', 'connected', 'connected', 'connected']);
-    expect([tauri.calls, store.offline]).toEqual([calls, false]);
+    // No try runs by itself; the core is not up, so the polls skip (the bar offers "Try again").
+    expect([tauri.calls, store.error, store.offline]).toEqual([calls, 'the core stopped', true]);
   });
 });

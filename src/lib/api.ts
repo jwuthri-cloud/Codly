@@ -178,12 +178,17 @@ async function signedOut(): Promise<boolean> {
 /** `codly serve`: the same commands over HTTP, the bus and terminals as server-sent events. */
 class WebTransport implements Transport {
   private events: EventSource | null = null;
+  /** Ends the wait of the last `subscribe`: a closed stream fires no event, so a newer
+   *  subscribe that closes it says so here (else that connect would wait for ever). */
+  private replaced: (() => void) | null = null;
   subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
     this.events?.close();
+    this.replaced?.();
     const es = (this.events = new EventSource('/api/events'));
     const data = (e: Event) => JSON.parse((e as MessageEvent<string>).data);
     return new Promise<Snapshot>((resolve, reject) => {
       let open = false;
+      this.replaced = () => reject(new Error('A newer connection to Codly took over.'));
       es.addEventListener('batch', (e) => onBatch(data(e)));
       es.addEventListener('snapshot', (e) => {
         open = true;

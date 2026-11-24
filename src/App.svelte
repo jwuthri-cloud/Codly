@@ -52,10 +52,12 @@
   });
 
   // Work that was under way when Codly last closed waits for your answer (the core holds it):
-  // asked once the core is up, and again after a start that had failed.
+  // asked once the core is up, again after a start that had failed, and again when a browser
+  // reaches `codly serve` after it had lost it (a restart of the server holds the work again).
   const coreUp = $derived(store.ready && !store.error);
+  const coreSession = $derived(store.coreSession);
   $effect(() => {
-    if (coreUp) untrack(() => void resumeWork.check());
+    if (coreSession >= 0) untrack(() => void resumeWork.check());
   });
 
   // The office the core has open at the start shows the request you last had open in it. Once:
@@ -120,8 +122,8 @@
 {#if workspaceTrust.asking}<TrustDialog />{/if}
 {#if intakeUi.dialog}<IntakeDialog />{/if}
 <ResumeWork />
-<!-- A browser on `codly serve` that lost it (the start-up error screen says so itself). -->
-{#if store.ready && !store.error}<ConnectionBar />{/if}
+<!-- A browser on `codly serve` that lost it, or a core that failed while an office is open. -->
+<ConnectionBar />
 <IdeOverlay />
 <Toasts />
 <TooltipHost />

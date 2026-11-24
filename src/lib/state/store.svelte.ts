@@ -386,11 +386,26 @@ class CodlyStore {
 
   /** A browser page's link to `codly serve` (always "connected" in the app's window). */
   link = $state.raw<Link>({ kind: 'connected' });
-  /** This page cannot reach Codly: the polls that call it skip. */
+  /** This page cannot reach Codly, or Codly answered that its core could not start: the
+   *  polls that call it skip. */
   get offline(): boolean {
-    return isDown(this.link);
+    return isDown(this.link) || this.error !== null;
   }
-  private reconnect = new Reconnect(() => this.connect(), (l) => (this.link = l));
+  /** Counts the times this page lost `codly serve` and reached it again. */
+  private rejoins = $state(0);
+  /** -1 while the core is not up (it starts, or its start failed); else a number that changes
+   *  each time a browser page reaches `codly serve` again after it had lost it (App.svelte asks
+   *  then what waits for Resume: a restart of the server holds the work again). */
+  get coreSession(): number {
+    return this.ready && !this.error ? this.rejoins : -1;
+  }
+  private reconnect = new Reconnect(
+    () => this.connect(),
+    (l) => {
+      if (l.kind === 'back') this.rejoins++;
+      this.link = l;
+    },
+  );
 
   async connect(): Promise<void> {
     const gen = ++this.gen;
@@ -428,7 +443,8 @@ class CodlyStore {
   async retry(): Promise<void> {
     // In a browser that lost `codly serve`, its core is not the problem: open the stream again.
     if (isDown(this.link)) return this.reconnect.tryNow();
-    this.ready = false; // the loading screen, while the core starts
+    // The loading screen while the core starts, unless an office is on screen: it stays readable.
+    if (this.held === undefined) this.ready = false;
     try {
       await api.retryCore();
     } catch (e) {
