@@ -2472,7 +2472,11 @@ async fn a_steer_during_verify_is_reviewed_before_merging() {
     core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     core.send_chat("lead", "Please add a hello file").await.unwrap();
-    let (task, _) = wait_for("the checks to run", 20, async || task_status(&core).await.filter(|_| checking.exists())).await;
+    // The file and the status are read at two moments: wait until one snapshot has both.
+    let (task, _) = wait_for("the checks to run", 20, async || {
+        task_status(&core).await.filter(|(t, _)| checking.exists() && t.status == TaskStatus::Verifying)
+    })
+    .await;
     assert_eq!(task.status, TaskStatus::Verifying);
     // You steer the worker while its work is checked; its turn is over before the checks are,
     // and before any reviewer exists.
