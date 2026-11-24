@@ -1,11 +1,13 @@
 // One global tooltip: any element with `data-tip="…"` gets it. The first tooltip waits 500 ms;
 // peers hovered within 400 ms of the last one show instantly (Vercel guideline: delay the first,
-// not the group). Optional `data-tip-kbd` renders a shortcut beside the text. Keyboard focus shows
+// not the group). Optional `data-tip-kbd` renders a shortcut beside the text, and
+// `data-tip-place="below"` asks for the tip below its control (util/tipPlace.ts). Keyboard focus shows
 // it too (after 300 ms): icon-only controls have no other label on screen.
 
 class TipState {
   text = $state('');
   kbd = $state('');
+  place = $state('');
   rect = $state<DOMRect | null>(null);
   visible = $state(false);
 }
@@ -26,6 +28,7 @@ export function installTooltips() {
     if (!el.isConnected) return hide();
     tip.text = el.dataset.tip ?? '';
     tip.kbd = el.dataset.tipKbd ?? '';
+    tip.place = el.dataset.tipPlace ?? '';
     tip.rect = el.getBoundingClientRect();
     tip.visible = !!tip.text;
     if (tip.visible) gone.observe(document.body, { childList: true, subtree: true });

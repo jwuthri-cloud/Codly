@@ -2,7 +2,7 @@
 // as "finished": also one that you stopped, and one that failed.
 import { describe, expect, it } from 'vitest';
 import type { BackgroundWork } from '../../lib/state/session';
-import { helperEndWord, helperStop, helpersSummary } from '../helperRows';
+import { SAME_DESCRIPTION, helperEndWord, helperStop, helpersSummary } from '../helperRows';
 
 const helpers = (...status: string[]) => status.map((s) => ({ status: s }));
 
@@ -43,24 +43,44 @@ describe('the “Stop” of a helper’s row', () => {
   const helper = (callId: string, description: string, status = 'running') => ({ callId, description, status });
   const listed = (id: string, description: string, status = 'running'): BackgroundWork => ({ id, kind: 'helper', description, status, runId: 'r1', startedAt: 1, endedAt: null });
 
+  /** The row's "Stop" when `h` is the only helper at work. */
+  const alone = (h: ReturnType<typeof helper>, background: BackgroundWork[], turnRuns = false) => helperStop(h, [h], background, 'Eli', turnRuns);
+
   it('a helper its agent waits for is stopped by its call id, and its turn goes on', () => {
-    expect(helperStop(helper('toolu_1', 'Look at the docs'), [], 'Eli')).toEqual({ id: 'toolu_1', hint: 'Stops this helper. Eli’s turn goes on.' });
+    expect(alone(helper('toolu_1', 'Look at the docs'), [])).toEqual({ id: 'toolu_1', hint: 'Stops this helper. Eli’s turn goes on.' });
   });
 
   it('a helper in the background list is stopped by its id there, with the hint it has there', () => {
-    expect(helperStop(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests')], 'Eli')).toEqual({
+    expect(alone(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests')])).toEqual({
       id: 'task-9',
       hint: 'Stops this helper. Eli is told and goes on with a turn of its own.',
     });
+    // While a turn of the agent runs, it is told in that turn.
+    expect(alone(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests')], true)?.hint).toBe('Stops this helper. Eli is told in the turn that runs.');
     // An entry of the list that ended, or a command of the same words, is not this helper.
-    expect(helperStop(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests', 'stopped'), { ...listed('cmd', 'Run the tests'), kind: 'command' }], 'Eli')?.id).toBe('toolu_2');
+    expect(alone(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests', 'stopped'), { ...listed('cmd', 'Run the tests'), kind: 'command' }])?.id).toBe('toolu_2');
   });
 
   it('a helper that ended has no “Stop”', () => {
-    for (const status of ['completed', 'stopped', 'failed']) expect(helperStop(helper('toolu_3', 'x', status), [], 'Eli')).toBeNull();
+    for (const status of ['completed', 'stopped', 'failed']) expect(alone(helper('toolu_3', 'x', status), [])).toBeNull();
   });
 
-  it('two listed helpers of the same words: which is which is not known, and the row has none', () => {
-    expect(helperStop(helper('toolu_4', 'Same'), [listed('a', 'Same'), listed('b', 'Same')], 'Eli')).toBeNull();
+  it('two listed helpers of the same words: which is which is not known, and the row says where to stop them', () => {
+    const h = helper('toolu_4', 'Same');
+    expect(helperStop(h, [h, helper('toolu_5', 'Same')], [listed('a', 'Same'), listed('b', 'Same')], 'Eli', false)).toEqual({ id: null, hint: SAME_DESCRIPTION });
+  });
+
+  // Before, only the listed entries were counted: with one helper of the description in the list
+  // and one its agent waits for, the waited helper's row got the listed id, and its "Stop"
+  // stopped the other helper.
+  it('two helpers of one description, one listed and one waited for: neither row stops the wrong one', () => {
+    const inList = helper('toolu_6', 'Look at the docs');
+    const waited = helper('toolu_7', 'Look at the docs');
+    const both = [inList, waited];
+    for (const h of both) expect(helperStop(h, both, [listed('task-1', 'Look at the docs')], 'Eli', false)).toEqual({ id: null, hint: SAME_DESCRIPTION });
+    // None listed: each is stopped by its own call id, as today.
+    for (const h of both) expect(helperStop(h, both, [], 'Eli', false)?.id).toBe(h.callId);
+    // One running helper of the description and one entry: the entry is that helper.
+    expect(helperStop(inList, [inList, { ...waited, status: 'completed' }], [listed('task-1', 'Look at the docs')], 'Eli', false)?.id).toBe('task-1');
   });
 });

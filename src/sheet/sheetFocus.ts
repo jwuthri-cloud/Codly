@@ -3,8 +3,20 @@
 // its tabs (Messages, Traces, Git: AgentTabs.svelte): that tab opens first, then the sheet
 // scrolls to the place in it. Pure, so the sheet and the tests agree.
 
-/** The tabs under the agent sheet's sections, as `ui.sheetTab` holds the open one. */
+/** The tabs under the agent sheet's sections, as `ui.sheetTab` holds the open one of each agent. */
 export type SheetTab = 'messages' | 'traces' | 'git';
+
+/**
+ * The open tab of each agent's sheet, for the session, by agent id. The tab is one agent's:
+ * Git runs its git commands while it is open, so another agent's sheet does not open on it.
+ */
+export type SheetTabs = Readonly<Record<string, SheetTab>>;
+
+/** The tab an agent's sheet opens on: the one you left it on, else Messages. */
+export const tabOf = (tabs: SheetTabs, agentId: string): SheetTab => tabs[agentId] ?? 'messages';
+
+/** The tabs with `tab` open for `agentId`; the other agents keep theirs. */
+export const withTab = (tabs: SheetTabs, agentId: string, tab: SheetTab): SheetTabs => ({ ...tabs, [agentId]: tab });
 
 /** `section`: the sheet's section to open and scroll to; `tab`: the tab to open in it first; `inner`: the place in that tab to scroll to then. */
 export type FocusPlace = { section: string; tab: SheetTab | null; inner: string | null };

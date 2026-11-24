@@ -17,7 +17,7 @@
   import { clock, plural, shortSha } from '../lib/util/format';
   import { stoppedByChecks } from '../lib/util/gate';
   import { keyList, waitingOn } from '../lib/util/plan';
-  import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
+  import { GLOSSARY, idVar, methodProvenance, PROVIDER_LABEL } from '../lib/util/labels';
   import { tildify } from '../lib/util/sanitize';
   import ArtifactThumb from '../components/ArtifactThumb.svelte';
   import Icon from '../components/Icon.svelte';
@@ -29,6 +29,7 @@
   import Section from '../components/Section.svelte';
   import Why, { type WhyLine } from '../components/Why.svelte';
   import TaskChecks from './TaskChecks.svelte';
+  import { taskStatusLine } from './taskWords';
 
   interface Props {
     task: Task;
@@ -115,7 +116,7 @@
   <header>
     <p class="eyebrow">{plan ? 'Plan task' : 'Board task'} · {task.key}</p>
     <h2 class="serif">{task.title}</h2>
-    <p class="status st-{task.status}">{TASK_STATUS_LABEL[task.status]}{task.status_reason ? ` — ${task.status_reason}` : ''}</p>
+    <p class="status st-{task.status}">{taskStatusLine(task, deps.filter((d): d is Task => !!d))}</p>
     <div class="acts">
       {#if marks.length || task.status === 'done'}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'task', id: task.id })} data-tip="Read the diff, comment on lines and send the task back"><Icon name="diff" size={13} />View changes{#if unsent}<span class="k">{unsent} {unsent === 1 ? 'comment' : 'comments'} not sent</span>{/if}</button>{/if}
       {#each LEGAL[task.status] ?? [] as l (l.to)}<button class="btn sm ghost" onclick={() => move(l.to)}>{l.label}</button>{/each}

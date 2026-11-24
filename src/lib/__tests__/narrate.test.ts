@@ -3,7 +3,7 @@ import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { Task } from '../gen/Task';
 import { narrateFrom, type NarrationInput } from '../narrate';
-import type { AgentLive, Seg } from '../state/store.svelte';
+import type { AgentLive, Seg, SubAgent } from '../state/store.svelte';
 import { repoMap } from '../demo/repomap';
 import { emptyCareer } from '../util/career';
 
@@ -127,5 +127,57 @@ describe('demo repo map', () => {
     expect(before.some((f) => f.path === 'src/theme/ThemeProvider.tsx')).toBe(false);
     expect(after.some((f) => f.path === 'src/theme/ThemeProvider.tsx')).toBe(true);
     expect(before.find((f) => f.path === 'src/app/layout.tsx')?.lang).toBe('typescript');
+  });
+});
+
+// The fourth and fifth browser reviews (defect 8, defect 11): after Eli's turn ended with a helper
+// at work in the background, the header, the line above the composer and "Now" said "Searching
+// for docs/**/*.md" with a pulsing dot and "Interrupt". A helper's call is the helper's work.
+describe('an agent whose helper works', () => {
+  const helper = (callId: string, description: string, status = 'running'): SubAgent => ({ callId, description, status, startedAt: T0, ts: T0, name: null, step: null, toolUses: null, tokens: null, report: null });
+  const glob = seg({ callId: 'g1', activity: 'search', name: 'Glob', target: { path: null, paths: [], command: null, query: 'docs/**/*.md', url: null, server: null, tool: null }, parent: 'h1' });
+  const solo = (status: Agent['status']) => agent({ role: 'solo', status, task_id: null });
+
+  it('rests once its turn ended with a helper’s Glob call open, and says the helper works in the background', () => {
+    const n = narrateFrom(input({ agent: solo('idle'), task: null, live: live([glob], { subagents: [helper('h1', 'Look at the docs')] }) }));
+    expect(n.text).toBe('Ready to chat · 1 helper at work in the background');
+    expect(n.tone).toBe('idle');
+  });
+
+  it('counts the helpers and the commands of its live run in the background', () => {
+    const cmd = (id: string, runId: string, status = 'running') => ({ id, kind: 'command', description: 'npm run dev', status, runId, startedAt: T0, endedAt: null });
+    const l = live([], { subagents: [helper('h1', 'a'), helper('h2', 'b'), helper('h3', 'c', 'completed')], background: [cmd('t1', 'r1'), cmd('t2', 'r0'), cmd('t3', 'r1', 'stopped')] });
+    expect(narrateFrom(input({ agent: solo('idle'), task: null, live: l })).text).toBe('Ready to chat · 2 helpers and 1 command at work in the background');
+    expect(narrateFrom(input({ agent: solo('idle'), task: null, live: live([]) })).text).toBe('Ready to chat');
+  });
+
+  it('waits for its helper while its turn runs and only the helper’s call is open', () => {
+    const n = narrateFrom(input({ agent: solo('working'), task: null, live: live([glob], { subagents: [helper('h1', 'Look at the docs')] }) }));
+    expect(n.text).toBe('Waiting for its helper “Look at the docs”');
+    expect(n.tone).toBe('live');
+  });
+
+  it('says its own call while its turn runs, not its helper’s newer one', () => {
+    const own = seg({ callId: 'c1', activity: 'execute', name: 'Bash', start: T0 - 5000, target: { path: null, paths: [], command: 'pnpm test', query: null, url: null, server: null, tool: null } });
+    const n = narrateFrom(input({ agent: solo('working'), task: null, live: live([own, glob], { subagents: [helper('h1', 'Look at the docs')] }) }));
+    expect(n.key).toBe('Running `pnpm test`');
+  });
+});
+
+// The fifth browser review (defect 19): `?turn=failed` said "Ready to chat" for an agent whose
+// last turn failed.
+describe('an agent whose last turn failed', () => {
+  const failed = (o: Partial<AgentLive> = {}) => live([], { turn: { startedAt: T0, input: 'Fix it', endedAt: T0 + 3000, status: 'failed' }, ...o });
+
+  it('says that its last turn failed, with the reason its CLI gave', () => {
+    const n = narrateFrom(input({ agent: agent({ role: 'solo', status: 'idle', task_id: null }), task: null, live: failed({ errors: [{ message: 'Anthropic’s servers are overloaded: wait a moment, then try again', fatal: false, ts: T0 + 2900 }] }) }));
+    expect(n.text).toMatch(/^Its last turn failed: Anthropic’s servers are overloaded/);
+    expect(n.tone).toBe('blocked');
+  });
+
+  it('an error from before the turn is not its reason; a turn that ended well is ready again', () => {
+    const solo = agent({ role: 'solo', status: 'idle', task_id: null });
+    expect(narrateFrom(input({ agent: solo, task: null, live: failed({ errors: [{ message: 'old', fatal: false, ts: T0 - 1 }] }) })).text).toBe('Its last turn failed');
+    expect(narrateFrom(input({ agent: solo, task: null, live: live([], { turn: { startedAt: T0, input: 'x', endedAt: T0 + 1, status: 'completed' } }) })).text).toBe('Ready to chat');
   });
 });

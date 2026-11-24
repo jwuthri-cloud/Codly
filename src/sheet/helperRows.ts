@@ -5,24 +5,41 @@ import { stopHint, waitedHelperStopHint, type BackgroundWork } from '../lib/stat
 import type { SubAgent } from '../lib/state/store.svelte';
 import { oneLine } from '../lib/util/sanitize';
 
-/** What the "Stop" of a helper's row sends (`id`, for `stop_agent_task`) and says on its button. */
-export type HelperStop = { id: string; hint: string };
+/**
+ * What the "Stop" of a helper's row sends (`id`, for `stop_agent_task`) and says on its button.
+ * `id` null: the row has no "Stop", and `hint` says why.
+ */
+export type HelperStop = { id: string | null; hint: string };
+
+/** Why a helper's row has no "Stop": the background list cannot tell it from another helper. */
+export const SAME_DESCRIPTION = 'Two helpers have this description: stop them in “In the background”.';
 
 /**
- * The "Stop" of a helper's row, for a helper that runs (none for one that is over). A helper in
- * the background list (`background`: the agent's live run's) is stopped by its id there, and its
- * button says what its "Stop" there says. A helper its agent still waits for is stopped by the
- * id of the call that started it: its call returns to the agent and the turn goes on (recorded:
- * docs/research/cli-claude-stream-json-2.1.311-part4.md, section 2). The list names a helper by
- * its description: when two helpers that run have the same one, which is which is not known,
- * and the row has no "Stop" (each has its own in "In the background").
+ * The "Stop" of a helper's row, for a helper that runs (none for one that is over). The
+ * background list (`background`: the agent's live run's) names a helper by its description
+ * only, so a row is stopped by the id there only when that is sure: exactly one helper that
+ * runs (`helpers`: the agent's helpers) has the description, and exactly one entry of the list
+ * has it; its button then says what its "Stop" there says (`turnRuns`: a turn of the agent runs
+ * now, `stopHint`). A helper the list does not name is one its agent still waits for: it is
+ * stopped by the id of the call that started it, its call returns to the agent and the turn
+ * goes on (recorded: docs/research/cli-claude-stream-json-2.1.311-part4.md, section 2). In any
+ * other case which entry is which helper is not known (two helpers of one description, one of
+ * them listed and one waited for, or both listed): the row has no "Stop", and says where to stop
+ * them.
  */
-export function helperStop(h: Pick<SubAgent, 'callId' | 'description' | 'status'>, background: readonly BackgroundWork[], agent: string): HelperStop | null {
+export function helperStop(
+  h: Pick<SubAgent, 'callId' | 'description' | 'status'>,
+  helpers: readonly Pick<SubAgent, 'description' | 'status'>[],
+  background: readonly BackgroundWork[],
+  agent: string,
+  turnRuns: boolean,
+): HelperStop | null {
   if (h.status !== 'running') return null;
   const listed = background.filter((w) => w.kind === 'helper' && w.status === 'running' && w.description === h.description);
-  if (listed.length > 1) return null;
-  if (listed.length === 1) return { id: listed[0].id, hint: stopHint(listed[0], agent)! };
-  return { id: h.callId, hint: waitedHelperStopHint(agent) };
+  if (!listed.length) return { id: h.callId, hint: waitedHelperStopHint(agent) };
+  const alike = helpers.filter((x) => x.status === 'running' && x.description === h.description).length;
+  if (listed.length === 1 && alike === 1) return { id: listed[0].id, hint: stopHint(listed[0], agent, turnRuns)! };
+  return { id: null, hint: SAME_DESCRIPTION };
 }
 
 /**

@@ -161,8 +161,8 @@ class Ui {
   escAsk = $state<{ thread: string; at: number } | null>(null);
   /** Sheet section to scroll to when it opens (e.g. a subagent companion → "subagents"). */
   sheetFocus = $state<string | null>(null);
-  /** The open tab under the agent sheet's sections (AgentTabs.svelte): a focus on a place in a tab opens it (sheet/sheetFocus.ts). */
-  sheetTab = $state<'messages' | 'traces' | 'git'>('messages');
+  /** The open tab under each agent's sheet, by agent id, for the session (AgentTabs.svelte; none: Messages). A focus on a place in a tab opens it (sheet/sheetFocus.ts). */
+  sheetTab = $state<Readonly<Record<string, 'messages' | 'traces' | 'git'>>>({});
   /** Approval card to scroll into view on Home (toast "Review"). */
   revealApproval = $state<string | null>(null);
   /** Memories you pinned (local until the core has a pin command). */

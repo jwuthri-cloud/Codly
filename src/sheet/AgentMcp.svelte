@@ -6,18 +6,21 @@
   to start. When the server still does not connect, the answer shows under the server, beside
   the server's reason, until the server reports again. "Restart" on a connected server sends the
   same request, which starts it again. "Turn off" on a connected server and "Turn on" on a
-  switched-off one go to the agent's live run. Not recorded: whether Claude Code saves the
-  switch, so the button's hint promises nothing about the agent's next run.
+  switched-off one go to the agent's live run, and Claude Code saves the switch for the folder:
+  it holds for every later Claude Code run there until "Turn on" (session.ts `mcpSwitchHint`).
+  A "Turn on" or a "Restart" whose server does not start says why (`mcpStartFailure`).
   A button reads "Reconnecting…", "Restarting…", "Turning off…" or "Turning on…" while Claude
-  Code has not answered, then until the server's next status row arrives (or 10 s pass); a
+  Code has not answered, then until the server's next status row arrives (or 10 s pass), and a
+  screen reader hears the same words; a
   restart ends with its answer (the server stays connected). The row's buttons stay off for a
   moment after its state changed or a restart was answered: Reconnect and Restart sit last in the row, where the other takes the
   place of the one you pressed, so a press too many never turns a server off.
-  A run that started without the folder's own CLI configuration says so on top.
+  A run that started without the folder's own CLI configuration says so on top, also when it
+  reported no server (`showsMcpSection`).
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
-  import { MCP_BUSY, MCP_HINT, MCP_LABEL, WITHOUT_FOLDER_CONFIG_LINE, canReconnect, canRestart, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpRowLocked, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, signInSteps, startedWithoutFolderConfig, switchMcp, type McpAsk, type McpServer, type ReconnectAnswer } from '../lib/state/session';
+  import { MCP_BUSY, MCP_HINT, MCP_LABEL, WITHOUT_FOLDER_CONFIG_LINE, canReconnect, canRestart, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpButtonLabel, mcpRowLocked, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, showsMcpSection, signInSteps, startedWithoutFolderConfig, switchMcp, type McpAsk, type McpServer, type ReconnectAnswer } from '../lib/state/session';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { clean } from '../lib/util/sanitize';
@@ -80,8 +83,8 @@
   }
 </script>
 
-{#if servers.length}
-  <Section id="mcp" title="MCP servers" summary={mcpSummary(servers)}>
+{#if showsMcpSection(servers, withoutFolderConfig)}
+  <Section id="mcp" title="MCP servers" summary={servers.length ? mcpSummary(servers) : 'none'}>
     {#if withoutFolderConfig}<p class="note">{WITHOUT_FOLDER_CONFIG_LINE}</p>{/if}
     <ul class="servers">
       {#each servers as s (s.name)}
@@ -95,12 +98,15 @@
             <span class="name truncate" data-tip={s.name}>{s.name}</span>
             <span class="state" data-tip={MCP_HINT[s.status]}>{MCP_LABEL[s.status]}</span>
             {#if flips}
-              <button class="btn sm ghost" disabled={locked} aria-label="{flips.label} {s.name}" data-tip={mcpSwitchHint(clean(agent.name))} onclick={() => flip(s, flips.enabled)}>{going?.what === (flips.enabled ? 'on' : 'off') ? flips.busy : flips.label}</button>
+              {@const shown = going?.what === (flips.enabled ? 'on' : 'off') ? flips.busy : flips.label}
+              <button class="btn sm ghost" disabled={locked} aria-label={mcpButtonLabel(shown, s.name)} data-tip={flips.enabled ? undefined : mcpSwitchHint(clean(agent.name))} onclick={() => flip(s, flips.enabled)}>{shown}</button>
             {/if}
             {#if canReconnect(s)}
-              <button class="btn sm ghost" disabled={locked} aria-label="Reconnect {s.name}" onclick={() => reconnect(s)}>{going?.what === 'reconnect' ? MCP_BUSY.reconnect : 'Reconnect'}</button>
+              {@const shown = going?.what === 'reconnect' ? MCP_BUSY.reconnect : 'Reconnect'}
+              <button class="btn sm ghost" disabled={locked} aria-label={mcpButtonLabel(shown, s.name)} onclick={() => reconnect(s)}>{shown}</button>
             {:else if canRestart(s)}
-              <button class="btn sm ghost" disabled={locked} aria-label="Restart {s.name}" data-tip={restartHint(clean(agent.name))} onclick={() => restart(s)}>{going?.what === 'restart' ? MCP_BUSY.restart : 'Restart'}</button>
+              {@const shown = going?.what === 'restart' ? MCP_BUSY.restart : 'Restart'}
+              <button class="btn sm ghost" disabled={locked} aria-label={mcpButtonLabel(shown, s.name)} data-tip={restartHint(clean(agent.name))} onclick={() => restart(s)}>{shown}</button>
             {/if}
           </div>
           {#if s.status === 'needs_sign_in'}<p class="why">{signInSteps(clean(s.name))}</p>{/if}
@@ -109,7 +115,7 @@
         </li>
       {/each}
     </ul>
-    <p class="src"><Provenance kind="observed" /> as reported by Claude Code</p>
+    {#if servers.length}<p class="src"><Provenance kind="observed" /> as reported by Claude Code</p>{/if}
   </Section>
 {/if}
 
