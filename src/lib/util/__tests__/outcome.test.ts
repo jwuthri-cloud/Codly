@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Approval } from '../../gen/Approval';
 import { yourWords } from '../../state/answers';
-import { answerText, askedLine, firstQuestion, outcomeBy, outcomeWord, savedRuleWords, settledLine, settledWord, wordsOf } from '../outcome';
+import { noteStop } from '../../state/stops';
+import { store } from '../../state/store.svelte';
+import { answerText, askedLine, endedByYourStop, firstQuestion, outcomeBy, outcomeWord, savedRuleWords, settledLine, settledParts, settledWord, wordsOf } from '../outcome';
 
 const command = { subject: { kind: 'command', command: 'pnpm install', cwd: null } } satisfies Pick<Approval, 'subject'>;
 const question = {
@@ -148,6 +150,92 @@ describe('what an agent asked for, in its history', () => {
 
   it('a command keeps its own line', () => {
     expect(askedLine(command)).toBe('Asked for approval: pnpm install');
+  });
+});
+
+describe('a request your stop ended', () => {
+  // Ada's turn ran from 100 to 200; a request asked at 150 waited in it.
+  const turns = [{ start: 100, end: 200 }];
+
+  it('reads "Stopped by you" when you stopped that turn, as the thread’s line says (`endedByYourStop`)', () => {
+    expect(endedByYourStop('cancelled', 'provider', 150, turns, [100])).toBe(true);
+    // A Kill stops the turn too, and Codly closes what the run had asked.
+    expect(endedByYourStop('expired', 'codly', 150, turns, [100])).toBe(true);
+    // While the CLI still lets go of the turn.
+    expect(endedByYourStop('cancelled', 'provider', 150, [{ start: 100, end: null }], [100])).toBe(true);
+    // At the edges of the window, as home/spine.ts counts them.
+    expect(endedByYourStop('cancelled', 'provider', 100, turns, [100])).toBe(true);
+    expect(endedByYourStop('cancelled', 'provider', 200, turns, [100])).toBe(true);
+  });
+
+  it('a stop by the CLI itself, a request of another turn, or an answer keeps its own words', () => {
+    // Its CLI stopped: no stop of yours on record.
+    expect(endedByYourStop('cancelled', 'provider', 150, turns, [])).toBe(false);
+    // You stopped a later turn: this request was asked before it.
+    expect(endedByYourStop('cancelled', 'provider', 250, [...turns, { start: 300, end: 400 }], [300])).toBe(false);
+    expect(endedByYourStop('cancelled', 'provider', 250, turns, [100])).toBe(false);
+    // You answered it, or Codly's rules did: never a stop.
+    expect(endedByYourStop('denied', 'user', 150, turns, [100])).toBe(false);
+    expect(endedByYourStop('approved', 'policy', 150, turns, [100])).toBe(false);
+  });
+
+  describe('on the card and in History, from the stops of the agent that asked', () => {
+    const undo: (() => void)[] = [];
+    afterEach(() => {
+      undo.splice(0).forEach((u) => u());
+      delete store.live.ada;
+      delete store.live.eli;
+    });
+    /** `agent` ran a turn from 100 to 200; `stop`: you stopped it. */
+    const ran = (agent: string, stop: boolean) => {
+      store.live[agent] = { ...store.liveFor(agent), turns: [{ start: 100, end: null, input: null }] };
+      if (stop) undo.push(noteStop(agent));
+      store.live[agent] = { ...store.liveFor(agent), turns: [{ start: 100, end: 200, input: null }] };
+    };
+    const asked = (agent: string, at = 150) => ({ id: `ap-${agent}`, agent_id: agent, created_at: at, ...command });
+
+    it('your stop inside the window: "Stopped by you"', () => {
+      ran('ada', true);
+      expect(settledLine('cancelled', 'provider', asked('ada'), null)).toBe('Stopped by you');
+      expect(settledLine('expired', 'codly', asked('ada'), null)).toBe('Stopped by you');
+      expect(settledParts('cancelled', 'provider', asked('ada'))).toEqual({ verdict: 'Stopped by you', rule: null });
+      // Asked after that turn ended: its CLI stopped it.
+      expect(settledLine('cancelled', 'provider', asked('ada', 250), null)).toBe('Stopped by its CLI');
+    });
+
+    it('a CLI stop keeps "Stopped by its CLI"', () => {
+      ran('ada', false);
+      expect(settledLine('cancelled', 'provider', asked('ada'), null)).toBe('Stopped by its CLI');
+      expect(settledLine('expired', 'codly', asked('ada'), null)).toBe('Closed by Codly');
+    });
+
+    it('a stop of another agent is not this request’s', () => {
+      ran('ada', true);
+      ran('eli', false);
+      expect(settledLine('cancelled', 'provider', asked('eli'), null)).toBe('Stopped by its CLI');
+    });
+  });
+});
+
+describe('the closed card’s row and History in one sentence (`settledParts`)', () => {
+  afterEach(() => yourWords.clear());
+
+  it('a plan accepted with your changes', () => {
+    yourWords.set('ap1', { note: null, planChanged: true });
+    expect(settledParts('approved', 'user', { id: 'ap1', ...plan }, 'claude')).toEqual({ verdict: 'Plan accepted by you, with your changes', rule: null });
+    expect(settledLine('approved', 'user', { id: 'ap1', ...plan }, null, 'claude')).toBe('Plan accepted by you, with your changes');
+  });
+
+  it('a rule saved with an approval: the verdict first, the rule apart (a short row cuts the rule)', () => {
+    const rule = { kind: 'prefix', command: 'npm install' } as const;
+    expect(settledParts('approved', 'user', command, null, rule)).toEqual({ verdict: 'Approved by you', rule: 'and from now on: commands that start with npm install' });
+    expect(settledLine('approved', 'user', command, null, null, rule)).toBe('Approved by you, and from now on: commands that start with npm install');
+    // A rule goes only with a yes.
+    expect(settledParts('denied', 'user', command, null, rule)).toEqual({ verdict: 'Denied by you', rule: null });
+  });
+
+  it('nobody on record: the verdict alone', () => {
+    expect(settledParts('approved', '', command)).toEqual({ verdict: 'Approved', rule: null });
   });
 });
 

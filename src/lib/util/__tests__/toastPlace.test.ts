@@ -507,9 +507,9 @@ describe('contentWatch: what counts as a change of height', () => {
 });
 
 describe('a card that waits for your answer counts whole', () => {
-  it('the selector finds the waiting card of ApprovalCard.svelte: "Waiting since" in its header', () => {
-    expect(WAITING_CARD).toContain('article.card');
-    expect(approvalCard).toMatch(/<article class="card"[^>]*>\s*<header[^>]*>(?:(?!<\/header>)[\s\S])*?<span class="since num" data-tip="Waiting since /);
+  it('the selector finds the waiting card of ApprovalCard.svelte: the attribute the card names itself with', () => {
+    expect(WAITING_CARD).toContain('data-waiting-card');
+    expect(approvalCard).toContain('data-waiting-card');
   });
 
   it('three toasts over the card with the sheet open fold to one toast: no pile over the card (1024 x 640)', () => {

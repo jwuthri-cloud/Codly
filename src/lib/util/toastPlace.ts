@@ -263,11 +263,11 @@ export function restLook(wait: () => number, look: () => void): { after(moved: b
 /** What you press or type in: a toast must not lie on one of these. */
 const CONTROLS = 'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="switch"]';
 /**
- * An approval or question card that waits for your answer (home/cards/ApprovalCard.svelte: the
- * card with "Waiting since" in its header; an answered one is a row, not a card). A toast keeps
- * off the whole card: who asks, what and why are read before a button is pressed.
+ * An approval or question card that waits for your answer (home/cards/ApprovalCard.svelte names
+ * it with this attribute; an answered one is a row, not a card). A toast keeps off the whole
+ * card: who asks, what and why are read before a button is pressed.
  */
-export const WAITING_CARD = 'article.card:has(> header > .since[data-tip^="Waiting since"])';
+export const WAITING_CARD = '[data-waiting-card]';
 
 const boxOf = (el: Element): Box => {
   const r = el.getBoundingClientRect();

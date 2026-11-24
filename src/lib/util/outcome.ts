@@ -2,12 +2,15 @@
 // lines of an agent's history. A permission is approved or denied. A question is answered or
 // skipped, and says what you answered. A "no" says the note you sent with it, and a plan says
 // when it went ahead with your changes: your words, as the core recorded them (state/answers).
+// A request that ended because you stopped its agent's turn says that you stopped it.
 import type { Approval } from '../gen/Approval';
 import type { ApprovalRule } from '../gen/ApprovalRule';
 import type { ApprovalStatus } from '../gen/ApprovalStatus';
 import type { Provider } from '../gen/Provider';
 import { permissionsAsked } from './permissionsAsked';
 import { yourWords, type Words } from '../state/answers';
+import { stoppedTurns } from '../state/stops';
+import { store } from '../state/store.svelte';
 import { ruleWords } from './approvalRules';
 import { showsPlan, wantsTo } from './planRequest';
 import { sandboxWants } from './sandbox';
@@ -15,8 +18,9 @@ import { oneLine } from './sanitize';
 import { toolInWords } from './toolWords';
 
 type Asked = Pick<Approval, 'subject'>;
-/** A request as the store holds it: what you said with its answer is on record under its id. */
-type Held = Asked & Partial<Pick<Approval, 'id'>>;
+/** A request as the store holds it: what you said with its answer is on record under its id,
+ *  and who asked it and when tell whether a stop of yours ended it (`endedByYourStop`). */
+type Held = Asked & Partial<Pick<Approval, 'id' | 'agent_id' | 'created_at'>>;
 
 /**
  * "Approved", "Denied", "Stopped", "Closed"; for a question "Answered" and "Skipped". Empty while
@@ -125,16 +129,56 @@ export function savedRuleWords(rule: Pick<ApprovalRule, 'kind' | 'command'>): st
   return rule.kind === 'prefix' ? `commands that start with ${oneLine(w.text, 60)}` : `the command ${oneLine(w.text, 60)}`;
 }
 
+/** A turn of an agent as the store keeps it: when it started and when it ended (null: it runs). */
+export type TurnSpan = { start: number; end: number | null };
+
+/**
+ * Whether a request ended because you stopped its agent's turn (Stop, Interrupt, Send now, or
+ * Kill, which stops the turn too): its CLI took it back ("cancelled" by its CLI) or Codly closed
+ * it with the run ("expired" by Codly), and it was asked inside a turn you stopped. The window
+ * is the one of the thread's line "You stopped … while it waited for your answer"
+ * (home/spine.ts): from the turn's start to its end, or to now while the CLI still lets go of it.
+ * `turns`: the agent's turns; `stopped`: the starts of those you stopped (state/stops).
+ */
+export function endedByYourStop(status: ApprovalStatus, by: string, askedAt: number, turns: readonly TurnSpan[], stopped: readonly number[]): boolean {
+  const taken = (status === 'cancelled' && by === 'provider') || (status === 'expired' && by === 'codly');
+  return taken && turns.some((t) => stopped.includes(t.start) && askedAt >= t.start && (t.end == null || askedAt <= t.end));
+}
+
+/** `endedByYourStop` for a request the store holds, with the turns and the stops of its agent. */
+function stoppedByYou(status: ApprovalStatus, by: string, asked: Held | null): boolean {
+  if (!asked?.agent_id || asked.created_at == null) return false;
+  void store.rev;
+  return endedByYourStop(status, by, asked.created_at, store.live[asked.agent_id]?.turns ?? [], stoppedTurns(asked.agent_id));
+}
+
+/**
+ * How a request ended, in two parts: the verdict ("Approved by you", "Stopped by you", "Plan
+ * accepted by you, with your changes"), and the rule you saved with an approval ("and from now
+ * on: commands that start with npm install"; null: none). A row too narrow for both cuts the
+ * rule, never the verdict. A request your stop ended reads "Stopped by you" (`endedByYourStop`),
+ * not "by its CLI" or "Closed by Codly". `settledLine` puts the two together.
+ */
+export function settledParts(status: ApprovalStatus, by: string, asked: Held | null, provider: Provider | null = null, rule: Pick<ApprovalRule, 'kind' | 'command'> | null = null): { verdict: string; rule: string | null } {
+  const yours = stoppedByYou(status, by, asked);
+  const st: ApprovalStatus = yours ? 'cancelled' : status;
+  const who = yours ? 'user' : by;
+  const said = wordsOf(asked, who);
+  const changed = !!said?.planChanged && st === 'approved' && !!asked && showsPlan(asked.subject, provider);
+  const verdict = `${settledWord(st, asked, provider, false)} ${outcomeBy(who)}`.trim() + (changed ? ', with your changes' : '');
+  return { verdict, rule: rule && st === 'approved' ? `and from now on: ${savedRuleWords(rule)}` : null };
+}
+
 /** An agent's history: how that request ended ("Approved by you", "Denied by you: use pnpm",
  *  "Closed by Codly", "Plan accepted by you, with your changes"). `asked` is the request when it
  *  is still known (the line of a question or of a plan says so, and your note is found by its
  *  id), `answer` what you answered to a question, `rule` the rule you saved with an approval
- *  ("Approved by you, and from now on: commands that start with npm install"). */
+ *  ("Approved by you, and from now on: commands that start with npm install"). The closed card
+ *  in the conversation says the same (`settledParts`). */
 export function settledLine(status: ApprovalStatus, by: string, asked: Held | null, answer: string | null, provider: Provider | null = null, rule: Pick<ApprovalRule, 'kind' | 'command'> | null = null): string {
+  const { verdict, rule: saved } = settledParts(status, by, asked, provider, rule);
   const said = wordsOf(asked, by);
-  const changed = !!said?.planChanged && status === 'approved' && !!asked && showsPlan(asked.subject, provider);
-  const line = `${settledWord(status, asked, provider, false)} ${outcomeBy(by)}`.trim() + (changed ? ', with your changes' : '');
-  if (asked?.subject.kind === 'question' && status === 'approved' && answer) return `${line}: ${oneLine(answer, 80)}`;
-  if (rule && status === 'approved') return `${line}, and from now on: ${savedRuleWords(rule)}`;
-  return said?.note ? `${line}: ${oneLine(said.note, 80)}` : line;
+  if (asked?.subject.kind === 'question' && status === 'approved' && answer) return `${verdict}: ${oneLine(answer, 80)}`;
+  if (saved) return `${verdict}, ${saved}`;
+  return said?.note ? `${verdict}: ${oneLine(said.note, 80)}` : verdict;
 }
