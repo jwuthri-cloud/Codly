@@ -1,7 +1,9 @@
 <!--
   Live controls for one running agent. Enforced by the core (orchestrator/controls.rs), not by
   asking nicely: blocked tools are denied, a stop waits for the step to end, a steer note is an
-  ordinary prompt tagged as context, and kill ends the process.
+  ordinary prompt tagged as context, and kill ends the process. While the agent is in your
+  terminal Codly runs no process for it: Kill is off, says why, and "Give it back" stands beside
+  it (state/killRule.ts).
   A Claude agent also has a mode (a 1:1 agent: ask for edits, accept edits, plan first; kept
   for its next runs, so it shows when the agent is not running too) and a context reading. They
   reach its live session with no restart. "Compact now" is one row for a Codex agent and a 1:1
@@ -18,6 +20,9 @@
   import type { ContextUsage } from '../lib/gen/ContextUsage';
   import type { PermissionMode } from '../lib/gen/PermissionMode';
   import { stopAgent } from '../lib/state/actions';
+  import { killRefusal } from '../lib/state/killRule';
+  import { giveBack, takeovers } from '../lib/state/takeover.svelte';
+  import { closeSession, takeoverKey } from '../rooms/terminal/sessions';
   import { PERMISSION_MODES, canCompact, compactAgent, compactHint, compactWait, compactionLine, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
   import { steerHint } from '../lib/state/queue';
   import { safeChoice } from '../lib/util/confirm';
@@ -81,6 +86,14 @@
   let sending = $state(false);
   let confirmKill = $state(false);
   let killBtn: HTMLButtonElement | undefined = $state();
+  const killOff = $derived(killRefusal(agent.name, takeovers.has(agent.id)));
+  let givingBack = $state(false);
+  async function back() {
+    givingBack = true;
+    // The core closed the terminal it opened: its tab here goes with it (as AgentTakeover.svelte does).
+    if (await giveBack(agent.id)) await closeSession(takeoverKey(agent.id));
+    givingBack = false;
+  }
 
   async function send() {
     const text = note.trim();
@@ -183,7 +196,13 @@
         </div>
       </div>
 
-      {#if confirmKill}
+      {#if killOff}
+        <div class="kill-off">
+          <button class="btn sm danger" disabled aria-describedby="kill-off-{agent.id}"><Icon name="stop" size={12} />Kill agent…</button>
+          <button class="btn sm" disabled={givingBack} onclick={back}>Give it back</button>
+          <span class="sub" id="kill-off-{agent.id}">{killOff}</span>
+        </div>
+      {:else if confirmKill}
         <div class="kill-confirm">
           <span>Kill {agent.name}? The process ends now; its worktree is kept.</span>
           <button class="btn sm danger" onclick={() => { confirmKill = false; stopAgent(agent.id); }}>Kill</button>
@@ -215,6 +234,8 @@
   .steer-foot { display: flex; align-items: flex-end; gap: 10px; }
   .steer-foot .sub { flex: 1; }
   .kill { align-self: flex-start; }
+  .kill-off { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .kill-off .sub { flex-basis: 100%; }
   .kill-confirm { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-radius: var(--r-md); background: var(--bad-soft); font-size: var(--t-sm); }
   .kill-confirm span { flex: 1; }
   @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }

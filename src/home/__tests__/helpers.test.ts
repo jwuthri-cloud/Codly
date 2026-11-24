@@ -119,7 +119,9 @@ describe("a helper's call that is open when the turn ends", () => {
     launchEarly();
     expect(callOf('toolu-2')).toMatchObject({ parent: 'toolu-1', end: null, ok: null });
     expect(callOf('toolu-3')).toMatchObject({ end: 14, ok: null }); // the agent's own call ends with its turn
-    expect(store.now('l1')?.seg?.callId).toBe('toolu-2');
+    // (the helper's call is the helper's, never the agent's own: its turn ended, so the agent,
+    // still "working" here by its state, rests)
+    expect(store.now('l1')).toBeNull();
 
     apply(completed(40, 'toolu-2', false));
     expect(callOf('toolu-2')).toMatchObject({ end: 40, ok: false, exitCode: 1 });

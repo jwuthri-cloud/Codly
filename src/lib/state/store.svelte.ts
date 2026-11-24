@@ -1217,7 +1217,13 @@ class CodlyStore {
 
   // ───────────── queries used by several panels ─────────────
 
-  /** What the agent is doing right now (open tool call first, then the agent's own activity). */
+  /**
+   * What the agent is doing right now: its own open tool call first, then the agent's own
+   * activity. A call of one of its helpers (`seg.parent`) is never the agent's own: while a turn
+   * of the agent runs and only such calls are open, it waits for its helper (`seg` null: the
+   * call is not the agent's); between turns it rests, also while a helper's calls set its state
+   * "working" or "thinking" (narrate.ts `turnRuns`: the same rule).
+   */
   now(agentId: string): { activity: ActivityKind; label: string; since: number; seg: Seg | null } | null {
     const a = this.agentMap.get(agentId);
     const l = this.live[agentId];
@@ -1226,17 +1232,27 @@ class CodlyStore {
       if (l) for (const i of Object.values(l.open)) if (l.segments[i] && (!open || l.segments[i].start > open.start)) open = l.segments[i];
       return { activity: 'await_approval', label: open?.label ?? '', since: l?.statusSince ?? a.updated_at, seg: open };
     }
+    let helping: Seg | null = null;
     if (l) {
       let best: Seg | null = null;
       for (const i of Object.values(l.open)) {
         const s = l.segments[i];
-        if (s && (!best || s.start > best.start)) best = s;
+        if (!s) continue;
+        if (s.parent == null) {
+          if (!best || s.start > best.start) best = s;
+        } else if (!helping || s.start > helping.start) helping = s;
       }
       if (best) return { activity: best.activity, label: best.label, since: best.start, seg: best };
     }
     if (!a) return null;
     for (const s of this.streams.values())
       if (s.agentId === agentId) return { activity: s.kind === 'text' ? 'replying' : 'thinking', label: '', since: s.ts, seg: null };
+    const turnRuns = l?.turn ? l.turn.endedAt == null : a.status === 'working' || a.status === 'thinking' || a.status === 'starting';
+    if (helping && turnRuns) {
+      const parent = helping.parent;
+      return { activity: 'delegate', label: l?.subagents.find((h) => h.callId === parent)?.description ?? '', since: helping.start, seg: null };
+    }
+    if (!turnRuns && a.status !== 'starting') return null;
     if (a.activity && a.activity !== 'idle' && a.status !== 'idle' && a.status !== 'done' && a.status !== 'offline')
       return { activity: a.activity, label: a.activity_label ?? '', since: l?.statusSince ?? a.updated_at, seg: null };
     if (a.status === 'thinking' || a.status === 'starting') return { activity: 'thinking', label: '', since: l?.statusSince ?? a.updated_at, seg: null };

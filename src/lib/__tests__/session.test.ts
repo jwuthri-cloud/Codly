@@ -8,7 +8,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { HOLD_MS, MCP_ASK_WAIT_MS, MCP_BUSY, MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundSummary, canReconnect, canRestart, canStop, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpRowLocked, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, signInSteps, startedWithoutFolderConfig, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, stopsSettling, switchMcp, waitedHelperStopHint } from '../state/session';
+import { HOLD_MS, KEEP_STOPPED_MS, MCP_ASK_WAIT_MS, MCP_BUSY, MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundRows, backgroundSummary, canReconnect, canRestart, canStop, cliAnswer, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpButtonLabel, mcpRowLocked, mcpStartFailure, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, rowOrder, showsMcpSection, signInSteps, startedWithoutFolderConfig, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, switchMcp, waitedHelperStopHint, type BackgroundWork } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -121,10 +121,11 @@ describe('the MCP servers of an agent', () => {
     ]);
     expect(mcpSwitch(servers[1])).toEqual({ label: 'Turn off', busy: 'Turning off…', enabled: false });
     expect(mcpSwitch(servers[2])).toEqual({ label: 'Turn on', busy: 'Turning on…', enabled: true });
-    // No recording says whether Claude Code saves the switch: the hint promises nothing
-    // about the agent's next run.
-    expect(mcpSwitchHint('Bo')).toBe('Switches this server for Bo. Claude Code may keep the switch after this run.');
-    expect(MCP_HINT.disabled).toBe('This server is switched off: the agent works without its tools. Turn on starts it again.');
+    // Recorded (part 5, section 1, n=2): Claude Code saves the switch for the folder, and it
+    // holds for every later Claude Code run there until "Turn on". Before, the hint said
+    // "Claude Code may keep the switch after this run".
+    expect(mcpSwitchHint('Bo')).toBe('Turns this server off for Claude Code in this folder: for Bo now and for every later run here, until you turn it on.');
+    expect(MCP_HINT.disabled).toBe('This server is switched off for Claude Code in this folder: the agent works without its tools. Turn on starts it again.');
     expect(mcpSummary(servers)).toBe('2 connected · 1 connecting · 1 needs sign-in · 1 did not start · 1 switched off');
   });
 
@@ -136,7 +137,7 @@ describe('the MCP servers of an agent', () => {
     expect(toasts.list).toEqual([]);
     expect(await switchMcp('a1', 'docs', true)).toBe(false);
     expect(flip).toHaveBeenLastCalledWith('a1', 'docs', true);
-    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t turn docs on', 'Claude Code answered: Connection closed']]);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'docs did not start: the connection closed. It stays switched on: Reconnect tries again.', undefined]]);
     for (const t of toasts.list) toasts.dismiss(t.id);
   });
 
@@ -163,8 +164,58 @@ describe('the MCP servers of an agent', () => {
     expect(again).toHaveBeenLastCalledWith('a1', 'docs');
     expect(toasts.list).toEqual([]);
     expect(await restartMcp('a1', 'docs')).toBe(false);
-    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t restart docs', 'Claude Code answered: spawn npx ENOENT']]);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'docs did not start: spawn npx ENOENT.', undefined]]);
     for (const t of toasts.list) toasts.dismiss(t.id);
+    // A refusal of Codly's own reached no Claude Code: it is said as it is.
+    again.mockRejectedValueOnce(new Error('Bo is not running'));
+    expect(await restartMcp('a1', 'docs')).toBe(false);
+    expect(toasts.list.map((t) => [t.title, t.body])).toEqual([['Couldn’t restart docs', 'Bo is not running']]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+
+  // Recorded (part 5, section 9, `r7-mcp-cannot-start-*`, n=2): a "Turn on" or a reconnect of a
+  // server that cannot start is answered with an error in Claude Code's words. Before, the toast
+  // showed them as they came, "stdio" as if it were the missing program.
+  it('a server that does not start says why in plain words, never "stdio" as its program', () => {
+    expect(mcpStartFailure('no-such-command', 'Executable not found in $PATH: "stdio"', false)).toBe('no-such-command did not start: its program was not found on your PATH.');
+    expect(mcpStartFailure('ping-flaky', 'Connection closed', false)).toBe('ping-flaky did not start: the connection closed.');
+    expect(mcpStartFailure('docs', 'spawn npx ENOENT', false)).toBe('docs did not start: spawn npx ENOENT.');
+    for (const words of ['Executable not found in $PATH: "stdio"', 'Connection closed']) expect(mcpStartFailure('x', words, false)).not.toContain('stdio');
+    // A "Turn on" that failed still counts as on for the saved switch.
+    expect(mcpStartFailure('ping-flaky', 'Connection closed', true)).toBe('ping-flaky did not start: the connection closed. It stays switched on: Reconnect tries again.');
+  });
+
+  it('a "Turn on" that fails says why in a toast; a "Turn off" that fails says it could not', async () => {
+    for (const t of toasts.list) toasts.dismiss(t.id);
+    vi.spyOn(api, 'setAgentMcpEnabled')
+      .mockRejectedValueOnce('Claude Code answered: Executable not found in $PATH: "stdio"')
+      .mockRejectedValueOnce('Bo is not running')
+      .mockRejectedValueOnce('that agent is still starting; try again in a moment')
+      .mockRejectedValueOnce('Claude Code did not answer within 10 s');
+    expect(await switchMcp('a1', 'no-such-command', true)).toBe(false);
+    expect(await switchMcp('a1', 'docs', false)).toBe(false);
+    expect(toasts.list.map((t) => [t.title, t.body])).toEqual([
+      ['no-such-command did not start: its program was not found on your PATH. It stays switched on: Reconnect tries again.', undefined],
+      ['Couldn’t turn docs off', 'Bo is not running'],
+    ]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
+    // A refusal of Codly's own, or no answer: nothing reached Claude Code, nothing was switched on.
+    expect(await switchMcp('a1', 'docs', true)).toBe(false);
+    expect(await switchMcp('a1', 'docs', true)).toBe(false);
+    expect(toasts.list.map((t) => [t.title, t.body])).toEqual([
+      ['Couldn’t turn docs on', 'that agent is still starting; try again in a moment'],
+      ['Couldn’t turn docs on', 'Claude Code did not answer within 10 s'],
+    ]);
+    expect(cliAnswer('Claude Code answered: Connection closed')).toBe('Connection closed');
+    expect(cliAnswer('Bo is not running')).toBeNull();
+    for (const t of toasts.list) toasts.dismiss(t.id);
+  });
+
+  it('a busy button says what it does to a screen reader too', () => {
+    expect(mcpButtonLabel(MCP_BUSY.off, 'docs')).toBe('Turning off… docs');
+    expect(mcpButtonLabel('Restart', 'docs')).toBe('Restart docs');
+    // One place for the busy words: the switch reads them from there.
+    expect(mcpSwitch({ name: 'docs', status: 'connected', error: null, runId: 'r2', ts: 1 })?.busy).toBe(MCP_BUSY.off);
   });
 
   // Before, the button was free again as soon as Claude Code answered: a second press sent a
@@ -226,6 +277,15 @@ describe('the MCP servers of an agent', () => {
     expect(startedWithoutFolderConfig([notice('r1', TEXT)], 'a1', 'r2')).toBe(false);
     expect(startedWithoutFolderConfig([notice('r2', 'Goal: ship it')], 'a1', 'r2')).toBe(false);
     expect(startedWithoutFolderConfig([notice('r2', TEXT)], 'a1', null)).toBe(false);
+  });
+
+  // Before, the line lived in the section of the servers, which shows only when the run
+  // reported one: a run without any never said that it started without the folder's own files.
+  it('the MCP section shows for such a run also when it reported no server', () => {
+    const docs = { name: 'docs', status: 'connected' as const, error: null, runId: 'r2', ts: 1 };
+    expect(showsMcpSection([], true)).toBe(true);
+    expect(showsMcpSection([docs], false)).toBe(true);
+    expect(showsMcpSection([], false)).toBe(false);
   });
 });
 
@@ -343,11 +403,15 @@ describe('what an agent left at work in the background', () => {
     expect(live().background.map((w) => [w.id, w.status, canStop(w)])).toEqual([['tid-4', 'running', false], ['tid-1', 'completed', false], ['tid-3', 'stopped', false]]);
   });
 
-  it('the "Stop" of a helper says what follows: its agent is told and takes a turn', () => {
+  // Recorded: with no turn running the agent takes a turn of its own (part 3, section 1); a stop
+  // while a turn runs is told within that turn, and no turn follows (part 5, section 11, n=2).
+  it('the "Stop" of a helper says what follows, by whether a turn of its agent runs', () => {
     apply(ev(10, 'r2', { type: 'background_tasks', tasks: [task('tid-1'), task('tid-3', 'helper')], ended: [] }));
     const [command, helper] = live().background;
-    expect(stopHint(helper, 'Bo')).toBe('Stops this helper. Bo is told and goes on with a turn of its own.');
-    expect(stopHint(command, 'Bo')).toBeNull();
+    expect(stopHint(helper, 'Bo', false)).toBe('Stops this helper. Bo is told and goes on with a turn of its own.');
+    expect(stopHint(helper, 'Bo', true)).toBe('Stops this helper. Bo is told in the turn that runs.');
+    expect(stopHint(command, 'Bo', false)).toBeNull();
+    expect(stopHint(command, 'Bo', true)).toBeNull();
     // A helper its agent still waits for: its turn goes on.
     expect(waitedHelperStopHint('Bo')).toBe('Stops this helper. Bo’s turn goes on.');
   });
@@ -355,16 +419,26 @@ describe('what an agent left at work in the background', () => {
   it('each "Stop" says what it stops, to a screen reader', () => {
     expect(stopLabel({ kind: 'command', description: 'npm run dev' })).toBe('Stop the command npm run dev');
     expect(stopLabel({ kind: 'helper', description: 'Run the tests' })).toBe('Stop the helper Run the tests');
+    // While its stop is on its way, the name is what the button shows.
+    expect(stopLabel({ kind: 'command', description: 'npm run dev' }, true)).toBe('Stopping… the command npm run dev');
   });
 
-  // Before, a stopped row left the list at once, and the next row's "Stop" took its place under the pointer.
-  it('the "Stop" buttons are off for a moment after a row you stopped left the running ones', () => {
-    const ended = [{ id: 'tid-1', endedAt: 10_000 }, { id: 'tid-2', endedAt: 4_000 }];
-    expect(stopsSettling(ended, new Set(['tid-1']), 10_000 + HOLD_MS - 1)).toBe(true);
-    expect(stopsSettling(ended, new Set(['tid-1']), 10_000 + HOLD_MS)).toBe(false);
-    // Work that ended by itself, or that you stopped long ago, holds nothing back.
-    expect(stopsSettling(ended, new Set(), 10_000)).toBe(false);
-    expect(stopsSettling(ended, new Set(['tid-2']), 10_000)).toBe(false);
+  // Before, a stopped row left the list at once, the next row's "Stop" took its place under the
+  // pointer, and it was off for a moment.
+  it('a row you stopped keeps its place for 2 s with how it ended, then the list closes up', () => {
+    const w = (id: string, status: string, endedAt: number | null = null): BackgroundWork => ({ id, kind: 'command', description: id, status, runId: 'r2', startedAt: 1, endedAt });
+    const before = [w('a', 'running'), w('b', 'running'), w('c', 'running')];
+    const order = rowOrder([], before);
+    expect(order).toEqual(['a', 'b', 'c']);
+    // "a" was stopped at 10 s: Claude Code's next list puts the running ones first.
+    const after = [w('b', 'running'), w('c', 'running'), w('a', 'stopped', 10_000)];
+    const ids = (r: { running: BackgroundWork[]; ended: BackgroundWork[] }) => [r.running.map((x) => `${x.id}:${x.status}`), r.ended.map((x) => x.id)];
+    expect(ids(backgroundRows(after, rowOrder(order, after), new Set(['a']), 10_000 + KEEP_STOPPED_MS - 1))).toEqual([['a:stopped', 'b:running', 'c:running'], []]);
+    expect(ids(backgroundRows(after, rowOrder(order, after), new Set(['a']), 10_000 + KEEP_STOPPED_MS))).toEqual([['b:running', 'c:running'], ['a']]);
+    // Work that ended by itself leaves its place at once; new work comes last.
+    const more = [w('b', 'running'), w('d', 'running'), w('c', 'completed', 10_000)];
+    expect(rowOrder(order, more)).toEqual(['b', 'c', 'd']);
+    expect(ids(backgroundRows(more, rowOrder(order, more), new Set(), 10_000))).toEqual([['b:running', 'd:running'], ['c']]);
   });
 
   it('a row reads "Stopping…" from the stop Claude Code took until its list drops the work, for 10 s at most', () => {

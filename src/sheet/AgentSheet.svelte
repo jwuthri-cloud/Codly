@@ -6,14 +6,17 @@
   context) · Model-stated (its own words).
 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { Agent } from '../lib/gen/Agent';
   import type { EventRow } from '../lib/gen/EventRow';
   import { copyText, interruptAgent, letGo, refreshAccounts, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { yourAnswers } from '../lib/state/answers';
   import { narrate } from '../lib/state/narration';
-  import { MCP_LABEL, HOLD_MS, ofLiveRun, stopBackgroundTask, stopOnItsWay } from '../lib/state/session';
+  import { MCP_LABEL, HOLD_MS, STOP_BUSY, ofLiveRun, stopBackgroundTask, stopLabel, stopOnItsWay } from '../lib/state/session';
+  import { killRefusal } from '../lib/state/killRule';
+  import { takeovers } from '../lib/state/takeover.svelte';
+  import { turnRuns } from '../lib/narrate';
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
@@ -39,8 +42,8 @@
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
   import { helperEndWord, helperStop, helpersSummary } from './helperRows';
-  import { backgroundLine, closedLine, compactionRowLine, decisionLine, foldActs, helperRowLine, historyFacts, repeatsReply, savedRuleOf, stoppedWithHelper, taskChangedLine, toolStartLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
-  import { FOCUS_LOOK_MS, FOCUS_LOOK_TRIES, focusPlace } from './sheetFocus';
+  import { backgroundLine, closedLine, compactionRowLine, decisionLine, foldActs, helperRowLine, historyFacts, quietStatus, repeatsReply, restartLine, savedRuleOf, stoppedWithHelper, taskChangedLine, toolDoneLine, toolEndLine, toolStartLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
+  import { FOCUS_LOOK_MS, FOCUS_LOOK_TRIES, focusPlace, withTab } from './sheetFocus';
   import { modelChangeOff } from './modelRow';
   import { splitModel } from '../lib/util/team';
   import { isPlanCall, planCallEnd, planStep } from '../lib/util/planRequest';
@@ -218,6 +221,8 @@
       const t = e.kind.type;
       // (a helper's progress is no step of its own: its calls and its end are rows already)
       if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed' || t === 'sub_agent_progress') continue;
+      // (a state its turn's and its calls' rows say already: "Status → idle")
+      if (e.kind.type === 'status_changed' && quietStatus(e.kind.status)) continue;
       if (filter === 'tools' && t !== 'tool_started' && t !== 'tool_completed') continue;
       if (filter === 'files' && t !== 'files_changed' && !(t === 'tool_started' && ['read', 'edit', 'create', 'delete'].includes((e.kind as { activity: string }).activity))) continue;
       if (filter === 'decisions' && t !== 'decision') continue;
@@ -231,22 +236,32 @@
       if (e.kind.type === 'background_tasks' && backgroundLine(e.kind, facts.backgroundBefore.get(e.id) ?? null) == null) continue;
       out.push(e);
     }
-    // (a task's row says its status: one that repeats the row before it says nothing; an act of
-    // yours is one row: a send-back, a request and its answer)
+    // (a task's row says its status: one that repeats the row before it says nothing; an act is
+    // one row: a send-back, a request and its answer, a tool call from its start to its end)
     return foldActs(withoutRepeatedTaskRows(out), facts.planCalls);
   });
   const log = $derived(folded.rows);
   const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
   /** A decision's summary keeps its first word when it is a task's key or an agent's name ("t1 …", "eli …"). */
   const isName = (word: string) => store.tasks.some((t) => t.key === word) || store.agents.some((a) => a.name === word);
-  function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn'; tip?: string } {
+  type Row = { icon: string; text: string; tone?: 'bad' | 'good' | 'warn'; tip?: string };
+  type CallEnd = Extract<EventRow['kind'], { type: 'tool_completed' }>;
+  /** A tool call's one row: what it does while it runs, then what it did and how it ended. */
+  function callRow(callId: string, end: CallEnd | undefined): Row {
+    const start = facts.starts.get(callId) ?? null;
+    if (!end) return { icon: 'play', text: start ? toolStartLine(start, agent.provider) : 'Tool call' };
+    if (facts.planCalls.has(callId)) return { icon: end.ok ? 'check' : 'refresh', text: `${planCallEnd(end.ok, store.approvals.find((a) => a.call_id === callId)?.status ?? null)}${end.duration_ms != null ? ` · ${dur(end.duration_ms)}` : ''}` };
+    const withHelper = end.ok ? null : stoppedWithHelper(callId, facts);
+    // (it started a helper you stopped: the helper's own row says that it stopped)
+    if (withHelper === 'helper') return { icon: 'play', text: start ? toolDoneLine(start, agent.provider) : 'Started a helper' };
+    if (withHelper === 'own') return { icon: 'stop', text: start ? `${toolDoneLine(start, agent.provider)} · stopped with its helper` : 'Stopped with its helper' };
+    return { icon: end.ok ? 'check' : 'x-circle', text: toolEndLine(start, end, agent.provider), tone: end.ok ? undefined : 'bad' };
+  }
+  function describe(e: EventRow): Row {
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: toolStartLine(k, agent.provider) };
-      case 'tool_completed':
-        if (facts.planCalls.has(k.call_id)) return { icon: k.ok ? 'check' : 'refresh', text: `${planCallEnd(k.ok, store.approvals.find((a) => a.call_id === k.call_id)?.status ?? null)}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}` };
-        if (!k.ok && stoppedWithHelper(k.call_id, facts) === 'own') return { icon: 'stop', text: 'Stopped with its helper' };
-        return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
+      case 'tool_started': return callRow(k.call_id, facts.ends.get(k.call_id));
+      case 'tool_completed': return callRow(k.call_id, k);
       case 'files_changed': return { icon: 'diff', text: `Changed ${k.paths.map(basename).join(', ')}` };
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
       case 'reasoning': return { icon: 'chat', text: `Thought: ${oneLine(k.text, 110)}` };
@@ -271,7 +286,7 @@
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
       case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k, facts.backgroundBefore.get(e.id) ?? null) ?? '' }; // (one with nothing to say is not in `log`)
-      case 'decision': return { icon: 'help', text: decisionLine(k, isName) };
+      case 'decision': return { icon: 'help', text: (facts.restarts.has(e.id) && restartLine(k.summary)) || decisionLine(k, isName) };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
       case 'merged': return { icon: 'merge', text: `Merged into ${k.branch}`, tone: 'good' };
@@ -288,13 +303,18 @@
   }
 
   // Jump targets: a timeline click (eventId) opens History; a helper's companion opens Helpers.
+  // A row that History folded into another (`foldActs`) is found at the row that stands for it.
   let root: HTMLDivElement | undefined = $state();
+  const jumpedTo = $derived.by(() => {
+    const id = ui.selection?.kind === 'agent' ? ui.selection.eventId : undefined;
+    return id ? (folded.at.get(id) ?? id) : undefined;
+  });
   $effect(() => {
     const id = ui.selection?.kind === 'agent' ? ui.selection.eventId : undefined;
     if (!id) return;
     if (!ui.sections.history) ui.toggleSection('history');
     filter = 'all';
-    tick().then(() => root?.querySelector(`[data-ev="${id}"]`)?.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
+    tick().then(() => root?.querySelector(`[data-ev="${untrack(() => folded.at.get(id)) ?? id}"]`)?.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
   });
   /** The newest focus: a place inside a tab that is still loading stops being looked for when another focus comes. */
   let focusRun = 0;
@@ -304,7 +324,7 @@
     ui.sheetFocus = null;
     // A section inside a tab (the Git tab's checkpoints): that tab opens first.
     const at = focusPlace(f);
-    if (at.tab) ui.sheetTab = at.tab;
+    if (at.tab) ui.sheetTab = withTab(ui.sheetTab, agent.id, at.tab);
     if (ui.sections[at.section] === false) ui.toggleSection(at.section);
     const behavior = ui.reducedMotion ? 'auto' : 'smooth';
     const run = ++focusRun;
@@ -332,6 +352,8 @@
   let confirmStop = $state(false);
   let confirmLetGo = $state(false);
   const working = $derived(n?.tone === 'live' || n?.tone === 'wait');
+  /** Why it cannot be stopped from here (it is in your terminal), else null. */
+  const killOff = $derived(killRefusal(agent.name, takeovers.has(agent.id)));
   /** Interrupt and Stop land when the CLI lets go: the button says so until then. */
   let interrupting = $state(false);
   let stopping = $state(false);
@@ -354,7 +376,7 @@
     { label: 'Change model…', icon: 'sparkle', disabled: modelChangeOff(agent) != null, run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
     { kind: 'separator' },
     { label: 'Interrupt this turn', icon: 'pause', disabled: !working || interrupting, run: interrupt },
-    { label: 'Stop the agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline', run: () => (confirmStop = true) },
+    { label: 'Stop the agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline' || killOff != null, hint: killOff ? 'In your terminal' : undefined, run: () => (confirmStop = true) },
     // The Lead goes with its request, a team member with Settings → Team.
     ...(agent.role === 'lead' ? [] : agent.member
       ? [{ label: 'Remove from team…', icon: 'settings', run: () => { ui.settingsTab = 'team'; ui.settingsOpen = true; } } as MenuItem]
@@ -489,7 +511,8 @@
       <Section id="subagents" title="Helpers" summary={helpersSummary(subs)}>
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
-            {@const halt = canStopHelpers ? helperStop(s, background, clean(agent.name)) : null}
+            {@const halt = canStopHelpers ? helperStop(s, subsRunning, background, clean(agent.name), turnRuns(agent, live)) : null}
+            {@const halting = helperStopping(s.callId)}
             <li>
               <div class="s-row">
                 <Icon name="crew" size={15} />
@@ -497,8 +520,11 @@
                 <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
                 <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
                 <span class="s-dot on"></span>
-                {#if halt}
-                  <button class="btn sm ghost" disabled={helperStopping(s.callId) || helpersSettling} aria-label="Stop the helper {clean(s.description)}" data-tip={halt.hint} onclick={() => stopHelper(s.callId, halt.id)}><Icon name="stop" size={12} />{helperStopping(s.callId) ? 'Stopping…' : 'Stop'}</button>
+                {#if halt?.id}
+                  {@const id = halt.id}
+                  <button class="btn sm ghost" disabled={halting || helpersSettling} aria-label={stopLabel({ kind: 'helper', description: s.description }, halting)} data-tip={halt.hint} data-tip-place="below" onclick={() => stopHelper(s.callId, id)}><Icon name="stop" size={12} />{halting ? STOP_BUSY : 'Stop'}</button>
+                {:else if halt}
+                  <span class="s-meta" data-tip={halt.hint} data-tip-place="below">Stop it below</span>
                 {/if}
               </div>
               {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
@@ -588,7 +614,7 @@
       <div class="log">
         {#each log as e (e.id)}
           {@const d = describe(e)}
-          <button class="ev" class:hl={ui.selection?.kind === 'agent' && ui.selection.eventId === e.id} data-ev={e.id} onclick={() => (rawOpen = rawOpen === e.id ? null : e.id)}>
+          <button class="ev" class:hl={jumpedTo === e.id} data-ev={e.id} onclick={() => (rawOpen = rawOpen === e.id ? null : e.id)}>
             <time class="num">{clockSec(e.ts)}</time>
             <span class="ev-ic tone-{d.tone ?? 'n'}"><Icon name={d.icon} size={12} /></span>
             <span class="ev-t truncate" data-tip={d.tip}>{d.text}</span>

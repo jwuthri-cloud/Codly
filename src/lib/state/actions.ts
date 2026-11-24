@@ -35,8 +35,10 @@ import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
 import { requests } from './requests.svelte';
 import { planOwners, review, reviewKey } from './review.svelte';
+import { killRefusal } from './killRule';
 import { noteKill, noteStop, stopping } from './stops';
 import { store } from './store.svelte';
+import { takeovers } from './takeover.svelte';
 import { toast, toasts } from './toasts.svelte';
 import { ui, wallNow } from './ui.svelte';
 
@@ -658,8 +660,13 @@ export function stopThreadByEsc(thread: string): boolean {
   return true;
 }
 
-/** Kill: the process ends now. The agent's conversation says that you killed it. */
+/** Kill: the process ends now. The agent's conversation says that you killed it. Not while it is in your terminal: Codly runs nothing for it then (state/killRule.ts). */
 export async function stopAgent(agentId: string) {
+  const refused = killRefusal(store.agentMap.get(agentId)?.name ?? 'This agent', takeovers.has(agentId));
+  if (refused) {
+    toast({ kind: 'info', title: refused });
+    return;
+  }
   const undo = noteStop(agentId);
   const unkill = noteKill(agentId, wallNow());
   const ok = await attempt('stop the agent', async () => {

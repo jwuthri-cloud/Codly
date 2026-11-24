@@ -1,9 +1,10 @@
 // Words for rows of an agent's History that are built from ids or lists: a fact of the knowledge
 // graph, a task that changed, a helper, a change of what runs in the background, a compaction,
 // a tool call, a decision as a sentence. Which rows of a task say something new, and which rows
-// are one act of yours (a send-back, an answer to a request) said once. And what a row needs to
-// know about the agent's other events: which calls showed a plan, which conversation rows only
-// repeat a reply, which calls were a helper's, what ran in the background before.
+// are one act said once (a send-back, an answer to a request, a tool call from its start to its
+// end). And what a row needs to know about the agent's other events: which calls showed a plan,
+// which conversation rows only repeat a reply, which calls were a helper's, how each call
+// ended, what ran in the background before, which reconnects were restarts.
 // Pure, so the sheet and the tests agree; the sheet passes the names.
 import { CODLY_TOOL } from '../lib/narrate';
 import type { Approval } from '../lib/gen/Approval';
@@ -14,8 +15,8 @@ import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
 import type { Triple } from '../lib/gen/Triple';
 import type { JsonValue } from '../lib/gen/serde_json/JsonValue';
-import { plural, tokens } from '../lib/util/format';
-import { phrase, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+import { dur, plural, tokens } from '../lib/util/format';
+import { pastVerb, phrase, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
 import { askedLine } from '../lib/util/outcome';
 import { isPlanCall, planStep, showsPlan } from '../lib/util/planRequest';
 import { oneLine } from '../lib/util/sanitize';
@@ -55,18 +56,41 @@ export type HistoryFacts = {
   helperOf: Map<string, string>;
   /** By the id of a `background_tasks` row: the ids of what the list before it in the same run named (null: none is at hand). */
   backgroundBefore: Map<number, ReadonlySet<string> | null>;
+  /** How each call ended, by its id: its row says it, in the past, from its start. */
+  ends: Map<string, ToolCompleted>;
+  /** What each call was, by its id: the row of an end whose start is not shown says it. */
+  starts: Map<string, ToolStarted>;
+  /** The ids of the records of a reconnect that asked a connected server to start again: a restart (`restartLine`). */
+  restarts: Set<number>;
 };
 
 /** `provider`: the agent's CLI (none when Codly does not know the agent): only a Claude agent's call of the plan tool shows a plan. */
 export function historyFacts(events: readonly EventRow[], agentId: string, provider: Provider | null = null): HistoryFacts {
-  const facts: HistoryFacts = { planCalls: new Set(), said: new Set(), helpers: new Map(), helperOf: new Map(), backgroundBefore: new Map() };
+  const facts: HistoryFacts = { planCalls: new Set(), said: new Set(), helpers: new Map(), helperOf: new Map(), backgroundBefore: new Map(), ends: new Map(), starts: new Map(), restarts: new Set() };
   /** The ids of the last list of background work of each run. */
   const listed = new Map<string | null, ReadonlySet<string>>();
+  /**
+   * Where each server stood last, by its name, in the run of the newest `mcp_server` row (`run`):
+   * the servers of an earlier run are gone with its process. The core writes the record of a
+   * reconnect with no run id, so it is matched by the server's name alone.
+   */
+  const servers = new Map<string, string>();
+  let run: string | null = null;
   for (const e of events) {
     if (e.agent_id !== agentId) continue;
     const k = e.kind;
-    if (k.type === 'tool_started' && isPlanCall(k.name, provider)) facts.planCalls.add(k.call_id);
-    else if (k.type === 'message') facts.said.add(k.text);
+    if (k.type === 'tool_started') {
+      facts.starts.set(k.call_id, k);
+      if (isPlanCall(k.name, provider)) facts.planCalls.add(k.call_id);
+    } else if (k.type === 'tool_completed') facts.ends.set(k.call_id, k);
+    else if (k.type === 'mcp_server') {
+      if (e.run_id !== run) servers.clear();
+      run = e.run_id;
+      servers.set(k.name, k.status);
+    } else if (k.type === 'decision') {
+      const asked = reconnectAsked(k.summary);
+      if (asked && servers.get(asked.server) === 'connected') facts.restarts.add(e.id);
+    } else if (k.type === 'message') facts.said.add(k.text);
     else if (k.type === 'sub_agent') facts.helpers.set(k.call_id, k.status);
     else if (k.type === 'sub_agent_progress' && k.tool_call_id != null) facts.helperOf.set(k.tool_call_id, k.call_id);
     else if (k.type === 'background_tasks') {
@@ -125,6 +149,7 @@ export function withoutRepeatedTaskRows<T extends { kind: EventKind }>(rows: T[]
 
 type SubAgentRow = Extract<EventKind, { type: 'sub_agent' }>;
 type ToolStarted = Extract<EventKind, { type: 'tool_started' }>;
+type ToolCompleted = Extract<EventKind, { type: 'tool_completed' }>;
 type DecisionRow = Extract<EventKind, { type: 'decision' }>;
 type BackgroundTasks = Extract<EventKind, { type: 'background_tasks' }>;
 type Compacting = Extract<EventKind, { type: 'compacting' }>;
@@ -191,6 +216,56 @@ export function toolStartLine(k: Pick<ToolStarted, 'name' | 'activity' | 'target
   }
   if (t) return `Using ${t.server}: ${t.tool}${by}`;
   return `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${by}`;
+}
+
+/**
+ * The row of a tool call that ended, in the past, from its start: "Read package.json · 0.5 s",
+ * "Ran npm test · failed · exit 1 · 2 s". The CLI's name of the tool is on the row of a call
+ * that runs; the row of a call that is over says what it did and how it ended. Without its
+ * start (a row the History does not hold) it says only how it ended ("Finished · 0.5 s").
+ */
+export function toolEndLine(start: Pick<ToolStarted, 'name' | 'activity' | 'target' | 'input'> | null, end: Pick<ToolCompleted, 'ok' | 'exit_code' | 'tests_passed' | 'tests_failed' | 'duration_ms'>, provider: Provider | null): string {
+  const said = start ? `${toolDoneLine(start, provider)}${end.ok ? '' : ' · failed'}` : end.ok ? 'Finished' : 'Failed';
+  const exit = end.exit_code != null ? ` · exit ${end.exit_code}` : '';
+  const tests = end.tests_passed != null ? ` · ${end.tests_passed} passed${end.tests_failed ? `, ${end.tests_failed} failed` : ''}` : '';
+  return `${said}${exit}${tests}${end.duration_ms != null ? ` · ${dur(end.duration_ms)}` : ''}`;
+}
+
+/** What a call did, in the past: the start's words (`toolStartLine`) with the verb that says it is done, and without the tool's name. */
+export function toolDoneLine(k: Pick<ToolStarted, 'name' | 'activity' | 'target' | 'input'>, provider: Provider | null): string {
+  if (isPlanCall(k.name, provider)) return planStep(false);
+  const by = subagentMark(k.input);
+  const t = mcpToolOf(k.name, k.target);
+  if (t?.server === CODLY_SERVER) return `Used Codly’s ${t.tool.replace(/^codly\./, '').replace(/^codly_/, '').replace(/_/g, ' ')} tool${by}`;
+  if (t) return `Used ${t.server}: ${t.tool}${by}`;
+  const label = oneLine(targetLabel(k.target, k.activity), 60);
+  const verb = k.activity === 'test' && label ? 'Ran' : pastVerb(k.activity);
+  return `${label ? `${verb} ${label}` : verb}${by}`;
+}
+
+/** The changes of an agent's state that its turn's and its calls' rows already say: History shows no row of their own for them. */
+const QUIET_STATUS = new Set(['idle', 'starting', 'thinking', 'working']);
+
+/** Whether a `status_changed` row says nothing the rows around it do not ("Status → idle"). */
+export const quietStatus = (status: string): boolean => QUIET_STATUS.has(status);
+
+/** The core's record of a reconnect: "asked Ada to reconnect its MCP server docs" (orchestrator/live_session.rs). */
+const RECONNECT = /^asked (.+?) to reconnect its MCP server (.+)$/;
+
+/** The agent and the server of the core's record of a reconnect (null: the record is another one). */
+export function reconnectAsked(summary: string): { agent: string; server: string } | null {
+  const m = RECONNECT.exec(summary.trim());
+  return m ? { agent: m[1], server: m[2] } : null;
+}
+
+/**
+ * The row of a reconnect that was a restart ("Restart" sends Claude Code the request of
+ * "Reconnect" for a connected server, session.ts `canRestart`): "You restarted docs for Ada’s
+ * run". Null when the record is no reconnect.
+ */
+export function restartLine(summary: string): string | null {
+  const asked = reconnectAsked(summary);
+  return asked ? `You restarted ${asked.server} for ${asked.agent}’s run` : null;
 }
 
 /** A decision's `detail` as an object (empty when it is none). */
@@ -261,35 +336,56 @@ function partOfSendBack(r: EventRow, d: EventRow, comments: string): boolean {
 }
 
 /**
- * The rows of a History (newest first) with each act of yours said once. A send-back is its
- * decision row: the task's new status, your comments in the worker's conversation and the turn
- * that took them are part of it (same task, within `ACT_MS`); rows of other tasks between them
- * stay. A request that is closed is its answer's row: the row that it asked, a record of the
- * answer, and the calls of a plan it showed (`planCalls`) go. `asked`: the requests whose row
- * went, by id, so that the answer's row can say what was asked (`closedLine`).
+ * The rows of a History (newest first) with each act said once. A send-back is its decision
+ * row: the task's new status, your comments in the worker's conversation and the turn that took
+ * them are part of it (same task, within `ACT_MS`); rows of other tasks between them stay. A
+ * request that is closed is its answer's row: the row that it asked, a record of the answer,
+ * and the calls of a plan it showed (`planCalls`) go. A tool call is the row of its start: the
+ * row of its end goes, and the start's row says how it ended (`toolEndLine`). `asked`: the
+ * requests whose row went, by id, so that the answer's row can say what was asked
+ * (`closedLine`). `at`: for each row that went, by its event id, the id of the row that stands
+ * for it, so that a jump to it lands there.
  */
-export function foldActs(rows: readonly EventRow[], planCalls: ReadonlySet<string>): { rows: EventRow[]; asked: Map<string, Approval> } {
-  const resolved = new Set(rows.flatMap((e) => (e.kind.type === 'approval_resolved' ? [e.kind.approval_id] : [])));
+export function foldActs(rows: readonly EventRow[], planCalls: ReadonlySet<string>): { rows: EventRow[]; asked: Map<string, Approval>; at: Map<number, number> } {
+  /** The row of each answer, by the request's id. */
+  const answers = new Map(rows.flatMap((e) => (e.kind.type === 'approval_resolved' ? [[e.kind.approval_id, e] as const] : [])));
   const asked = new Map<string, Approval>();
-  const drop = new Set<EventRow>();
-  const planOf = new Set<string>();
+  /** Each row that goes, with the row that stands for it. */
+  const into = new Map<EventRow, EventRow>();
+  /** The calls of a plan whose request is closed, with the answer's row. */
+  const planOf = new Map<string, EventRow>();
   for (const e of rows) {
-    if (e.kind.type !== 'approval_requested' || !resolved.has(e.kind.approval.id)) continue;
+    if (e.kind.type !== 'approval_requested') continue;
+    const answer = answers.get(e.kind.approval.id);
+    if (!answer) continue;
     asked.set(e.kind.approval.id, e.kind.approval);
-    drop.add(e);
+    into.set(e, answer);
     const call = e.kind.approval.call_id;
-    if (call && planCalls.has(call)) planOf.add(call);
+    if (call && planCalls.has(call)) planOf.set(call, answer);
   }
+  const startOf = new Map(rows.flatMap((e) => (e.kind.type === 'tool_started' ? [[e.kind.call_id, e] as const] : [])));
   for (const e of rows) {
     const k = e.kind;
-    if ((k.type === 'tool_started' || k.type === 'tool_completed') && planOf.has(k.call_id)) drop.add(e);
+    if (k.type === 'tool_started' || k.type === 'tool_completed') {
+      const plan = planOf.get(k.call_id);
+      if (plan) into.set(e, plan);
+      else if (k.type === 'tool_completed' && startOf.has(k.call_id)) into.set(e, startOf.get(k.call_id)!);
+    }
     if (k.type !== 'decision') continue;
     const answer = answerOf(k);
-    if (answer != null && resolved.has(answer)) drop.add(e);
+    const answerRow = answer != null ? answers.get(answer) : undefined;
+    if (answerRow) into.set(e, answerRow);
     const comments = sentBack(k);
-    if (comments && e.task_id) for (const r of rows) if (partOfSendBack(r, e, comments)) drop.add(r);
+    if (comments && e.task_id) for (const r of rows) if (partOfSendBack(r, e, comments)) into.set(r, e);
   }
-  return { rows: rows.filter((r) => !drop.has(r)), asked };
+  // (a row can stand for another that went too: the jump follows to the one that stays)
+  const at = new Map<number, number>();
+  for (const [r, by] of into) {
+    let to = by;
+    for (let hops = 0; into.has(to) && hops < into.size; hops++) to = into.get(to)!;
+    at.set(r.id, to.id);
+  }
+  return { rows: rows.filter((r) => !into.has(r)), asked, at };
 }
 
 /**

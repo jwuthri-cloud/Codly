@@ -4,7 +4,7 @@ import type { EventRow } from '../../lib/gen/EventRow';
 import type { TaskStatus } from '../../lib/gen/TaskStatus';
 import type { Approval } from '../../lib/gen/Approval';
 import type { JsonValue } from '../../lib/gen/serde_json/JsonValue';
-import { backgroundLine, closedLine, compactionRowLine, decisionLine, entityWord, foldActs, helperRowLine, historyFacts, historySentence, repeatsReply, savedRuleOf, stoppedWithHelper, taskChangedLine, toolStartLine, tripleLine, withoutRepeatedTaskRows, type Names } from '../historyWords';
+import { backgroundLine, closedLine, compactionRowLine, decisionLine, entityWord, foldActs, helperRowLine, historyFacts, historySentence, quietStatus, reconnectAsked, repeatsReply, restartLine, savedRuleOf, stoppedWithHelper, taskChangedLine, toolDoneLine, toolEndLine, toolStartLine, tripleLine, withoutRepeatedTaskRows, type Names } from '../historyWords';
 
 let eid = 0;
 const ev = (agent: string, kind: unknown): EventRow => ({ id: ++eid, ts: eid, agent_id: agent, task_id: null, run_id: null, kind: kind as EventKind });
@@ -307,5 +307,108 @@ describe('a call of a helper you stopped', () => {
     // A helper that failed by itself, and the agent's own calls, are as they were.
     expect(stoppedWithHelper('h2', facts)).toBeNull();
     expect(stoppedWithHelper('c9', facts)).toBeNull();
+  });
+});
+
+// The fifth browser review (defect 20): a tool call was two rows ("Reading package.json · Read",
+// then "Finished · 0.5 s"), "Status → idle" rows came between them, and a Restart read as "You
+// asked Lead to reconnect…".
+describe('History is one row per act', () => {
+  let n = 0;
+  const row = (kind: unknown, run = 'r1'): EventRow => ({ id: ++n, ts: n, agent_id: 'eli', task_id: null, run_id: run, kind: kind as EventKind });
+  const target = (o: Record<string, unknown>) => ({ path: null, paths: [], command: null, query: null, url: null, server: null, tool: null, ...o });
+  const started = (call_id: string, name: string, activity: string, t: Record<string, unknown>, input: unknown = {}) =>
+    row({ type: 'tool_started', call_id, name, activity, target: target(t), input, confidence: 'observed' });
+  const ended = (call_id: string, o: Record<string, unknown> = {}) =>
+    row({ type: 'tool_completed', call_id, ok: true, exit_code: null, tests_passed: null, tests_failed: null, duration_ms: 500, ...o });
+  const startOf = (e: EventRow) => e.kind as Extract<EventKind, { type: 'tool_started' }>;
+  const endOf = (e: EventRow) => e.kind as Extract<EventKind, { type: 'tool_completed' }>;
+
+  it('a tool call is the row of its start, which says what it did and how it ended', () => {
+    const read = started('c1', 'Read', 'read', { path: 'web/package.json' });
+    const done = ended('c1');
+    const folded = foldActs([done, read], new Set());
+    expect(folded.rows.map((r) => r.id)).toEqual([read.id]);
+    expect(folded.at.get(done.id)).toBe(read.id);
+    expect(toolStartLine(startOf(read), 'claude')).toBe('Reading package.json · Read');
+    expect(toolEndLine(startOf(read), endOf(done), 'claude')).toBe('Read package.json · 0.5 s');
+    // A call that runs is still its own row.
+    expect(foldActs([read], new Set()).rows).toEqual([read]);
+  });
+
+  it('a call that failed says so, with its exit code and its tests', () => {
+    const test = startOf(started('c2', 'Bash', 'test', { command: 'npm test' }));
+    expect(toolEndLine(test, endOf(ended('c2', { ok: false, exit_code: 1, tests_passed: 4, tests_failed: 2, duration_ms: 2100 })), 'claude')).toBe('Ran npm test · failed · exit 1 · 4 passed, 2 failed · 2 s');
+    // An MCP tool is named in words; a helper's call says so.
+    expect(toolDoneLine(startOf(started('c3', 'mcp__linear__create_issue', 'mcp', { server: 'linear', tool: 'create_issue' })), 'claude')).toBe('Used linear: create_issue');
+    expect(toolDoneLine(startOf(started('c4', 'Bash', 'execute', { command: 'ls' }, { subagent: { thread: 't', name: 'Ada' } })), 'codex')).toBe('Ran ls · helper Ada');
+    // The end of a call whose start is not shown says only how it ended.
+    expect(toolEndLine(null, endOf(ended('c5', { ok: false })), 'claude')).toBe('Failed · 0.5 s');
+  });
+
+  it('knows how each call ended, and what it was', () => {
+    const read = started('c6', 'Read', 'read', { path: 'a.ts' });
+    const done = ended('c6');
+    const facts = historyFacts([read, done], 'eli', 'claude');
+    expect(facts.ends.get('c6')).toBe(done.kind);
+    expect(facts.starts.get('c6')).toBe(read.kind);
+  });
+
+  it('a state its turn and its calls already say is no row', () => {
+    for (const s of ['idle', 'working', 'thinking', 'starting']) expect(quietStatus(s)).toBe(true);
+    for (const s of ['waiting_approval', 'blocked', 'rate_limited', 'failed', 'offline']) expect(quietStatus(s)).toBe(false);
+  });
+
+  it('a reconnect of a connected server is a restart, and says so', () => {
+    // The core writes the record of a reconnect with no run id (controls.rs `control_decision`).
+    const reconnect = (server: string): EventRow => ({ ...row({ type: 'decision', id: `d${n}`, decision_type: 'control', method: 'human', summary: `asked Lead to reconnect its MCP server ${server}`, detail: null }), run_id: null });
+    const server = (name: string, status: string, run = 'r1'): EventRow => ({ ...row({ type: 'mcp_server', name, status, error: null }), run_id: run });
+    const restart = reconnect('docs');
+    const retry = reconnect('linear');
+    const facts = historyFacts([server('docs', 'connected'), server('linear', 'failed'), restart, retry], 'eli', 'claude');
+    expect([...facts.restarts]).toEqual([restart.id]);
+    expect(restartLine((restart.kind as Extract<EventKind, { type: 'decision' }>).summary)).toBe('You restarted docs for Lead’s run');
+    expect(reconnectAsked('asked Eli 2 to reconnect its MCP server my server')).toEqual({ agent: 'Eli 2', server: 'my server' });
+    expect(restartLine('you turned docs off for Lead’s run')).toBeNull();
+    // A server of an earlier run is gone with that run: a newer run that lists other servers does not have it.
+    expect([...historyFacts([server('docs', 'connected'), server('linear', 'connected', 'r2'), reconnect('docs')], 'eli', 'claude').restarts]).toEqual([]);
+    // Its status in the newer run is what counts.
+    const again = reconnect('docs');
+    expect([...historyFacts([server('docs', 'failed'), server('docs', 'connected', 'r2'), again], 'eli', 'claude').restarts]).toEqual([again.id]);
+  });
+
+  // Package claude-part5-truth words the record of the switch for the folder: History shows it as a sentence.
+  it('the record of a switch reads as a sentence, in its old and its new words', () => {
+    const keeps = () => false;
+    expect(historySentence("you turned docs off for Lead's run", 'human', keeps)).toBe("You turned docs off for Lead's run");
+    expect(historySentence('you turned docs off for Claude Code in this folder (Lead’s run and every later one)', 'human', keeps)).toBe('You turned docs off for Claude Code in this folder (Lead’s run and every later one)');
+  });
+});
+
+// Round 7's review: a jump from Home to a History row found nothing when the fold dropped it.
+describe('a jump to a row that History folded', () => {
+  let n = 0;
+  const row = (ts: number, kind: unknown, task: string | null = null): EventRow => ({ id: ++n, ts, agent_id: 'eli', task_id: task, run_id: 'r1', kind: kind as EventKind });
+  const COMMENTS = 'Review comments (1):\n\n1. a.ts:4\n   Use the v2 client';
+
+  it('lands on the row that stands for it: the three rows of a send-back on its decision', () => {
+    const chat = row(1000, { type: 'chat', message: { id: 'c1', thread: 'agent:eli', author: 'user', text: COMMENTS, attachment: null, ts: 1000 } });
+    const status = row(1010, { type: 'task_changed', task: { id: 'task-1', key: 't1', status: 'changes_requested' } });
+    const sent = row(1020, { type: 'decision', id: 'd1', decision_type: 'review', method: 'human', summary: 'you sent t1 back with review comments; its worker reads them now', detail: { comments: COMMENTS } }, 'task-1');
+    const folded = foldActs([sent, status, chat], new Set());
+    expect(folded.rows).toEqual([sent]);
+    // The jump to the first of the three lands on the one that is kept.
+    expect([chat, status].map((r) => folded.at.get(r.id))).toEqual([sent.id, sent.id]);
+    expect(folded.at.has(sent.id)).toBe(false);
+  });
+
+  it('a closed request and its record land on the answer’s row', () => {
+    const approval = { id: 'ap1', agent_id: 'eli', run_id: 'r1', task_id: null, call_id: null, subject: { kind: 'command', command: 'rm x', cwd: null }, reason: null, choices: [], risks: [], status: 'pending', decided_by: null, created_at: 0 } as unknown as Approval;
+    const asked = row(10, { type: 'approval_requested', approval });
+    const answered = row(30, { type: 'approval_resolved', approval_id: 'ap1', status: 'approved', by: 'user' });
+    const record = row(31, { type: 'decision', id: 'd2', decision_type: 'approval', method: 'human', summary: 'You allowed it', detail: { approval: 'ap1' } });
+    const folded = foldActs([record, answered, asked], new Set());
+    expect(folded.rows).toEqual([answered]);
+    expect([asked, record].map((r) => folded.at.get(r.id))).toEqual([answered.id, answered.id]);
   });
 });
