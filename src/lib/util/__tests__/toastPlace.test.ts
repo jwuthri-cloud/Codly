@@ -604,6 +604,21 @@ describe('nothing of the stack lies on a waiting card', () => {
     expect(stackPlace(sides, shape(151), shape(75), [card], TOP, MOVES)).toEqual({ top: 68, folded: true });
   });
 
+  it('a tall card right over the composer: the stack does not go under the card onto the composer (1024 x 640)', () => {
+    // The card from 70 to 500, the composer's field and Send from 520 to 628. Under the card (504)
+    // the folded stack (75 px) would end at 579, on the composer: it stays where it last looked.
+    const card = { ...box(205, 70, 873, 500), card: true };
+    const composer = box(205, 520, 873, 628);
+    expect(stackPlace(sides, shape(151), shape(75), [card, composer], TOP, MOVES)).toEqual({ top: 68, folded: true });
+  });
+
+  it('two waiting cards, the second far down: the stack goes under both, not onto the second (1440 x 900)', () => {
+    // Under the first card (404) the folded stack would lie on the second, from 450: it goes under that one too.
+    const first = { ...box(205, 70, 873, 400), card: true };
+    const second = { ...box(205, 450, 873, 800), card: true };
+    expect(stackPlace(sides, shapeIn(900, 151), shapeIn(900, 75), [first, second], TOP, MOVES)).toEqual({ top: 800 + AIR, folded: true });
+  });
+
   it('a control that is no card is still covered when there is no free place: only a waiting card is kept clear', () => {
     const panel = box(205, 70, 873, 560);
     expect(stackPlace(sides, shape(151), shape(75), [panel], TOP, MOVES)).toEqual({ top: 68, folded: true });

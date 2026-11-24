@@ -10,15 +10,13 @@ describe('toastParts: a toast’s text as it is drawn', () => {
     ]);
   });
 
-  it('starts with a capital letter', () => {
-    expect(toastParts('checks failed on the merge result')).toEqual([{ text: 'Checks failed on the merge result', code: false }]);
-    expect(toastParts('couldn’t reach the core')).toEqual([{ text: 'Couldn’t reach the core', code: false }]);
-    expect(toastParts('a')).toEqual([{ text: 'A', code: false }]);
-  });
-
-  it('leaves a first word as it is when it is not a plain word: a path, a file, code', () => {
-    expect(toastParts('src/app.ts changed')).toEqual([{ text: 'src/app.ts changed', code: false }]);
-    expect(toastParts('package.json changed')).toEqual([{ text: 'package.json changed', code: false }]);
+  it('changes no letter: a text can start with a name whose case counts', () => {
+    // The conflict toast of a plan merge (state/actions.ts) starts with the branch.
+    expect(toastParts('main and this plan both changed a.ts. main is unchanged.')).toEqual([
+      { text: 'main and this plan both changed a.ts. main is unchanged.', code: false },
+    ]);
+    expect(toastParts('codly: Lead needs you')).toEqual([{ text: 'codly: Lead needs you', code: false }]);
+    expect(toastParts('makefile is outside this agent’s worktree')).toEqual([{ text: 'makefile is outside this agent’s worktree', code: false }]);
     expect(toastParts('`main` moved')).toEqual([
       { text: 'main', code: true },
       { text: ' moved', code: false },
@@ -26,9 +24,9 @@ describe('toastParts: a toast’s text as it is drawn', () => {
   });
 
   it('keeps a backtick that opens nothing', () => {
-    expect(toastParts('a ` alone')).toEqual([{ text: 'A ` alone', code: false }]);
+    expect(toastParts('a ` alone')).toEqual([{ text: 'a ` alone', code: false }]);
     expect(toastParts('run `a` then ` b')).toEqual([
-      { text: 'Run ', code: false },
+      { text: 'run ', code: false },
       { text: 'a', code: true },
       { text: ' then ` b', code: false },
     ]);

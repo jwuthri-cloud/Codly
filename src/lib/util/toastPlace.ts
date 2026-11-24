@@ -85,7 +85,9 @@ export type Shape = { height: number; reach: number; cardReach: number };
  * (`Control.card`): who asks, and what, is read before a button is pressed. With no free place,
  * the stack (folded when it can fold) goes to the last place it tried that is off every waiting
  * card, though it covers another control there; with none, under the cards, as far as the
- * window lets it go (`Shape.cardReach`). Only a card that leaves no such room is covered.
+ * window lets it go (`Shape.cardReach`), when that place covers no control either (the composer
+ * under a tall card). Only a card that leaves no such room is covered. `controls` must hold what
+ * lies down to `cardReach` under the stack, not only what lies in its usual reach.
  */
 export function stackPlace(sides: { left: number; right: number }, whole: Shape, folded: Shape | null, controls: Control[], top: number, maxMoves: number, stay: number | null = null): { top: number; folded: boolean } {
   const boxAt = (at: number, shape: Shape): Box => ({ ...sides, top: at, bottom: at + shape.height });
@@ -102,7 +104,8 @@ export function stackPlace(sides: { left: number; right: number }, whole: Shape,
   const cards = controls.filter((c) => c.card);
   const offCards = tried.filter((at) => freeAt(at, shape, cards));
   if (offCards.length) return { top: offCards[offCards.length - 1], folded: !!folded };
-  return { top: underCards(boxAt(last, shape), cards, top, shape.cardReach) ?? last, folded: !!folded };
+  const below = underCards(boxAt(last, shape), cards, top, shape.cardReach);
+  return { top: below !== null && freeAt(below, shape) ? below : last, folded: !!folded };
 }
 
 /** The top under the waiting `cards` that `box` covers, `AIR` px under them, when it is no

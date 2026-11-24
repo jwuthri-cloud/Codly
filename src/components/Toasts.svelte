@@ -27,7 +27,7 @@
   dismiss leaves an empty place of its height: the toasts under it stay under your pointer
   (`stackRows`). The places close when you leave the stack. "Dismiss all" leaves no place.
   A toast whose action can no longer be done goes (`ToastAction.gone`). Code in a toast's text
-  (between backticks) is drawn as code, and its text starts with a capital (lib/util/toastText.ts).
+  (between backticks) is drawn as code; no letter of it is changed (lib/util/toastText.ts).
   It looks for its place when the toasts change (also the height of one), when the window's size
   changes, and when the page's layout changes under it: the sheet, the Ask me panel, the IDE,
   the find bar or the Resume bar opens or closes, the rail gets wider, the office takes the whole
@@ -215,8 +215,8 @@
     const one = first && many ? shape(counted(first) + GAP + MORE) : null;
     const now = el.getBoundingClientRect();
     const sides = { left: now.left, right: now.right };
-    // Everything the stack can reach, with its air around it.
-    const area = grown({ ...sides, top, bottom: top + whole.height + whole.reach }, AIR);
+    // Everything the stack can reach, with its air around it: down to where it may go to get off a waiting card.
+    const area = grown({ ...sides, top, bottom: top + whole.height + whole.cardReach }, AIR);
     const at = stackPlace(sides, whole, one, controlBoxes(el, area), top, MOVES, keep ? top + down : null);
     down = at.top - top;
     folded = at.folded;
@@ -400,6 +400,7 @@
   class:beside-sheet={ui.sheetOpen}
   class:slides
   class:unfolded
+  class:holds={gaps.length > 0}
   bind:this={stack}
   bind:clientHeight={height}
   style:gap="{GAP}px"
@@ -419,7 +420,7 @@
         onpointerenter={() => toasts.pause(t.id)}
         onpointerleave={() => toasts.resume(t.id)}
         onoutroend={gone}
-        out:fade={{ duration: ui.reducedMotion || gaps.some((g) => g.id === t.id) ? 0 : 120 }}
+        out:fade|global={{ duration: ui.reducedMotion || gaps.some((g) => g.id === t.id) ? 0 : 120 }}
       >
         <span class="ic" class:spin={t.kind === 'progress'}><Icon name={ICON[t.kind]} size={16} /></span>
         <div class="txt">
@@ -461,8 +462,9 @@
   /* A first toast shows at its place; after that the stack moves to a new place (reduced motion: at once, see base.css). */
   .stack.slides { transition: right var(--d-4) var(--spring), transform 160ms var(--ease-out); }
   .stack.beside-sheet { right: calc(var(--sheet-w) + var(--gutter) * 2); }
-  /* The whole stack is one thing under the pointer: the gap between two toasts does not fold it again. */
-  .stack.unfolded { pointer-events: auto; }
+  /* The whole stack is one thing under the pointer: the gap between two toasts does not fold it
+     again, and while it keeps the places of dismissed toasts, does not close them. */
+  .stack.unfolded, .stack.holds { pointer-events: auto; }
   /* No shrink: a stack higher than the window scrolls, its toasts keep their height. */
   .toast { flex-shrink: 0; pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 12px 10px 12px 14px; border-radius: var(--r-lg); background: var(--pop); box-shadow: var(--pop-shadow); animation: pop-in var(--d-3) var(--spring); }
   /* Put away in a folded stack: not seen, not pressed, not read out, and its time stands still. It keeps its width, so its height can be measured. */
