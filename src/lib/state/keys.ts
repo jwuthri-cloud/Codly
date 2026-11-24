@@ -8,6 +8,7 @@ import type { Approval } from '../gen/Approval';
 import { showsPlan } from '../util/planRequest';
 import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
 import { twinsIn } from './approvalGroups';
+import { keyActOf, restsAfterAnswer, type KeyAct } from '../util/approvalCard';
 import { digitPick, isTextField } from '../util/questionKeys';
 import { denyKeyInField, escStep, openOne } from './esc';
 import { requests } from './requests.svelte';
@@ -43,10 +44,11 @@ function inThread(a: Approval): boolean {
   return isRequestThread(ui.thread) ? store.approvalThread(a) === ui.thread : `agent:${a.agent_id}` === ui.thread;
 }
 
-/** The request the keyboard acts on: the oldest pending one on screen. It takes the keys only
- *  while you can see what it asks and its buttons (`cardInView`); a key pressed while you cannot
- *  only brings it into view (`broughtIntoView`). A question is one too: ⌘↵ sends its answer and
- *  its digits pick (`registerQuestionKeys`). */
+/** The request the keyboard acts on: the oldest pending one on screen. A key answers it only
+ *  once a card of it has shown its title, what it asks and its buttons, uncovered and still, for
+ *  a moment (`keyGate`); a key pressed before only brings it into view, or does nothing while the
+ *  card settles. A question is one too: ⌘↵ sends its answer and its digits pick
+ *  (`registerQuestionKeys`). */
 export function keyTargetApproval(): Approval | null {
   const sheetAgent = ui.selectedAgentId;
   const pending = store.pendingApprovals
@@ -55,29 +57,35 @@ export function keyTargetApproval(): Approval | null {
   return pending[0] ?? null;
 }
 
-/** Each shown card of a request says whether you see what it asks and its buttons (`takesKeys`). */
-const cardViews = new Map<string, (() => boolean)[]>();
+/** Each shown card of a request says what a key does to it now (`keyAct`), read at the press. */
+const cardViews = new Map<string, (() => KeyAct)[]>();
 
 /** A card registers while it shows, for its request and the twins it answers too. */
-export function registerCardView(approvalIds: string[], seen: () => boolean): () => void {
-  for (const id of approvalIds) cardViews.set(id, [...(cardViews.get(id) ?? []), seen]);
+export function registerCardView(approvalIds: string[], act: () => KeyAct): () => void {
+  for (const id of approvalIds) cardViews.set(id, [...(cardViews.get(id) ?? []), act]);
   return () => {
     for (const id of approvalIds) {
-      const left = (cardViews.get(id) ?? []).filter((x) => x !== seen);
+      const left = (cardViews.get(id) ?? []).filter((x) => x !== act);
       if (left.length) cardViews.set(id, left);
       else cardViews.delete(id);
     }
   };
 }
 
-/** Whether a card of the request is in view now (the sheet's or the conversation's). */
-export const cardInView = (approvalId: string): boolean => (cardViews.get(approvalId) ?? []).some((seen) => seen());
+/** What a key does to the request now, over the cards that show it (`keyActOf`). */
+export const cardKeyAct = (approvalId: string): KeyAct => keyActOf((cardViews.get(approvalId) ?? []).map((act) => act()));
 
-/** A key for a card you cannot see does nothing but bring it into view, where it takes the next press. True: it did. */
-function broughtIntoView(ap: Approval): boolean {
-  if (cardInView(ap.id)) return false;
-  ui.revealApproval = ap.id;
-  return true;
+/** When a key last sent an answer: the next press does nothing for a moment (`restsAfterAnswer`). */
+let keyAnsweredAt: number | null = null;
+
+/** True: the key must not answer the request. A key answered one a moment ago (the store may not
+ *  know it yet, and the next card has not settled), it brought its card into view, or the card
+ *  settles (then it does nothing). */
+function keyGate(ap: Approval): boolean {
+  if (restsAfterAnswer(performance.now(), keyAnsweredAt)) return true;
+  const act = cardKeyAct(ap.id);
+  if (act === 'reveal') ui.revealApproval = ap.id;
+  return act !== 'answer';
 }
 
 /** The requests one key press answers: the key target and, in the conversation, the other
@@ -151,7 +159,7 @@ export function installKeys(): () => void {
     // A held key acts once: its repeats would answer the next approval, then run the plan.
     if (mod && e.key === 'Enter' && !e.repeat && !overlay && (!typing || !!(e.target as HTMLElement).closest?.('[aria-label="Composer"]'))) {
       const ap = keyTargetApproval();
-      if (ap && broughtIntoView(ap)) {
+      if (ap && keyGate(ap)) {
         e.preventDefault();
         return;
       }
@@ -159,6 +167,7 @@ export function installKeys(): () => void {
         const q = questionKeysOf(ap.id);
         if (q && !e.altKey && !e.shiftKey) {
           e.preventDefault();
+          keyAnsweredAt = performance.now();
           q.send();
         }
         return;
@@ -166,6 +175,7 @@ export function installKeys(): () => void {
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {
           e.preventDefault();
+          keyAnsweredAt = performance.now();
           resolveApprovals(keyTargetIds(ap), 'allow_session');
         }
         return;
@@ -173,6 +183,7 @@ export function installKeys(): () => void {
       if (e.shiftKey) return;
       if (ap && ap.choices.includes('allow_once')) {
         e.preventDefault();
+        keyAnsweredAt = performance.now();
         resolveApprovals(keyTargetIds(ap), 'allow_once');
         return;
       }
@@ -190,9 +201,12 @@ export function installKeys(): () => void {
       const ap = keyTargetApproval();
       if (!ap || !ap.choices.includes('deny')) return;
       e.preventDefault();
-      if (broughtIntoView(ap)) return;
+      if (keyGate(ap)) return;
       if (denyKeyAction(ap, e.shiftKey) === 'note') ui.denyNoteFor = ap.id;
-      else resolveApprovals(keyTargetIds(ap), 'deny');
+      else {
+        keyAnsweredAt = performance.now();
+        resolveApprovals(keyTargetIds(ap), 'deny');
+      }
       return;
     }
 
@@ -290,7 +304,7 @@ export function installKeys(): () => void {
       const n = q ? digitPick({ key: e.key, mod, alt: e.altKey, shift: e.shiftKey }, isTextField(e.target as Element | null), q.options()) : null;
       if (ap && q && n !== null) {
         e.preventDefault();
-        if (!broughtIntoView(ap)) q.pick(n);
+        if (!keyGate(ap)) q.pick(n);
         return;
       }
     }

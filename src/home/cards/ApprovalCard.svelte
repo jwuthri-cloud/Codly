@@ -2,16 +2,19 @@
   An approval, inline where it happened. Exactly what will run and where, why (the agent's
   words), inferred risks, and only the choices the provider offered. The oldest request on screen
   takes the keyboard (⌘↵ once · ⌥⌘↵ session · ⌘⌫ deny · ⇧⌘⌫ deny with a note), and shows its
-  keycaps, only while what it asks and its buttons are in view (`takesKeys`): a key pressed while
-  they are not only brings the card into view.
+  keycaps, only while its title, what it asks and its buttons are in view with nothing drawn over
+  them, and have been for a moment without moving (`keysView`, `settled`): a key pressed while
+  they are not only brings the card into view, and one pressed while it settles does nothing.
+  The keycaps take their room whether they show or not: showing them moves nothing. A card too
+  big for its scroller never takes the keys, and says so: its buttons answer it.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer: 1-9 pick, ↵ in the
   answer field or ⌘↵ send. A question that comes in its request's envelope (an MCP server's
   elicitation) shows its text, the envelope folded under "Details".
   A Codex permissions request says in words what it wants (`permissionsAsked`), its detail folded.
   The card is never taller than the thread that shows it: its title, its command, the agent's
   reason, the risks, the field of a typed answer and its buttons stay, on one row of buttons
-  (keycaps under the labels), and the rest scrolls inside it. The "Always allow" choices open as
-  a layer over the card. A question that can only be answered in words takes the focus when it
+  (keycaps under the labels), and the rest scrolls inside it. The "Always allow" choices open
+  under the buttons, inside the card (Esc closes them). A question that can only be answered in words takes the focus when it
   becomes the card that waits, unless you are typing somewhere else.
   On a file edit of a 1:1 Claude agent that asks for edits, "Approve and accept edits from now
   on" approves it and switches the agent to "Accept edits" (`acceptsEdits`).
@@ -40,11 +43,12 @@
   import { yourAnswers, yourChoice } from '../../lib/state/answers';
   import { changedPlan, PERMISSION_MODES, setPermissionMode } from '../../lib/state/control.svelte';
   import { keyTargetApproval, registerCardView, registerQuestionKeys } from '../../lib/state/keys';
+  import { readCard, scrollerOf, viewOf } from './cardParts';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
   import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, type FooterButton } from '../../lib/util/approvalFooter';
-  import { answerMissing, answerTakesFocus, envelopeAsksText, takesKeys } from '../../lib/util/approvalCard';
+  import { answerMissing, answerTakesFocus, envelopeAsksText, holdStep, keyAct, NO_HOLD, settled, type KeysView } from '../../lib/util/approvalCard';
   import { idVar } from '../../lib/util/labels';
   import { firstQuestion, outcomeBy, settledWord, wordsOf } from '../../lib/util/outcome';
   import { permissionsAsked } from '../../lib/util/permissionsAsked';
@@ -74,11 +78,15 @@
   const pending = $derived(approval.status === 'pending');
   const subject = $derived(approval.subject);
   const offered = $derived(new Set(approval.choices));
-  /** The oldest request on screen: the keys are its own once you can see it (`seen`). */
+  /** The oldest request on screen: the keys are its own once you can see it and it settled (`keysAt`, `ready`). */
   const candidate = $derived(pending && keyTargetApproval()?.id === approval.id);
-  /** What it asks and its buttons are in view of the scroller that shows it (`takesKeys`). */
-  let seen = $state(false);
-  const isKeyTarget = $derived(candidate && seen);
+  /** Where the card stands with the keys (`keysView`), read at each frame while it is the candidate. */
+  let keysAt = $state<KeysView>('out');
+  /** It has been 'ok' and still for the settle time (`settled`). */
+  let ready = $state(false);
+  /** You type in a field outside this card and the composer (an Ask-me answer): the keys act there, not here. */
+  let typingElsewhere = $state(false);
+  const isKeyTarget = $derived(candidate && keysAt === 'ok' && ready && !typingElsewhere);
 
   let noteOpen = $state(false);
   let note = $state('');
@@ -213,6 +221,27 @@
       stale = true;
     };
   });
+  let rulesOpen = $state(false);
+  /** Esc in the open choices (on their summary or a choice) closes them, and goes no further: the thread's turn is not stopped. Opened, they come into view. */
+  function escCloses(node: HTMLDetailsElement) {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !rulesOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      rulesOpen = false;
+      node.querySelector('summary')?.focus();
+    };
+    // Opened, the choices come into view: they lie under the buttons, at the card's foot.
+    const onToggle = () => node.open && node.querySelector('.layer')?.scrollIntoView({ block: 'nearest', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
+    node.addEventListener('keydown', onKey);
+    node.addEventListener('toggle', onToggle);
+    return {
+      destroy: () => {
+        node.removeEventListener('keydown', onKey);
+        node.removeEventListener('toggle', onToggle);
+      },
+    };
+  }
   async function saveRule(kind: ApprovalRuleKind) {
     if (!pending || busy) return;
     busy = true;
@@ -239,28 +268,39 @@
   $effect(() => {
     if (el && (ui.revealApproval === approval.id || twins.some((t) => t.id === ui.revealApproval))) {
       ui.revealApproval = null;
+      // What it asks first: a body scrolled down inside the card shows its first lines again.
+      if (bodyEl?.querySelector('[data-asks]')) bodyEl.scrollTop = 0;
       el.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
     }
   });
 
   // ── the card fits the thread ──
-  // At most as tall as the part of the scroller that shows it, less its padding: brought to the
+  // At most as tall as the part of the scroller that shows it (`viewOf`): brought to the
   // bottom (the thread follows the newest line) or to the centre, it is whole. What must stay in
   // view (title, command, reason, risks, a typed answer, buttons) does not scroll: only the body
   // gives way. Should those alone be taller than the room, the card grows to hold them.
-  const BODY_MIN = 48;
+  /** The body's smallest height: one line (the folder a command runs in, the first line of a diff). */
+  const BODY_MIN = 24;
   let fit = $state<number | null>(null);
   let bodyEl: HTMLElement | undefined = $state();
-  function scrollerOf(node: HTMLElement): HTMLElement | null {
-    for (let p = node.parentElement; p; p = p.parentElement) if (/(auto|scroll)/.test(getComputedStyle(p).overflowY)) return p;
-    return null;
-  }
+  /** The body has more than it shows: the wheel scrolls it, and stops there. With nothing to
+   *  scroll, the wheel on it scrolls the thread. */
+  let bodyScrolls = $state(false);
+  $effect(() => {
+    if (!bodyEl) return;
+    const body = bodyEl;
+    const ro = new ResizeObserver(() => (bodyScrolls = body.scrollHeight > body.clientHeight + 1));
+    ro.observe(body);
+    for (const part of body.children) ro.observe(part);
+    return () => ro.disconnect();
+  });
   /** The typed answer under the body grows only into the room the other parts leave (at least two lines). */
   const ANSWER_MIN = 56;
   let answerMax = $state<number | null>(null);
   function measureFit(card: HTMLElement, sc: HTMLElement) {
-    const cs = getComputedStyle(sc);
-    const room = sc.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 8;
+    // The same part as the keys see (`viewOf`): under the sheet's pinned bar is not room.
+    const view = viewOf(sc);
+    const room = view.bottom - view.top - 8;
     const body = bodyEl?.isConnected ? bodyEl : null;
     const fixed = card.scrollHeight - (body?.offsetHeight ?? 0) + Math.min(body?.scrollHeight ?? 0, BODY_MIN);
     const field = ownBelow || freeField ? answerEl : undefined;
@@ -282,41 +322,45 @@
     return () => ro.disconnect();
   });
 
-  // ── the keys are the card's while you can see what it asks and its buttons ──
-  /** Now, from the boxes on screen: what it asks (`data-asks`) and its buttons (`data-answers`) inside the scroller's box. */
-  function inView(card: HTMLElement, sc: HTMLElement): boolean {
-    const asks = card.querySelector('[data-asks]');
-    const answers = card.querySelector('[data-answers]');
-    return !!asks && !!answers && takesKeys([asks.getBoundingClientRect(), answers.getBoundingClientRect()], sc.getBoundingClientRect());
-  }
+  // ── the keys are the card's while you see who asks, what and its buttons, and it has settled ──
+  /** The requests a key answers on this card, as one string: the watch starts over only when they change. */
+  const keyIds = $derived([approval.id, ...twins.map((t) => t.id)].join(' '));
+  // A look at every frame while it is the candidate: where it stands (`keysView`), and since when
+  // it has been 'ok' without moving (`holdStep`). The keys look once more at each press: the
+  // keycaps may lag a frame behind.
   $effect(() => {
-    if (!el || !pending) return;
+    if (!el || !pending || !candidate) {
+      keysAt = 'out';
+      ready = false;
+      return;
+    }
     const card = el;
     const sc = scrollerOf(card);
-    const now = () => !!sc && card.isConnected && inView(card, sc);
-    let frame = 0;
-    const update = () => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => (seen = now()));
+    /** It became the card of the keys now (the one before it was answered): the wait counts from here. */
+    const from = performance.now();
+    let hold = NO_HOLD;
+    const look = (now: number): KeysView => {
+      const read = sc && card.isConnected ? readCard(card, sc, bodyEl ?? null, BODY_MIN) : { view: 'out' as const, boxes: [] };
+      hold = holdStep(hold, now, read.view === 'ok', read.boxes);
+      return read.view;
     };
-    // Again when it becomes the oldest request: the card before it may have just folded and
-    // moved this one into view with no scroll.
-    void candidate;
-    update();
-    sc?.addEventListener('scroll', update, { passive: true });
-    window.addEventListener('resize', update);
-    // And when the card or the list it is in changes size (a card above folds, a field opens).
-    const ro = new ResizeObserver(update);
-    if (sc) ro.observe(sc);
-    ro.observe(card);
-    if (card.parentElement && card.parentElement !== sc) ro.observe(card.parentElement);
-    // The keys read the boxes again at each press: the shown keycaps may lag a frame behind.
-    const unregister = registerCardView([approval.id, ...twins.map((t) => t.id)], now);
+    let frame = 0;
+    const each = () => {
+      const now = performance.now();
+      keysAt = look(now);
+      ready = settled(hold, now, from);
+      const active = document.activeElement;
+      typingElsewhere = isTextField(active) && !card.contains(active) && !active?.closest('[aria-label="Composer"]');
+      frame = requestAnimationFrame(each);
+    };
+    frame = requestAnimationFrame(each);
+    const unregister = registerCardView(keyIds.split(' '), () => {
+      const now = performance.now();
+      const view = look(now);
+      return keyAct(view, settled(hold, now, from));
+    });
     return () => {
       cancelAnimationFrame(frame);
-      sc?.removeEventListener('scroll', update);
-      window.removeEventListener('resize', update);
-      ro.disconnect();
       unregister();
     };
   });
@@ -420,8 +464,11 @@
    *  with one question that takes your own words, or of a question Codly cannot list. */
   const ownBelow = $derived(questions.length === 1 && questions[0].own);
   let answerEl: HTMLTextAreaElement | HTMLInputElement | undefined = $state();
-  /** What the card asks, for the keys (`data-asks`): its command, its question, else its title. */
-  const asksInHeader = $derived(subject.kind !== 'command' && !(subject.kind === 'question' && (questions.length > 0 || !!envelope)));
+  /** What the card asks, for the keys (`data-asks`): its command, its question, the first lines of
+   *  its plan, its files, its tool call or the permissions it wants; else its title. */
+  const asksInHeader = $derived(
+    !(subject.kind === 'command' || subject.kind === 'file_change' || subject.kind === 'tool' || (subject.kind === 'question' && (questions.length > 0 || !!envelope)) || !!perms?.lines.length),
+  );
   /** ↵ (not ⇧↵) and ⌘↵ in an answer field send. */
   function onAnswerKey(e: KeyboardEvent) {
     if (sendsFromField({ key: e.key, mod: e.metaKey || e.ctrlKey, alt: e.altKey, shift: e.shiftKey, composing: e.isComposing })) {
@@ -518,7 +565,7 @@
       </div>
     {/if}
 
-    <div class="body" bind:this={bodyEl}>
+    <div class="body" class:scrolls={bodyScrolls} bind:this={bodyEl}>
     {#if subject.kind === 'command'}
       <div class="meta">
         {#if subject.cwd}<code class="cwd truncate" data-tip={subject.cwd}>{tildify(subject.cwd)}</code>{/if}
@@ -527,18 +574,18 @@
       </div>
       {#if others.length}<p class="same">Also asked by {others.join(', ')}, each in the same folder of its own worktree. Your answer goes to all of them.</p>{/if}
     {:else if subject.kind === 'file_change'}
-      <ul class="paths">{#each subject.paths as p, pi (pi)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
+      <ul class="paths" data-asks="lines">{#each subject.paths as p, pi (pi)}<li><Icon name="file" size={13} /><code class="selectable">{p}</code></li>{/each}</ul>
       {#if subject.diff}<pre class="diff selectable">{subject.diff}</pre>{/if}
     {:else if plan !== null}
       {#if editOpen}
         <textarea bind:this={editEl} class="plan-edit" rows="12" bind:value={edited} spellcheck="true" aria-label="The plan, with your changes" onkeydown={onEditKey}></textarea>
       {:else}
-        <div class="plan selectable"><Markdown text={plan} brief /></div>
+        <div class="plan selectable" data-asks="lines"><Markdown text={plan} brief /></div>
       {/if}
     {:else if netHost !== null}
-      <p class="net selectable">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. {HOST_ALLOW_LASTS} {HOST_DENY_LASTS}</p>
+      <p class="net selectable" data-asks="lines">A shell command of {agent?.name ?? 'the agent'}, inside Claude Code’s sandbox, wants to connect to {#if netHost}<code>{netHost}</code>{:else}a host on the network{/if}. {HOST_ALLOW_LASTS} {HOST_DENY_LASTS}</p>
     {:else if subject.kind === 'tool'}
-      <pre class="diff selectable">{subject.name}({JSON.stringify(subject.input, null, 2)})</pre>
+      <pre class="diff selectable" data-asks="lines">{subject.name}({JSON.stringify(subject.input, null, 2)})</pre>
     {:else if subject.kind === 'question'}
       {#if questions.length}
         {#each questions as q, qi (qi)}
@@ -548,7 +595,7 @@
               <label class="opt" class:on={(picks[qi] ?? []).includes(o.label)}>
                 <input type={q.multiSelect ? 'checkbox' : 'radio'} name="q-{approval.id}-{qi}" checked={(picks[qi] ?? []).includes(o.label)} onchange={() => toggle(qi, o.label, !!q.multiSelect)} />
                 <span class="ot"><b>{o.label}</b>{#if o.description}<span class="od">{o.description}</span>{/if}</span>
-                {#if isKeyTarget && qi === digitAt && oi < 9}<span class="k num" aria-hidden="true">{oi + 1}</span>{/if}
+                {#if qi === digitAt && oi < 9}<span class="k num" class:off={!isKeyTarget} aria-hidden="true">{oi + 1}</span>{/if}
               </label>
             {/each}
             {#if q.own && !ownBelow}
@@ -564,7 +611,7 @@
         {/each}
       {:else}
         {#if envelope}
-          <p class="ask selectable" data-asks>{envelope}</p>
+          <p class="ask selectable" data-asks="lines">{envelope}</p>
           {#if envelopeUrl}<p class="same">It asks you to open <code class="selectable">{envelopeUrl}</code></p>{/if}
         {:else}
           <p class="same">Codly cannot read this question in words: what the agent sent is under Details.</p>
@@ -573,7 +620,7 @@
       {/if}
     {:else if perms}
       {#if perms.lines.length}
-        <ul class="perms">
+        <ul class="perms" data-asks="lines">
           {#each perms.lines as l, li (li)}
             <li>
               <Icon name={l.place === null ? 'globe' : 'file'} size={13} />
@@ -595,7 +642,7 @@
     <!-- The one typed answer stays in view under the body, as the buttons do. -->
     {#if ownBelow}
       {@const q = questions[0]}
-      <div class="own">
+      <div class="own" data-answer-field>
         {#if q.secret}
           <input bind:this={answerEl} class="input" type="password" autocomplete="off" placeholder="Your answer…" aria-label="Your answer to: {q.question}"
             value={own[0] ?? ''} oninput={(e) => typeOwn(0, e.currentTarget.value, !!q.multiSelect)} onkeydown={onAnswerKey} />
@@ -605,13 +652,13 @@
         {/if}
       </div>
     {:else if freeField}
-      <div class="own">
+      <div class="own" data-answer-field>
         <textarea bind:this={answerEl} class="input answer" rows="1" use:grow spellcheck="true" placeholder="Your answer…" aria-label="Your answer" bind:value={freeText} onkeydown={onAnswerKey}></textarea>
       </div>
     {/if}
 
     {#snippet keyed(label: string, kbd: string | undefined)}
-      <span class="bl">{label}</span>{#if isKeyTarget && kbd}<span class="k">{kbd}</span>{/if}
+      <span class="bl">{label}</span>{#if kbd}<span class="k" class:off={!isKeyTarget}>{kbd}</span>{/if}
     {/snippet}
     {#if subject.kind === 'question'}
       <footer data-answers>
@@ -639,8 +686,8 @@
         {/each}
       </footer>
       {#if rulePrefix || ruleExact}
-        <!-- The choices open as a layer over the card: they take no room from what it shows. -->
-        <details class="always">
+        <!-- The choices open under the buttons, in the card: they lie on nothing you read or press. -->
+        <details class="always" bind:open={rulesOpen} use:escCloses>
           <summary data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in Settings → Safety.">Always allow in this repo…</summary>
           <div class="layer">
             <p class="a-l">Always allow in this repo, for every agent:</p>
@@ -650,15 +697,18 @@
         </details>
       {/if}
     {/if}
+    {#if candidate && keysAt === 'too-big'}<p class="same">Use the buttons: the card does not fit the window</p>{/if}
   </article>
 {/if}
 
 <style>
-  /* At 1024x640 the thread is 332 px high (268 px of room inside its padding). What stays of a command card: title 24 + command 43 (one line) + a two-line reason and the risks 68 + buttons 38 + "Always allow" 18, with paddings 28 and gaps 40, is 259 px; with the smallest body (48 px) the card is 307 px, inside the 332 px it is seen in. */
+  /* At 1024x640 the thread is 332 px high; the keys see 284 px of it (less its top 28 px, where it fades in, and its bottom 20 px). With the agent's sheet open it is 448 px wide, and what stays of a command card from its title to its buttons is: title 24 + command 43 (one line) + a three-line reason and the risks 92 + buttons with their keycaps 53, with gaps 32, 244 px; with the smallest body (one line, 24 px) 268 px, inside the 284 px. */
   .card { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 14px 18px; border-radius: var(--r-lg); background: linear-gradient(180deg, var(--amber-soft), transparent 70%), var(--surface-1); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 30%, transparent); scroll-margin: 80px; }
   /* Never taller than the thread (max-height from the script): the title, the command, the reason, the risks, a typed answer and the buttons stay; the body gives way and scrolls. */
   .card > * { flex-shrink: 0; }
-  .card > .body { flex: 0 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding: 2px; margin: -2px; }
+  .card > .body { flex: 0 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 2px; margin: -2px; }
+  /* Only a body with more than it shows keeps the wheel: one with nothing to scroll passes it to the thread. */
+  .card > .body.scrolls { overscroll-behavior: contain; }
   .said { display: flex; flex-direction: column; gap: 6px; }
   .body:empty { display: none; }
   .card.key { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 60%, transparent), 0 0 0 4px color-mix(in srgb, var(--amber) 12%, transparent); }
@@ -684,13 +734,15 @@
   footer { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 6px; }
   footer .btn { flex: 0 1 auto; flex-direction: column; gap: 1px; height: auto; min-height: 32px; padding: 5px 12px; white-space: normal; text-align: center; line-height: 15px; }
   footer .btn .k { margin: 0; font-size: 10.5px; line-height: 12px; }
+  /* A keycap that does not show keeps its room: the row has the same height with or without them. */
+  .k.off { visibility: hidden; }
   .same { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); margin-top: -4px; }
   .own { display: flex; flex-direction: column; }
   /* Under the body it grows only into the room the other parts leave (--answer-max, from the script), then scrolls. */
   .own .answer { max-height: min(190px, var(--answer-max, 190px)); }
   .always { position: relative; font-size: var(--t-sm); color: var(--ink-3); }
   .always summary { width: fit-content; cursor: pointer; color: var(--ink-2); }
-  .layer { position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; padding: 10px 12px; border-radius: var(--r-md); background: var(--pop); box-shadow: var(--pop-shadow); }
+  .layer { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-width: 100%; padding: 10px 12px; border-radius: var(--r-md); background: var(--pop); box-shadow: var(--pop-shadow); }
   .a-l { flex: 1 0 100%; color: var(--ink-2); }
   .always code { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-1); }
   .note { display: flex; gap: 6px; }
