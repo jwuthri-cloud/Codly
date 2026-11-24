@@ -128,7 +128,7 @@
   </button>
   <UsageChip agent={store.threadAgent(thread)} />
 </div>
-{#if open === 'mode' && modeBtn}<Menu anchor={modeBtn} items={modeItems} onclose={() => (open = null)} width={340} />{/if}
+{#if open === 'mode' && modeBtn}<Menu anchor={modeBtn} items={modeItems} onclose={() => (open = null)} width={340} wrap />{/if}
 {#if open === 'model' && modelBtn}<Menu anchor={modelBtn} items={modelItems} onclose={() => ((open = null), (query = ''))} width={260} bind:search={() => (models.length > SHOWN ? query : null), (v) => (query = v ?? '')} searchPlaceholder="Search models" />{/if}
 
 <style>

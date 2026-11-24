@@ -25,10 +25,11 @@ const wayWords = (way: PermissionMode) => PERMISSION_MODES.find((m) => m.id === 
 export type Chip = { text: string; sub: string | null; tip: string };
 
 /**
- * What the chip says. It follows the agent: "Plan first · then Balanced" (until you accept its
- * plan only reads are approved for it, whatever the permissions), "Accept edits · Balanced"
- * (edits do not ask; the permissions are for the rest), else the permissions alone, as for
- * every other agent. `permission`: the label of the permissions in force; `own`: this chat
+ * What the chip says. It names the agent's way of working in every way: "Plan first · then
+ * Balanced" (until you accept its plan only reads are approved for it, whatever the
+ * permissions), "Accept edits · Balanced" (edits do not ask; the permissions are for the rest),
+ * "Ask for edits · Balanced" (every edit follows the permissions). An agent with no way to
+ * switch shows the permissions alone. `permission`: the label of the permissions in force; `own`: this chat
  * chose them (else they are the ones of Settings).
  */
 export function chipOf(permission: string, at: { own: boolean; request: boolean; way: PermissionMode | null }): Chip {
@@ -39,7 +40,7 @@ export function chipOf(permission: string, at: { own: boolean; request: boolean;
       tip: 'It reads and plans first: until you accept its plan, only reads are approved for it. After that, this is how much it asks you before it acts',
     };
   }
-  if (at.way === 'accept_edits') return { text: wayWords('accept_edits').label, sub: `· ${permission}`, tip: wayWords('accept_edits').hint };
+  if (at.way) return { text: wayWords(at.way).label, sub: `· ${permission}`, tip: wayWords(at.way).hint };
   if (at.request) return { text: permission, sub: '· whole request', tip: 'How much every agent on this request asks you before it acts' };
   return { text: permission, sub: at.own ? null : '· Settings', tip: 'How much this agent asks you before it acts' };
 }

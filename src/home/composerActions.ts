@@ -19,6 +19,7 @@ import { store } from '../lib/state/store.svelte';
 import { openInTerminal, showTerminal, takeovers } from '../lib/state/takeover.svelte';
 import { isRequestThread, ui } from '../lib/state/ui.svelte';
 import { agentTurns } from './agentTurns';
+import { rewindLayer } from './rewindLayer.svelte';
 import type { SlashCommand } from './composerMenu';
 
 /** The conversation the composer is in, as far as the actions need it. */
@@ -56,7 +57,7 @@ export type SlashDo = {
   compact: (agent: Agent) => void;
   context: (agent: Agent) => void;
   changes: () => void;
-  /** The agent's sheet, where its checkpoints are: a restore asks first there. */
+  /** "Undo a turn" over the composer (RewindMenu): pick a turn, its files go back. */
   undo: (agent: Agent) => void;
   terminal: (agent: Agent) => void;
   showTerminal: (agent: Agent) => void;
@@ -142,7 +143,7 @@ export function agentCommands(c: SlashContext, on: AgentDo): SlashCommand[] {
   ofAgent({ name: 'undo', label: `Undo ${name}’s last turn…`, icon: 'arrow-left' }, (a) => {
     if (!c.turns) return { off: 'Reading what Codly kept of its turns…', wait: true };
     if (c.turns.off) return { off: c.turns.off };
-    return { hint: 'Its sheet opens: put the files back under Git, at Checkpoints', run: () => on.undo(a) };
+    return { hint: 'Pick a turn: its files go back to how they were before it', run: () => on.undo(a) };
   });
   ofAgent({ name: 'terminal', label: 'Continue in your terminal', icon: 'terminal' }, (a) => {
     if (!c.takeover) return { off: 'Asking Codly if it can go…', wait: true };
@@ -221,7 +222,7 @@ export function slashContext(thread: string, modes: SlashContext['modes']): Slas
 }
 
 /** The agent's sheet, open at one of its sections. */
-function openSheet(a: Agent, section: string) {
+export function openSheet(a: Agent, section: string) {
   ui.sheetFocus = section;
   ui.selectAgent(a.id);
 }
@@ -237,8 +238,7 @@ export function agentDo(thread: () => string): AgentDo {
     },
     compact: (a) => void compactAgent(a.id, a.name),
     context: (a) => void showContext(a.id, a.name),
-    // Its checkpoints are in the Git tab of the sheet's last section: the sheet opens there.
-    undo: (a) => openSheet(a, 'tabs'),
+    undo: (a) => rewindLayer.open(a.id),
     terminal: (a) => void openInTerminal(a.id),
     showTerminal: (a) => showTerminal(a.id),
     mcp: (a) => openSheet(a, 'mcp'),

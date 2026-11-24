@@ -8,7 +8,7 @@
 
   Reading the list starts git in the worktree, so it is read when the tab opens and when the Git
   tab reads the worktree again while the agent rests (its turn ended, you pressed Refresh, files
-  were put back), one read at a time. It is not read on each step of a turn: the agent's files
+  were put back, here or from "Undo a turn" and Last turn), one read at a time. It is not read on each step of a turn: the agent's files
   are half-written then, and nothing can be restored anyway.
 -->
 <script lang="ts">
@@ -20,6 +20,7 @@
   import { ui } from '../lib/state/ui.svelte';
   import { ago, plural } from '../lib/util/format';
   import { oneAtATime } from '../lib/util/oneAtATime';
+  import { rewindLayer } from '../home/rewindLayer.svelte';
   import Icon from '../components/Icon.svelte';
 
   interface Props {
@@ -55,10 +56,11 @@
       if (id === agent.id) error = e instanceof Error ? e.message : String(e);
     }
   });
-  // Only `refresh` starts a read. The agent object is new on every step of its turn (each tool
-  // call, each usage report): that alone must not start git.
+  // Only `refresh` starts a read, and files put back elsewhere ("Undo a turn", Last turn, their
+  // Undo). The agent object is new on every step of its turn (each tool call, each usage
+  // report): that alone must not start git.
   $effect(() => {
-    void refresh;
+    void [refresh, rewindLayer.restored];
     untrack(() => {
       if (resting || !view) void load();
     });

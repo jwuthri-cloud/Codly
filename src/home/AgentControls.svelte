@@ -54,7 +54,7 @@
   </button>
   <UsageChip {agent} />
 </div>
-{#if open && btn}<Menu anchor={btn} items={items} onclose={() => (open = false)} width={300} />{/if}
+{#if open && btn}<Menu anchor={btn} items={items} onclose={() => (open = false)} width={300} wrap />{/if}
 
 <style>
   /* In a narrow panel the context and cost chip goes to a line of its own; it is never cut. */

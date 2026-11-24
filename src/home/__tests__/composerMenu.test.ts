@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fileMention, filterSlash, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine } from '../composerMenu';
+import { fileMention, filterSlash, MenuPointer, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine } from '../composerMenu';
 
 /** The menu at the end of `text` (the caret is where typing left it). */
 const at = (text: string) => triggerAt(text, text.length);
@@ -179,10 +179,66 @@ describe('a slash command Codly does not have', () => {
     expect(unknownSlash('/compact', names)).toBeNull();
     expect(unknownSlash('/Model', names)).toBeNull();
     expect(unknownSlash('/usr/bin/env is missing', names)).toBeNull();
-    expect(unknownSlash('/mcp/terminal', names)).toBeNull();
     expect(unknownSlash('look at /etc/hosts', names)).toBeNull();
     expect(unknownSlash('/ is the root', names)).toBeNull();
     expect(unknownSlash('', names)).toBeNull();
+  });
+});
+
+describe('a first word with a second slash', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'clear', 'undo', 'terminal', 'mcp'];
+
+  it('that starts with an action’s name is a mistyped command: it is not sent', () => {
+    expect(unknownSlash('/mcp/terminal', names)).toEqual({ word: 'mcp/terminal', closest: 'mcp' });
+    expect(unknownSlash('/mcp/terminal turn it on', names)).toEqual({ word: 'mcp/terminal', closest: 'mcp' });
+    expect(unknownSlashLine({ word: 'mcp/terminal', closest: 'mcp' })).toBe('No such command: /mcp/terminal. Did you mean /mcp? ↵ sends nothing until you change it.');
+  });
+
+  it('alone on the line is a mistyped command too; in front of more words it is a path', () => {
+    expect(unknownSlash('/usr/bin/env', names)).toEqual({ word: 'usr/bin/env', closest: null });
+    expect(unknownSlash('/usr/bin/env is missing', names)).toBeNull();
+    expect(unknownSlash('/etc/hosts\nhas a typo', names)).toBeNull();
+  });
+});
+
+describe('the closest action of a typo', () => {
+  const names = ['new', 'issue', 'pr', 'stop', 'ask', 'plan', 'auto', 'direct', 'edits', 'model', 'compact', 'context', 'diff', 'undo', 'terminal', 'mcp', 'clear', 'closed', 'settings', 'shortcuts'];
+  const closest = (word: string) => unknownSlash(`/${word} please`, names)?.closest;
+
+  it('allows one typo up to four letters, two in a longer word, never more than half the word', () => {
+    expect(closest('x')).toBeNull();
+    expect(closest('exit')).toBeNull();
+    expect(closest('stpo')).toBe('stop');
+    expect(closest('modle')).toBe('model');
+    expect(closest('compat')).toBe('compact');
+    expect(closest('cmpat')).toBe('compact');
+  });
+});
+
+describe('the pointer over a menu that opens', () => {
+  it('a menu that opens under a resting pointer keeps its first row', () => {
+    const p = new MenuPointer();
+    p.opened();
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+  });
+
+  it('a list that scrolls under a resting pointer keeps the row of the keys', () => {
+    const p = new MenuPointer();
+    p.opened();
+    p.picks({ x: 10, y: 20 });
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+    // Opened again where the pointer was seen last time, after it moved meanwhile: still no pick.
+    p.picks({ x: 40, y: 90 });
+    p.opened();
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+  });
+
+  it('a real move picks the row under it', () => {
+    const p = new MenuPointer();
+    p.opened();
+    p.picks({ x: 10, y: 20 });
+    expect(p.picks({ x: 10, y: 24 })).toBe(true);
   });
 });
 
