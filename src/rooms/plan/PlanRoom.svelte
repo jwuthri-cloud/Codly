@@ -19,6 +19,7 @@
   import FlowLens from './FlowLens.svelte';
   import ListLens from './ListLens.svelte';
   import TimelineLens from './TimelineLens.svelte';
+  import { watchRunPlan } from '../../home/cards/runPlanKey';
 
   const plans = $derived([...store.plans].sort((a, b) => b.created_at - a.created_at));
   // The plan you picked if it answers the request you are on; else that request's plan.
@@ -39,6 +40,13 @@
    *  the plan's own start, wherever it came from. Cancel: the plan you pressed it on. */
   const starting = $derived(!!plan && isStarting(plan.id));
   let cancelling = $state<string | null>(null);
+  /** "Run plan" takes ⌘↵ only while it is in view and still (`watchRunPlan`): its keycap shows then. */
+  let runEl: HTMLButtonElement | undefined = $state();
+  let runCap = $state(false);
+  const runId = $derived(plan?.id ?? null);
+  $effect(() => {
+    if (runEl && runId) return watchRunPlan(runEl, runId, (shows) => (runCap = shows));
+  });
   const busy = $derived(starting || cancelling === plan?.id);
   async function cancel(id: string) {
     cancelling = id;
@@ -63,7 +71,7 @@
   {/snippet}
   {#snippet right()}
     {#if plan?.status === 'awaiting_approval'}
-      <button class="btn primary" disabled={busy} onclick={() => runPlan(plan.id)}><Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k">⌘↵</span></button>
+      <button class="btn primary" bind:this={runEl} disabled={busy} onclick={() => runPlan(plan.id)}><Icon name="play" size={13} />{starting ? 'Starting…' : 'Run plan'}<span class="k" style:visibility={runCap ? null : 'hidden'}>⌘↵</span></button>
       <button class="btn ghost" disabled={busy} onclick={() => cancel(plan.id)}>Cancel</button>
     {:else if plan?.status === 'running'}
       {#if confirmCancel === plan.id}

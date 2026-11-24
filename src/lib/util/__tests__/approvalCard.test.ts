@@ -24,6 +24,7 @@ import {
   type Hold,
   type SeenPart,
 } from '../approvalCard';
+import { clickRests, fitsView, rowsView, scrollToShow, whyView } from '../approvalCard';
 
 const box = (top: number, bottom: number, left = 217, right = 873): Box => ({ top, bottom, left, right });
 /** The thread's visible box at 1024x640, less its padding: [162, 494] less 28 px at each end. */
@@ -357,5 +358,147 @@ describe('a plan card in a small window (`foldsReason`)', () => {
   it('a reason of one line has nothing to give, and a big window has room for all', () => {
     expect(foldsReason({ ...plan, fixed: 28 + 24 + 20 + 53 + 24, reason: 20 })).toBe(false);
     expect(foldsReason({ ...plan, room: 584, fixed: 28 + 24 + 92 + 53 + 24, reason: 60 })).toBe(false);
+  });
+});
+
+describe('a question card: what a digit and the send key act on (`rowsView`)', () => {
+  // A card at 1024x640 with two questions: its three parts in view, its body [234, 434].
+  const body = box(234, 434);
+  const ok = 'ok' as const;
+  const legend2 = box(250, 274);
+  const option = (top: number) => box(top, top + 50);
+
+  it('an option row below the body’s visible box: no act, the key brings it into view', () => {
+    const v = rowsView(ok, [free(legend2), free(option(400))], thread, body);
+    expect(v).toBe('out');
+    expect(keyAct(v, true)).toBe('reveal');
+    // Cut by the body's bottom by a few pixels: out too.
+    expect(rowsView(ok, [free(legend2), free(option(390))], thread, body)).toBe('out');
+  });
+
+  it('an option row in view, but something drawn over it: no act', () => {
+    const v = rowsView(ok, [free(legend2), under(option(300), 6)], thread, body);
+    expect(v).toBe('covered');
+    expect(keyAct(v, true)).toBe('reveal');
+  });
+
+  it('the second question is the one the digits belong to, and its text is scrolled out of the body: no act', () => {
+    expect(rowsView(ok, [free(box(210, 234)), free(option(300))], thread, body)).toBe('out');
+  });
+
+  it('its text and the option in view, uncovered, and the card settled: the digit acts', () => {
+    const v = rowsView(ok, [free(legend2), free(option(300))], thread, body);
+    expect(v).toBe('ok');
+    expect(keyAct(v, true)).toBe('answer');
+    expect(keyAct(v, false)).toBe('wait');
+  });
+
+  it('inside the body but outside the thread’s view (the body runs under the fade): no act', () => {
+    expect(rowsView(ok, [free(box(410, 434)), free(option(440))], thread, box(300, 520))).toBe('out');
+  });
+
+  it('send: a picked option out of view is no act; question texts and picks that cannot show together never are', () => {
+    // Both texts in view, the second pick below the body.
+    expect(rowsView(ok, [free(box(240, 264)), free(option(270)), free(box(325, 349)), free(option(390))], thread, body)).toBe('out');
+    // All in view: it sends.
+    expect(rowsView(ok, [free(box(240, 264)), free(option(270)), free(box(325, 349)), free(option(330))], thread, body)).toBe('ok');
+    // From the first text to the last pick is taller than the body: never by the key, only by the button.
+    const v = rowsView(ok, [free(box(240, 264)), free(option(500))], thread, body);
+    expect(v).toBe('too-big');
+    expect(keyAct(v, true)).toBe('reveal');
+  });
+
+  it('the three parts come first, and no row means nothing more to see', () => {
+    expect(rowsView('out', [free(legend2), free(option(300))], thread, body)).toBe('out');
+    expect(rowsView('covered', [], thread, body)).toBe('covered');
+    expect(rowsView(ok, [], thread, body)).toBe('ok');
+  });
+
+  it('a scroll of the body moves its rows: the 600 ms start again', () => {
+    // The title, what it asks and the buttons stay; the question text and an option move with the body.
+    const boxes = (shift: number) => [...bo(), box(250 + shift, 274 + shift), option(300 + shift)];
+    let h = NO_HOLD;
+    for (let t = 0; t <= 800; t += 16) h = holdStep(h, t, true, boxes(0));
+    expect(settled(h, 800, 0)).toBe(true);
+    h = holdStep(h, 816, true, boxes(-40));
+    expect(settled(h, 816, 0)).toBe(false);
+    for (let t = 832; t <= 1424; t += 16) h = holdStep(h, t, true, boxes(-40));
+    expect(settled(h, 1424, 0)).toBe(false);
+    h = holdStep(h, 1440, true, boxes(-40));
+    expect(settled(h, 1440, 0)).toBe(true);
+  });
+});
+
+describe('bringing a card, or a row of its body, into view (`scrollToShow`)', () => {
+  it('in view: it does not move, so a second press does not move it again (the review’s minor 2)', () => {
+    expect(scrollToShow({ top: 200, bottom: 400 }, thread)).toBe(0);
+    expect(scrollToShow({ top: 189.5, bottom: 466.5 }, thread)).toBe(0);
+  });
+
+  it('below the view: up to its bottom, with a margin; above: down to its top', () => {
+    expect(scrollToShow({ top: 400, bottom: 500 }, thread)).toBe(500 - (466 - 8));
+    expect(scrollToShow({ top: 150, bottom: 250 }, thread)).toBe(150 - (190 + 8));
+  });
+
+  it('taller than the view: its top shows, and then it stays', () => {
+    expect(scrollToShow({ top: 100, bottom: 600 }, thread)).toBe(100 - 190);
+    expect(scrollToShow({ top: 190, bottom: 690 }, thread)).toBe(0);
+  });
+});
+
+describe('a click on a waiting card’s buttons (`clickRests`): the same rest as the keys', () => {
+  /** The hold of a button row that came to its place at `placed` and stayed, looked at every frame up to `t`. */
+  const placedAt = (placed: number, t: number) => {
+    let h = holdStep(NO_HOLD, placed - 16, true, [box(0, 38)]);
+    for (let f = placed; f <= t; f += 16) h = holdStep(h, f, true, [box(400, 438)]);
+    return h;
+  };
+
+  it('the review’s B1: second clicks 110 to 590 ms after an answer do nothing; at 700 ms, on a card in its place, the click answers', () => {
+    // An answer at 1000; the next card's buttons have been in their place since 0.
+    for (const gap of [110, 190, 300, 470, 590]) expect(clickRests(1000 + gap, 1000, placedAt(0, 1000 + gap))).toBe(true);
+    expect(clickRests(1700, 1000, placedAt(0, 1700))).toBe(false);
+  });
+
+  it('buttons that slid into place under the pointer take no click for 600 ms from there', () => {
+    expect(clickRests(1500, null, placedAt(1000, 1500))).toBe(true);
+    expect(clickRests(1616, null, placedAt(1000, 1616))).toBe(false);
+    // Never seen in place yet: no click.
+    expect(clickRests(5000, null, NO_HOLD)).toBe(true);
+  });
+});
+
+describe('in a 1:1 chat the composer has the focus (the review’s minor 9)', () => {
+  it('a digit is typed into it, so the card shows no digit keycap', () => {
+    for (const focus of ['composer-empty', 'composer-blank', 'composer-text'] as const) expect(keycapActs('3', focus)).toBe(false);
+    expect(keycapActs('3', 'page')).toBe(true);
+  });
+});
+
+describe('why a key did nothing, as the card says it (`whyView`)', () => {
+  const body = box(234, 434);
+  it('a question’s text clipped by the card’s body is out of view, not covered: the press only scrolls the body', () => {
+    // Below the body's bottom (the footer lies over it), and above its top (the title lies over it).
+    expect(whyView('covered', box(440, 464), body)).toBe('out');
+    expect(whyView('covered', box(220, 244), body)).toBe('out');
+    expect(keyAct(whyView('covered', box(440, 464), body), true)).toBe('reveal');
+  });
+
+  it('inside the body, or not in a body, a cover stays a cover; no other view changes', () => {
+    expect(whyView('covered', box(250, 274), body)).toBe('covered');
+    expect(whyView('covered', null, body)).toBe('covered');
+    expect(whyView('covered', box(440, 464), null)).toBe('covered');
+    for (const v of ['ok', 'out', 'too-big'] as const) expect(whyView(v, box(440, 464), body)).toBe(v);
+  });
+});
+
+describe('a card brought into view: whole when it fits (`fitsView`)', () => {
+  it('a card as tall as the view, or less, shows whole: its padding and the line under its buttons too', () => {
+    expect(fitsView(box(300, 576), thread)).toBe(true);
+    expect(fitsView(box(300, 400), thread)).toBe(true);
+  });
+
+  it('taller than the view (the rule choices open at 1024x640): only from its title to its buttons', () => {
+    expect(fitsView(box(100, 600), thread)).toBe(false);
   });
 });

@@ -248,6 +248,8 @@ const ASKERS: Record<Exclude<AskKind, 'plan' | 'file'>, { provider: Provider; na
     { provider: 'claude', name: 'Ned', title: 'Docs', text: 'Write the release note for the dark mode toggle.' },
     { provider: 'codex', name: 'Kit', title: 'Triage', text: 'Open an issue in Linear for the flaky checkout test.' },
   ],
+  // Two questions of six options each: the card's body scrolls at 1024x640.
+  'questions-two': [{ provider: 'claude', name: 'Ned', title: 'Design', text: 'Pick the accent colour and the font for the new landing page.' }],
 };
 /** `?approval=network`: the host the sandbox asks for. */
 const NPM_HOST = 'registry.npmjs.org';
@@ -271,6 +273,34 @@ const LONG_QUESTION = {
     },
   ],
 };
+
+/** `?approval=questions-two`: two questions of six options each (Claude Code's AskUserQuestion takes up to four questions). */
+const TWO_QUESTIONS = [
+  {
+    question: 'Which accent colour should the landing page use?',
+    header: 'Accent',
+    options: [
+      { label: 'Indigo', description: 'The colour of the app today: nothing new to learn.' },
+      { label: 'Teal', description: 'Calm, and it reads well on the dark theme.' },
+      { label: 'Coral', description: 'Warm and loud: the call to action stands out.' },
+      { label: 'Amber', description: 'The colour of the waiting cards in the app.' },
+      { label: 'Green', description: 'Says “go”, but close to the colour of a passed check.' },
+      { label: 'Grey', description: 'Quiet: the screenshots carry the colour.' },
+    ],
+  },
+  {
+    question: 'Which font should the headings use?',
+    header: 'Font',
+    options: [
+      { label: 'Inter', description: 'The font of the app: the page looks like the product.' },
+      { label: 'Fraunces', description: 'A soft serif, as the plan titles use.' },
+      { label: 'IBM Plex Sans', description: 'Plain and technical.' },
+      { label: 'Space Grotesk', description: 'Round and a little playful.' },
+      { label: 'Source Serif', description: 'A classic serif for long reading.' },
+      { label: 'The system font', description: 'Nothing to load: the fastest page.' },
+    ],
+  },
+];
 
 export class Story {
   /** "Always allow in this repo": the rules you saved, which answer later requests as in the core. */
@@ -1501,7 +1531,30 @@ export class Story {
     const claude = act.a.provider === 'claude';
     if (kind === 'network') return this.askSandboxHost(act);
     if (kind === 'permissions') return this.askPermissions(act);
+    if (kind === 'questions-two') return this.askTwoQuestions(act);
     return claude ? this.askLongQuestion(act) : this.askFreeAnswer(act);
+  }
+
+  /** Claude Code's AskUserQuestion with two questions of six options: the agent goes on with both answers. */
+  private async askTwoQuestions(act: Actor) {
+    const sim = this.sim;
+    const a = act.a;
+    await act.think('The colour and the font are yours to choose: ask both at once.', { pace: 40 });
+    const ap: Approval = {
+      id: uid('ap-'), agent_id: a.id, run_id: a.run_id ?? '', task_id: a.task_id, call_id: null,
+      subject: { kind: 'question', questions: { questions: TWO_QUESTIONS.map((q) => ({ ...q, multiSelect: false })) } },
+      reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: sim.now(),
+    };
+    sim.approvals.set(ap.id, ap);
+    act.emit({ type: 'approval_requested', approval: ap });
+    const st = await this.answered(act, ap, 'Accent and font', null);
+    act.status('working', 'thinking');
+    const ans = st === 'approved' ? ((this.answers.get(ap.id) as Record<string, unknown> | undefined) ?? {}) : {};
+    const [colour, font] = TWO_QUESTIONS.map((q) => ans[q.question]);
+    const reply = typeof colour === 'string' && colour && typeof font === 'string' && font
+      ? `${colour} and ${font} then: I start the landing page with those.`
+      : 'No answer: I keep the colour and the font of the app for now.';
+    await act.say(reply, { thread: `agent:${act.id}` });
   }
 
   /**

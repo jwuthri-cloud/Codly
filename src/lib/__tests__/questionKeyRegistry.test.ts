@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { questionKeysOf, registerQuestionKeys, type QuestionKeys } from '../state/keys';
 
-const keys = (): QuestionKeys => ({ options: () => 2, pick: () => {}, send: () => {} });
+const keys = (): QuestionKeys => ({ options: () => 2, pick: () => {}, send: () => {}, act: () => 'answer' });
 
 describe('the keys of a question card', () => {
   it('go to the card shown last, and back to the first when it goes', () => {

@@ -9,7 +9,7 @@ import type { Approval } from '../gen/Approval';
 import { showsPlan } from '../util/planRequest';
 import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
 import { twinsIn } from './approvalGroups';
-import { keyActOf, restsAfterAnswer, type KeyAct } from '../util/approvalCard';
+import { keyActOf, restsAfterAnswer, type CardKey, type KeyAct } from '../util/approvalCard';
 import { digitPick, isTextField } from '../util/questionKeys';
 import { rewindLayer } from '../../home/rewindLayer.svelte';
 import { denyKeyInField, escPair, escStep, mayRewind, openOne } from './esc';
@@ -79,15 +79,27 @@ export function registerCardView(approvalIds: string[], act: () => KeyAct): () =
 /** What a key does to the request now, over the cards that show it (`keyActOf`). */
 export const cardKeyAct = (approvalId: string): KeyAct => keyActOf((cardViews.get(approvalId) ?? []).map((act) => act()));
 
-/** When a key last sent an answer: the next press does nothing for a moment (`restsAfterAnswer`). */
-let keyAnsweredAt: number | null = null;
+/** When an answer last went, by a key or by a click on a card (or a key ran a plan): the next key
+ *  press, and a click on a card's buttons, does nothing for a moment (`restsAfterAnswer`). */
+let answeredAt: number | null = null;
 
-/** True: the key must not answer the request. A key answered one a moment ago (the store may not
+/** An answer went now: the keys and the cards' buttons rest for a moment. */
+export function noteAnswer(): void {
+  answeredAt = performance.now();
+}
+/** When the last answer went (`noteAnswer`); null: none yet. */
+export const lastAnswerAt = (): number | null => answeredAt;
+/** A key or a click answered a moment ago: no key acts on anything (`restsAfterAnswer`). */
+const rests = (): boolean => restsAfterAnswer(performance.now(), answeredAt);
+
+/** True: the key must not answer the request. An answer went a moment ago (the store may not
  *  know it yet, and the next card has not settled), it brought its card into view, or the card
- *  settles (then it does nothing). */
-function keyGate(ap: Approval): boolean {
-  if (restsAfterAnswer(performance.now(), keyAnsweredAt)) return true;
-  const act = cardKeyAct(ap.id);
+ *  settles (then it does nothing). A digit and the send key of a question card ask the card
+ *  whose question keys they use (`QuestionKeys.act`): they act on more than its three parts. */
+function keyGate(ap: Approval, key: CardKey = 'other'): boolean {
+  if (rests()) return true;
+  const q = key !== 'other' ? questionKeysOf(ap.id) : null;
+  const act = q ? q.act(key) : cardKeyAct(ap.id);
   if (act === 'reveal') ui.revealApproval = ap.id;
   return act !== 'answer';
 }
@@ -118,6 +130,30 @@ export function keyTargetPlan(): string | null {
   return p && p.status === 'awaiting_approval' ? p.id : null;
 }
 
+/** A "Run plan" button on screen says what ⌘↵ does to its plan now (`keyAct`, its box as a
+ *  card's part), and brings itself into view. */
+export type PlanKey = { act: () => KeyAct; reveal: () => void };
+const planKeys = new Map<string, PlanKey[]>();
+
+/** A "Run plan" button registers while it shows (the plan card, the Plan room). */
+export function registerPlanKey(planId: string, k: PlanKey): () => void {
+  planKeys.set(planId, [...(planKeys.get(planId) ?? []), k]);
+  return () => {
+    const left = (planKeys.get(planId) ?? []).filter((x) => x !== k);
+    if (left.length) planKeys.set(planId, left);
+    else planKeys.delete(planId);
+  };
+}
+
+/** True: ⌘↵ must not run the plan: no "Run plan" button of it is in view, uncovered and still
+ *  (the press brings it into view), or one settles. No button on screen: it never runs. */
+function planGate(planId: string): boolean {
+  const ks = planKeys.get(planId) ?? [];
+  const act = keyActOf(ks.map((k) => k.act()));
+  if (act === 'reveal') for (const k of ks) k.reveal();
+  return act !== 'answer';
+}
+
 /**
  * What G C shows. From a request: that request's plan, when it has changes to show; a request
  * without one (a draft) gets the room's own choice, not what you looked at last. From anywhere
@@ -130,8 +166,9 @@ export function keyTargetChanges(): DiffTarget {
   return p && shows ? { kind: 'plan', id: p.id } : null;
 }
 
-/** What a question card does with the keys: the card knows what you picked and typed. */
-export type QuestionKeys = { options: () => number; pick: (n: number) => void; send: () => void };
+/** What a question card does with the keys: the card knows what you picked and typed, and
+ *  what a digit or the send key does to it now (`act`: what they act on is in view, still). */
+export type QuestionKeys = { options: () => number; pick: (n: number) => void; send: () => void; act: (key: CardKey) => KeyAct };
 const questionKeys = new Map<string, QuestionKeys[]>();
 
 /** A question card takes its keys while it shows; the card shown last wins (the sheet over the conversation). `questionKeysOf` reads them. */
@@ -171,8 +208,13 @@ export function installKeys(): () => void {
     // Other text fields (a deny note…) are not the composer: ⌘↵ there must not approve.
     // A held key acts once: its repeats would answer the next approval, then run the plan.
     if (mod && e.key === 'Enter' && !e.repeat && !overlay && (!typing || !!(e.target as HTMLElement).closest?.('[aria-label="Composer"]'))) {
+      // A moment after an answer this key acts on nothing: not on the next card, not on a plan.
+      if (rests()) {
+        e.preventDefault();
+        return;
+      }
       const ap = keyTargetApproval();
-      if (ap && keyGate(ap)) {
+      if (ap && keyGate(ap, ap.subject.kind === 'question' && !e.altKey && !e.shiftKey ? 'send' : 'other')) {
         e.preventDefault();
         return;
       }
@@ -180,7 +222,7 @@ export function installKeys(): () => void {
         const q = questionKeysOf(ap.id);
         if (q && !e.altKey && !e.shiftKey) {
           e.preventDefault();
-          keyAnsweredAt = performance.now();
+          // The card notes the answer when one goes: with nothing to send, nothing rests.
           q.send();
         }
         return;
@@ -188,7 +230,7 @@ export function installKeys(): () => void {
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {
           e.preventDefault();
-          keyAnsweredAt = performance.now();
+          noteAnswer();
           resolveApprovals(keyTargetIds(ap), 'allow_session');
         }
         return;
@@ -196,13 +238,15 @@ export function installKeys(): () => void {
       if (e.shiftKey) return;
       if (ap && ap.choices.includes('allow_once')) {
         e.preventDefault();
-        keyAnsweredAt = performance.now();
+        noteAnswer();
         resolveApprovals(keyTargetIds(ap), 'allow_once');
         return;
       }
       const plan = keyTargetPlan();
       if (plan) {
         e.preventDefault();
+        if (planGate(plan)) return;
+        noteAnswer();
         runPlan(plan);
       }
       return;
@@ -217,7 +261,7 @@ export function installKeys(): () => void {
       if (keyGate(ap)) return;
       if (denyKeyAction(ap, e.shiftKey) === 'note') ui.denyNoteFor = ap.id;
       else {
-        keyAnsweredAt = performance.now();
+        noteAnswer();
         resolveApprovals(keyTargetIds(ap), 'deny');
       }
       return;
@@ -340,7 +384,7 @@ export function installKeys(): () => void {
       const n = q ? digitPick({ key: e.key, mod, alt: e.altKey, shift: e.shiftKey }, isTextField(e.target as Element | null), q.options()) : null;
       if (ap && q && n !== null) {
         e.preventDefault();
-        if (!keyGate(ap)) q.pick(n);
+        if (!keyGate(ap, { digit: n })) q.pick(n);
         return;
       }
     }

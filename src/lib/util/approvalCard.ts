@@ -102,6 +102,68 @@ export function keyActOf(acts: KeyAct[]): KeyAct {
   return acts.includes('wait') ? 'wait' : 'reveal';
 }
 
+/**
+ * The key a card is asked about: a digit picks option `digit` (0-based) of the question the
+ * digits belong to, 'send' sends a question card's answers, 'other' is any other approval key.
+ */
+export type CardKey = 'other' | 'send' | { digit: number };
+
+/** The part of `a` that `b` shows too. */
+export const meet = (a: Box, b: Box): Box => ({ top: Math.max(a.top, b.top), bottom: Math.min(a.bottom, b.bottom), left: Math.max(a.left, b.left), right: Math.min(a.right, b.right) });
+
+/**
+ * Where a key stands with a question card, when it acts on more than the card's three parts
+ * (`base`, from `keysView`): a digit on its question's text and the option row it picks, the
+ * send key on every question's text and every picked option (`rows`; none: nothing more to see).
+ * Each row must be inside the view (`view`) and inside the visible box of the card's own body
+ * (`body`, which scrolls), with nothing drawn over it. 'too-big': the rows need more height than
+ * the body shows, so they are never in view together and the key never acts on them.
+ */
+export function rowsView(base: KeysView, rows: SeenPart[], view: Box, body: Box): KeysView {
+  if (base !== 'ok' || !rows.length) return base;
+  const need = Math.max(...rows.map((r) => r.box.bottom)) - Math.min(...rows.map((r) => r.box.top));
+  if (need > Math.min(body.bottom - body.top, view.bottom - view.top) + 1) return 'too-big';
+  return keysView(rows, meet(view, body), 0);
+}
+
+/**
+ * Why a key did nothing, for the line the card shows: what the card asks (`asks`) may lie in its
+ * own body, and a part the body scrolls out of its visible box (`body`) is out of view, not
+ * covered (a press there reaches the card's title or buttons, drawn over the clipped text). It
+ * only turns 'covered' into 'out', so what the key does stays the same (`keyAct`: no act).
+ */
+export function whyView(view: KeysView, asks: Box | null, body: Box | null): KeysView {
+  if (view !== 'covered' || !asks || !body) return view;
+  return asks.top >= body.top - 1 && asks.bottom <= body.bottom + 1 ? view : 'out';
+}
+
+/**
+ * Whether a card (`card`) fits the view of its scroller, so it is brought into view whole (its
+ * padding and the lines under its buttons too); else only from its title to its buttons.
+ */
+export const fitsView = (card: Box, view: Box): boolean => card.bottom - card.top <= view.bottom - view.top + 1;
+
+/**
+ * How far a box that shows `view` scrolls (px, down is positive) to bring `span` into it, with
+ * `margin` px to spare where there is room: 0 when it is in view already, so a second press
+ * does not move it again. A span taller than the view shows its top.
+ */
+export function scrollToShow(span: { top: number; bottom: number }, view: Box, margin = 8): number {
+  const room = view.bottom - view.top;
+  const m = Math.max(0, Math.min(margin, (room - (span.bottom - span.top)) / 2));
+  if (span.top >= view.top - 1 && span.bottom <= view.bottom + 1) return 0;
+  if (span.top < view.top || span.bottom - span.top > room) return span.top - (view.top + m);
+  return span.bottom - (view.bottom - m);
+}
+
+/**
+ * Whether a click on a waiting card's buttons does nothing at `now`: an answer went (by a key or
+ * a click, at `answeredAt`) less than `SETTLE_MS` ago, as for the keys (`restsAfterAnswer`), or
+ * the buttons have not been still in their place for `SETTLE_MS` (`buttons`: the hold of the
+ * button row's box, `holdStep`). The next card that slides under the pointer takes no click.
+ */
+export const clickRests = (now: number, answeredAt: number | null, buttons: Hold): boolean => restsAfterAnswer(now, answeredAt) || !settled(buttons, now, 0);
+
 /** One question of a card, as far as its answer goes. */
 export type AskedQuestion = {
   /** How many options it lists to pick from. */
