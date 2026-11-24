@@ -201,6 +201,25 @@ describe('a first word with a second slash', () => {
   });
 });
 
+describe('a first word with another sign after the name', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'clear', 'undo', 'terminal', 'mcp'];
+
+  it('is a mistyped command: it is not sent', () => {
+    expect(unknownSlash('/help?', names)).toEqual({ word: 'help?', closest: null });
+    expect(unknownSlash('/undo.', names)).toEqual({ word: 'undo.', closest: 'undo' });
+    expect(unknownSlash('/model:opus', names)).toEqual({ word: 'model:opus', closest: 'model' });
+    expect(unknownSlash('/compact, then go on', names)).toEqual({ word: 'compact,', closest: 'compact' });
+    expect(unknownSlash('/clear!', names)).toEqual({ word: 'clear!', closest: 'clear' });
+  });
+
+  it('a sign alone after the slash is held when nothing follows it; a path stays prose', () => {
+    expect(unknownSlash('/?', names)).toEqual({ word: '?', closest: null });
+    expect(unknownSlash('/... what now', names)).toBeNull();
+    expect(unknownSlash('/src/app.ts: is it used?', names)).toBeNull();
+    expect(unknownSlash('/app.ts/main is broken', names)).toBeNull();
+  });
+});
+
 describe('the closest action of a typo', () => {
   const names = ['new', 'issue', 'pr', 'stop', 'ask', 'plan', 'auto', 'direct', 'edits', 'model', 'compact', 'context', 'diff', 'undo', 'terminal', 'mcp', 'clear', 'closed', 'settings', 'shortcuts'];
   const closest = (word: string) => unknownSlash(`/${word} please`, names)?.closest;

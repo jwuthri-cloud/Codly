@@ -80,21 +80,28 @@ export function filterSlash<T extends { name: string; label: string; off?: strin
 
 /**
  * A message whose first word is a slash command that Codly does not have: it is not sent (it
- * would start a turn the agent is paid for), and the composer says so. The first word counts
- * when it is "/" and a name ("/review this"), or a name with more slashes after it that is not a
- * path in the message's sense: one that starts with an action's name ("/mcp/terminal …"), or
- * one with nothing after it ("/mcp/terminal"). A path in front of more words ("/usr/bin/env is
- * missing") and a slash later in the text are plain text. `closest`: the action you most likely
- * meant, null when none is near.
+ * would start a turn the agent is paid for), and the composer says so. The first word is all
+ * that follows the "/" up to a space; its name is the letters, digits, `-` and `_` it starts
+ * with. It counts when it is a name that is not an action ("/review this"), a name with more
+ * after it that is not a path ("/help?", "/model:opus", "/undo."), or a name with more slashes
+ * after it that is not a path in the message's sense: one that starts with an action's name
+ * ("/mcp/terminal …"), or one with nothing after it ("/mcp/terminal"). A path in front of more
+ * words ("/usr/bin/env is missing"), "/" alone or in front of words ("/ is the root") and a slash
+ * later in the text are plain text. `closest`: the action you most likely meant, null when none
+ * is near.
  */
 export function unknownSlash(text: string, names: readonly string[]): { word: string; closest: string | null } | null {
-  const m = /^\s*\/([\w-]+)(\/\S*)?(?=\s|$)(.*)$/s.exec(text);
-  if (!m) return null;
-  const name = m[1].toLowerCase();
+  const m = /^\s*\/(\S*)(.*)$/s.exec(text);
+  if (!m || !m[1]) return null;
+  const [, word, rest] = m;
+  const name = /^[\w-]*/.exec(word)![0].toLowerCase();
+  // "/?" or "/..." alone is no name, but sent it would still start a turn.
+  if (!name) return rest.trim() ? null : { word, closest: null };
   const known = names.includes(name);
-  if (!m[2]) return known ? null : { word: m[1], closest: closestName(name, names) };
-  if (!known && m[3].trim()) return null;
-  return { word: m[1] + m[2], closest: known ? name : closestName(name, names) };
+  const tail = word.slice(name.length);
+  if (!tail) return known ? null : { word, closest: closestName(name, names) };
+  if (tail.includes('/') && !known && rest.trim()) return null;
+  return { word, closest: known ? name : closestName(name, names) };
 }
 
 /** What the composer says about it, above the line: ↵ sends nothing until the text changes. */

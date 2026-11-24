@@ -18,7 +18,7 @@
   import Icon from '../components/Icon.svelte';
   import { openSheet } from './composerActions';
   import { confirmLine, namesLine, pick, rewindItems, rewindKey, rewindOff, rewindRows, rewindStart, toggleFiles, type RewindAct, type RewindNav } from './rewind';
-  import { putBack } from './rewindLayer.svelte';
+  import { putBack, rewindLayer } from './rewindLayer.svelte';
 
   interface Props {
     agent: Agent;
@@ -39,6 +39,8 @@
   const items = $derived(kept ? rewindItems(rows, nav.open) : []);
 
   onMount(() => {
+    // Whose list this is: by the time it leaves the screen, the composer may show another agent.
+    const shown = agent.id;
     void (async () => {
       try {
         kept = await api.agentCheckpoints(agent.id);
@@ -52,7 +54,11 @@
       if (el && !el.contains(e.target as Node)) onclose();
     };
     window.addEventListener('pointerdown', outside, true);
-    return () => window.removeEventListener('pointerdown', outside, true);
+    return () => {
+      window.removeEventListener('pointerdown', outside, true);
+      // Gone from the screen with the list open (a key took you to another conversation or room).
+      rewindLayer.release(shown);
+    };
   });
 
   async function act(a: RewindAct) {

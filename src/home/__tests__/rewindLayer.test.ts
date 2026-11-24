@@ -40,3 +40,19 @@ describe('putting files back', () => {
     expect(toasts.list).toEqual([]);
   });
 });
+
+describe('the list leaves the screen', () => {
+  afterEach(() => rewindLayer.close());
+
+  it('when its conversation goes, it closes: back there later, it does not open by itself', () => {
+    rewindLayer.open('ada');
+    rewindLayer.release('ada');
+    expect(rewindLayer.agentId).toBeNull();
+  });
+
+  it('a list opened since for another agent stays', () => {
+    rewindLayer.open('bob');
+    rewindLayer.release('ada');
+    expect(rewindLayer.agentId).toBe('bob');
+  });
+});

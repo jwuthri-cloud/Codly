@@ -17,11 +17,30 @@ let onKey: ((e: KeyboardEvent) => void) | null = null;
 let modals: ReturnType<typeof part>[] = [];
 let off: () => void = () => {};
 
-/** Esc, pressed on the page's body. */
-function esc() {
-  const target = { tagName: 'BODY', isContentEditable: false, closest: () => null };
-  onKey!({ key: 'Escape', repeat: false, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, defaultPrevented: false, target, preventDefault() {} } as unknown as KeyboardEvent);
+/** Esc on `target`; `used`: a field or a menu already took it (`defaultPrevented`). */
+function press(target: object, used = false) {
+  onKey!({ key: 'Escape', repeat: false, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, defaultPrevented: used, target, preventDefault() {} } as unknown as KeyboardEvent);
 }
+
+/** Esc, pressed on the page's body. */
+const esc = (used = false) => press({ tagName: 'BODY', isContentEditable: false, closest: () => null }, used);
+
+/** The composer's text field, holding `value`. */
+function composer(value: string) {
+  return {
+    tagName: 'TEXTAREA',
+    isContentEditable: false,
+    value,
+    blurred: false,
+    closest: (selector: string) => (selector === '[aria-label="Composer"]' ? {} : null),
+    blur() {
+      this.blurred = true;
+    },
+  };
+}
+
+/** Esc, pressed in the composer's field. */
+const escIn = (field: ReturnType<typeof composer>) => press(field);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -120,6 +139,32 @@ describe('Esc Esc in a 1:1 chat with an agent that rests', () => {
     expect(rewindLayer.agentId).toBeNull();
     esc();
     expect(rewindLayer.agentId).toBe('ada');
+  });
+
+  it('the first Esc in the empty composer begins the pair: it lets go of the field, the second opens the list', () => {
+    const field = composer('');
+    escIn(field);
+    expect(field.blurred).toBe(true);
+    expect(rewindLayer.agentId).toBeNull();
+    vi.advanceTimersByTime(300);
+    esc();
+    expect(rewindLayer.agentId).toBe('ada');
+  });
+
+  it('an Esc in a composer that holds text begins no pair', () => {
+    escIn(composer('fix the header'));
+    vi.advanceTimersByTime(300);
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
+  });
+
+  it('an Esc the composer used (a menu closed) begins no pair', () => {
+    escIn(composer(''));
+    vi.advanceTimersByTime(100);
+    esc(true);
+    vi.advanceTimersByTime(100);
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
   });
 
   it('in a request’s thread two presses open nothing', () => {

@@ -21,6 +21,15 @@ class RewindLayer {
   close() {
     this.agentId = null;
   }
+
+  /**
+   * The list of `agentId` left the screen (you went to another conversation or room with it
+   * open): it closes, so it never opens again by itself when you come back. A list opened since
+   * for another agent stays.
+   */
+  release(agentId: string) {
+    if (this.agentId === agentId) this.agentId = null;
+  }
 }
 
 export const rewindLayer = new RewindLayer();
