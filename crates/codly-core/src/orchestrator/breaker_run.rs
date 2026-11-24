@@ -56,8 +56,12 @@ pub(super) struct Runtime {
     holding: bool,
     /// The live Claude runs that started with a limit of their own: run → (agent name, limit).
     limits: HashMap<Id, (String, f64)>,
-    /// The runs whose turn reached that limit → what that turn says (`run_limit_words`).
+    /// The runs whose turn reached that limit → what that turn says (`run_limit_words`). Kept,
+    /// with the limit, until the run is over: a later turn of that run fails the same way
+    /// (the one the CLI starts by itself at once, `r7-budget-during-call-*`) and says the same.
     reached: HashMap<Id, String>,
+    /// The runs of `reached` that Codly ended and moved on (`run_limit_turn_end`): once.
+    ended: HashSet<Id>,
 }
 
 impl Runtime {
@@ -204,16 +208,19 @@ impl Inner {
     ///   (`worker_failed`), and that counted row stops a restart loop.
     /// - A task's reviewer: the review stops, and the task waits for you (`review_stopped`).
     /// - Any other run just ends: the next message starts a new one.
+    ///
+    /// Only the first such turn of a run: the CLI can fail one more before the run ends (a
+    /// turn it starts by itself, as recorded), and that turn moves nothing again.
     pub(super) fn run_limit_turn_end(self: &Arc<Self>, agent_id: &str, run_id: &str, role: Role, task_id: Option<&str>, kind: &EventKind) {
         if !matches!(kind, EventKind::TurnCompleted { status: TurnStatus::Failed, .. }) {
             return;
         }
         let (limit, over) = {
             let mut rt = lock(&self.breaker);
-            if rt.reached.remove(run_id).is_none() {
+            if !rt.reached.contains_key(run_id) || !rt.ended.insert(run_id.to_string()) {
                 return;
             }
-            let Some((_, limit)) = rt.limits.remove(run_id) else { return };
+            let Some(&(_, limit)) = rt.limits.get(run_id) else { return };
             (limit, breaker::over_budget(&rt.cfg, rt.tracker.floor()))
         };
         let moved = match (role, task_id, over) {
@@ -350,6 +357,7 @@ impl Inner {
             let mut rt = lock(&self.breaker);
             rt.limits.retain(|run, _| runs.contains(run));
             rt.reached.retain(|run, _| runs.contains(run));
+            rt.ended.retain(|run| runs.contains(run));
         }
         let leads: HashSet<Id> = lock(&self.live).iter().filter(|(_, l)| l.role == Role::Lead).map(|(id, _)| id.clone()).collect();
         let transitions = {

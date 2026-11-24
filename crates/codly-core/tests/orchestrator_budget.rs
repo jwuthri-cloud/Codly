@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -317,7 +317,9 @@ struct Turn {
 /// An agent whose turns follow `script`, or `by_role` first for an agent of that role (a turn
 /// neither has an entry for costs nothing and completes; a worker's turn that completes writes
 /// a file). It records the limit each run
-/// started with, the prompts of each role, and how many runs it was told to stop.
+/// started with, the prompts of each role, and how many runs it was told to stop. With
+/// `again`, a turn that reaches the limit is followed at once by a turn the CLI starts by
+/// itself, which fails the same way (`r7-budget-during-call-*`).
 #[derive(Clone, Default)]
 struct Limited {
     script: Arc<Mutex<VecDeque<Turn>>>,
@@ -325,6 +327,7 @@ struct Limited {
     limits: Arc<Mutex<Vec<(Provider, Option<f64>)>>>,
     prompts: Arc<Mutex<Vec<Role>>>,
     stops: Arc<AtomicUsize>,
+    again: Arc<AtomicBool>,
 }
 
 impl Limited {
@@ -354,6 +357,7 @@ impl Spawner for Limited {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         self.limits.lock().unwrap().push((spec.provider, spec.max_budget_usd));
         let (script, by_role, prompts, stops) = (self.script.clone(), self.by_role.clone(), self.prompts.clone(), self.stops.clone());
+        let again = self.again.load(Ordering::SeqCst);
         Box::pin(async move {
             let (tx, mut rx) = mpsc::unbounded_channel::<AgentCmd>();
             let handle = AgentHandle { agent_id: spec.agent_id.clone(), run_id: spec.run_id.clone(), tx };
@@ -393,7 +397,12 @@ impl Spawner for Limited {
                                 // What the Claude adapter says for the result `error_max_budget_usd`.
                                 let why = claude::run_limit_reached(&name, limit.expect("a run with a limit of its own"));
                                 send(EventKind::Error { message: why.clone(), fatal: false });
-                                send(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some(why), duration_ms: Some(1) });
+                                send(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some(why.clone()), duration_ms: Some(1) });
+                                if again {
+                                    send(EventKind::TurnStarted { input: None });
+                                    send(EventKind::Error { message: why.clone(), fatal: false });
+                                    send(EventKind::TurnCompleted { status: TurnStatus::Failed, result_text: Some(why), duration_ms: Some(1) });
+                                }
                             } else {
                                 if role == Role::Worker {
                                     std::fs::write(cwd.join(format!("work-{}.txt", new_id())), "done\n").unwrap();
@@ -634,5 +643,43 @@ async fn a_reviewer_whose_run_reaches_its_limit_stops_the_review() {
     let review = decisions(&core, "review").await;
     assert!(review.iter().any(|d| d.ends_with(reason)), "{review:?}");
     assert!(!review.iter().any(|d| d.contains("no verdict")), "not merged without its review: {review:?}");
+    core.shutdown().await;
+}
+
+/// Recorded (part 5 §10, `r7-budget-during-call-*`, n=2): right after the turn that reaches the
+/// run's own limit, the CLI starts a turn by itself, which fails the same way at once, before
+/// Codly's stop reaches it. That turn says what the first one said, and moves nothing again: a
+/// worker's thread is never told to send its message again, and its failure counts once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_turn_at_the_runs_own_limit_says_the_same_and_moves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let fake = Limited::default();
+    fake.again.store(true, Ordering::SeqCst);
+    let core = start_on(dir.path(), &repo, Arc::new(fake.clone()), &[Provider::Claude]).await;
+    core.set_worker_retry_waits(vec![Duration::from_millis(100); 2]);
+    core.set_breaker_config(BreakerConfig { cost_budget_usd: 1.0, ..Default::default() }).await.unwrap();
+
+    fake.then(&[Turn { cost: 0.2, reaches: true }]);
+    let task = ready_task(&core, "Write the greeting").await;
+    wait_for("a second run", async || (fake.limits().len() >= 2).then_some(())).await;
+    let worker = task_now(&core, &task.id).await.assignee.expect("the task keeps its worker");
+    let name = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == worker).unwrap().name;
+    let words = format!("This run of {name} reached the limit it started with (1.00 USD of your budget were left then). Codly ends this run; the task's card says what comes next.");
+    assert_eq!(errors_of(&core, &worker).await, [words.clone(), words], "both failed turns say the same");
+    assert_eq!(
+        decisions(&core, "retry").await,
+        ["the worker's run reached the limit it started with (1.00 USD of your budget); Codly starts it again in a moment (retry 1 of 2)"],
+        "the failure counts once"
+    );
+    let events = core.events(None, None, 2000).await.unwrap();
+    let told: Vec<String> = events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Chat { message } if message.text.contains("Send your message again") => Some(message.text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, Vec::<String>::new(), "no thread is told to send a message");
     core.shutdown().await;
 }

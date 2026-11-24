@@ -11,9 +11,10 @@
 //!   refused is on record as what you asked, with its reason. The CLI saves the switch in
 //!   `~/.claude.json`, under the folder the run works in: off holds for every later Claude Code
 //!   process in that folder, new or resumed, until "Turn on" (part 5 §1,
-//!   `r7-mcp-toggle-saved-*`, n=2, in a throw-away HOME), so the record says it is for that
-//!   folder. A worktree is a folder of its own (expected, not recorded). Codly's own server
-//!   stays on: the agent reports through it.
+//!   `r7-mcp-toggle-saved-*`, n=2, in a throw-away HOME, in a plain folder), so the record
+//!   says it is for the folder the agent works in. Not recorded for a git worktree (each of
+//!   Codly's worktrees is one): which folder's entry gets the switch there, so the record names
+//!   no more than that folder. Codly's own server stays on: the agent reports through it.
 //! - **Stop** a background command or helper (`stop_task`), or a helper whose agent still
 //!   waits for it, by the id of its call: the agent's turn goes on (recorded, part 4 §2). The
 //!   CLI answers the same whether or not something ended; its next list of background tasks
@@ -136,17 +137,13 @@ impl Inner {
             bail!("{CODLY_SERVER} is Codly's own server: {} reports to Codly through it, so it stays on", agent.name);
         }
         let answer = self.ask_session(agent_id, SessionRequest::McpEnabled(server.to_string(), on))?;
-        // The folder the switch is saved for: the one the run works in (a worktree of Codly's,
-        // or your own checkout).
-        let worktrees = self.data("worktrees");
-        let in_worktree = lock(&self.live).get(agent_id).is_some_and(|l| l.cwd.starts_with(&worktrees));
         let switched = if on { "on" } else { "off" };
         // "You turned" is true only once the CLI answered that it did. A request it refused,
         // or did not answer in time (it can still take effect then), is on record as what you
         // asked and what came back.
         match Self::session_answer_within(answer, RECONNECT_ANSWER_LIMIT).await {
             Ok(_) => {
-                self.control_decision(agent_id, switch_record(server, on, &agent.name, in_worktree));
+                self.control_decision(agent_id, switch_record(server, on, &agent.name));
                 Ok(())
             }
             Err(e) => {
@@ -182,13 +179,15 @@ impl Inner {
 
 /// The record of a switch the CLI took. Claude Code saves it for the folder the run works in,
 /// not for the run (`r7-mcp-toggle-saved-*`): off holds for every later process there until
-/// "Turn on". A worktree is a folder of its own.
-fn switch_record(server: &str, on: bool, agent: &str, in_worktree: bool) -> String {
-    let (folder, there) = if in_worktree { (format!("{agent}'s worktree"), "there") } else { ("this folder".to_string(), "here") };
+/// "Turn on" (recorded in a plain folder). Not recorded for a git worktree, as each of Codly's
+/// worktrees is: which folder's entry gets the switch there (the worktree's, or its main
+/// repository's, which would also hold for that repository's other worktrees). So the words
+/// name the folder the agent works in and say nothing of other folders.
+fn switch_record(server: &str, on: bool, agent: &str) -> String {
     if on {
-        format!("you turned {server} on for Claude Code in {folder}")
+        format!("you turned {server} on for Claude Code in the folder {agent} works in")
     } else {
-        format!("you turned {server} off for Claude Code in {folder} ({agent}'s run and every later one {there}, until you turn it on)")
+        format!("you turned {server} off for Claude Code in the folder {agent} works in (this run and every later one there, until you turn it on)")
     }
 }
 
@@ -293,18 +292,14 @@ mod tests {
 
     /// Recorded (part 5 §1, `r7-mcp-toggle-saved-*`, n=2): Claude Code saves "off" for the
     /// folder, and every later process there starts that server off. Before, the record said
-    /// the switch was "for Ada's run".
+    /// the switch was "for Ada's run". Not recorded in a git worktree, so the words say nothing
+    /// of other folders.
     #[test]
     fn a_switch_is_on_record_for_the_folder_the_run_works_in() {
         assert_eq!(
-            switch_record("linear", false, "Ada", false),
-            "you turned linear off for Claude Code in this folder (Ada's run and every later one here, until you turn it on)"
+            switch_record("linear", false, "Ada"),
+            "you turned linear off for Claude Code in the folder Ada works in (this run and every later one there, until you turn it on)"
         );
-        assert_eq!(switch_record("linear", true, "Ada", false), "you turned linear on for Claude Code in this folder");
-        assert_eq!(
-            switch_record("linear", false, "Ada", true),
-            "you turned linear off for Claude Code in Ada's worktree (Ada's run and every later one there, until you turn it on)"
-        );
-        assert_eq!(switch_record("linear", true, "Ada", true), "you turned linear on for Claude Code in Ada's worktree");
+        assert_eq!(switch_record("linear", true, "Ada"), "you turned linear on for Claude Code in the folder Ada works in");
     }
 }
