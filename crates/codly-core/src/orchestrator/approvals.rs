@@ -1322,9 +1322,11 @@ fn env_runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> 
 /// The commands `find` runs for the files it finds: what follows each of its `-exec`,
 /// `-execdir`, `-ok` and `-okdir`.
 fn find_commands(args: &[String]) -> impl Iterator<Item = &[String]> {
-    let runs = |word: &String| ["-exec", "-execdir", "-ok", "-okdir"].contains(&word.as_str());
-    (0..args.len()).filter(move |&at| runs(&args[at]) && at + 1 < args.len()).map(move |at| &args[at + 1..])
+    (0..args.len()).filter(move |&at| FIND_RUNS.contains(&args[at].as_str()) && at + 1 < args.len()).map(move |at| &args[at + 1..])
 }
+
+/// The options of `find` that run a command for the files it finds.
+const FIND_RUNS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// Every command a program starts: what a package runner starts (`runner_commands`), what may
 /// stand behind another runner (`env_runner_commands`), and what `find` runs
@@ -1515,7 +1517,8 @@ fn inner_risks(line: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u
 
 /// What one `env` runs (`env_reading`).
 enum EnvReading {
-    /// The line that `-S` / `--split-string` makes the command, with the words behind it.
+    /// The line that `-S` / `--split-string` makes the command, with the words behind it, as
+    /// the words of an `env` (`env -S '-i git push'` runs `env -i git push`).
     Line(String),
     /// The command stands at this place among the words, past env's options.
     Command(usize),
@@ -1559,7 +1562,10 @@ fn env_reading(words: &[String], at: usize) -> Option<EnvReading> {
                 None => continue,
             },
         };
-        return Some(EnvReading::Line(std::iter::once(line).chain(words[i..].iter().map(String::as_str)).collect::<Vec<_>>().join(" ")));
+        // env reads the line as its own words, its options first (`env -S '-i git push'`):
+        // the line is read with `env` in front.
+        let line = ["env", line].into_iter().chain(words[i..].iter().map(String::as_str));
+        return Some(EnvReading::Line(line.collect::<Vec<_>>().join(" ")));
     }
     Some(EnvReading::Command(i))
 }
@@ -1960,7 +1966,18 @@ fn line_loses_work(cmd: &str, start: Option<&Path>, checkout: &Path, works_there
         // before them, and the words in front of it before that.
         let command = |prog: &str, args: &[String]| {
             let at = seg.len() - args.len() - 1;
-            command_loss(prog, &seg[..at], &seg[at + 1..], here, checkout, works_there)
+            let rest = &seg[at + 1..];
+            // The `rm` of a `find -exec rm` deletes the files find finds (`{}`): the `find` rule
+            // reads where those are. Its other targets, up to the `;` or `+` that ends it, are
+            // read here.
+            if prog == "rm" && at > 0 && FIND_RUNS.contains(&seg[at - 1].text.as_str()) {
+                let own: Vec<Word> = rest.iter().take_while(|w| !matches!(w.text.as_str(), ";" | "+")).filter(|w| w.text != "{}").cloned().collect();
+                if !own.iter().any(|w| !w.text.starts_with('-')) {
+                    return None;
+                }
+                return command_loss(prog, &seg[..at], &own, here, checkout, works_there);
+            }
+            command_loss(prog, &seg[..at], rest, here, checkout, works_there)
         };
         let line = |inner: &str, by_a_program: bool, started: &mut usize| {
             if depth >= 3 || (by_a_program && one_more(started)) {
@@ -2057,7 +2074,7 @@ fn git_places(env: &[Word], opts: &[Word], dir: Option<&Path>) -> (Option<PathBu
 
 /// `find … -exec rm …` (or `-execdir`, `-ok`, `-okdir`).
 fn exec_rm(args: &[String]) -> bool {
-    args.windows(2).any(|w| ["-exec", "-execdir", "-ok", "-okdir"].contains(&w[0].as_str()) && basename(&w[1]) == "rm")
+    args.windows(2).any(|w| FIND_RUNS.contains(&w[0].as_str()) && basename(&w[1]) == "rm")
 }
 
 /// A recursive delete of `targets`, on a line that runs in `dir`, loses work of yours unless
@@ -4213,6 +4230,8 @@ mod tests {
             ("pnpm exec env -S 'git push'", "push"),
             ("find . -exec env -S 'git push' \\;", "push"),
             ("sh -c \"env -S 'git push'\"", "push"),
+            ("env -S '-i npm publish'", "publish"),
+            ("env -S'-P/usr/bin git push'", "push"),
         ] {
             let found = risks(c);
             assert!(found.iter().any(|r| r == risk) && found.iter().any(|r| r == "runs dynamic code"), "{c}: {found:?}");
@@ -4367,8 +4386,31 @@ mod tests {
             ("bun exec 'git push -f'", FORCE_PUSH),
             ("env -uSECRET git reset --hard", DISCARDS_WORK),
             ("env -C/Users/Shared env -S 'git reset --hard'", DISCARDS_WORK),
+            // env reads its own options at the start of the line.
+            ("env -S '-i git reset --hard'", DISCARDS_WORK),
+            ("env -S'-P/usr/bin git clean -fd'", DISCARDS_WORK),
+            ("env -S '-u X -S \"git push -f\"'", FORCE_PUSH),
+            // The `rm` of a `find -exec` with a target of its own.
+            ("find node_modules -exec rm -rf src \\;", DELETES_FOLDERS),
         ] {
             assert_eq!(lost(c), Some(why), "{c}");
+        }
+        // The files find finds below a build folder are read by the find rule, with
+        // `-exec rm` as with `-delete`.
+        for c in ["find node_modules -name .cache -exec rm -rf {} +", "find dist -name '*.map' -execdir rm -r {} \\;"] {
+            assert_eq!(lost(c), None, "{c}");
+        }
+        // A line that starts more commands than `MAX_STARTED` is still read to its last
+        // command, and so is the line for a shell or env there.
+        let many = "uv run ".repeat(26);
+        for c in [
+            format!("{many}true; git reset --hard"),
+            format!("{many}true; sh -c 'git reset --hard'"),
+            format!("{many}true; env -S 'git reset --hard'"),
+            format!("{}git reset --hard", "uv run ".repeat(24)),
+            format!("{}npx -c 'git reset --hard'", "uv run ".repeat(22)),
+        ] {
+            assert_eq!(lost(&c), Some(DISCARDS_WORK), "{c}");
         }
         for c in ["env FOO=1 git status", "env -S 'git status'", "npx eslint src", "uv run pytest", "env -uSECRET git status"] {
             assert_eq!(lost(c), None, "{c}");
@@ -4405,6 +4447,8 @@ mod tests {
             }
         }
         assert!(own_account("env -uSECRET git config user.name me"));
+        assert!(own_account("env -S'-u X git config user.name me'"));
+        assert!(own_account("env -S '-i cargo login x'"));
         for c in ["env FOO=1 git status", "env -S 'git status'", "env -uSECRET git status"] {
             assert!(!own_account(c), "{c}");
         }
