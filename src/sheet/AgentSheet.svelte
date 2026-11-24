@@ -19,6 +19,7 @@
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
   import { clock, clockSec, dur, pct, plural, resetsIn, timer, tokens } from '../lib/util/format';
   import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
+  import { openInConversation } from '../lib/util/approvalCard';
   import { askedLine, settledLine } from '../lib/util/outcome';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
@@ -423,7 +424,7 @@
       <Section id="needs" title="Needs you" tone="attention" collapsible={false}>
         {#if inConversation}
           <div class="needs-ptr">
-            <span>{approvals.length === 1 ? 'Its approval is open in the conversation.' : `${approvals.length} approvals are open in the conversation.`}</span>
+            <span>{openInConversation(approvals.map((a) => a.subject.kind === 'question'))}</span>
             <button class="btn sm amber" onclick={() => (ui.revealApproval = approvals[0].id)}>Show it</button>
           </div>
         {:else}

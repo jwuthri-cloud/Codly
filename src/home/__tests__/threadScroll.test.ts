@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
 import type { Item } from '../spine';
-import { meets, newBelow, nextMove, oldestWaiting, revealTop, type ScrollState } from '../threadScroll';
+import { meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, type Rect, type ScrollState } from '../threadScroll';
 
 const card = (key: string, status: string): Item => ({ kind: 'approval', key, ts: 0, approval: { status } as unknown as Approval, twins: [] });
 const sys = (key: string): Item => ({ kind: 'system', key, ts: 0, text: 'x', card: null });
@@ -84,5 +84,35 @@ describe('nextMove', () => {
   it('when the last card is answered, goes back to the newest line if you were there when the hold began', () => {
     expect(at({ held: true, followed: true })).toBe('bottom');
     expect(at({ held: true, followed: false, added: true })).toBe('mark');
+  });
+});
+
+describe('where the "new below" pill goes (`pillSpot`)', () => {
+  const r = (left: number, top: number, right: number, bottom: number): Rect => ({ left, top, right, bottom });
+  // At 1024x640 with Ask-me open: the pill centred [257,426,379,456], at the edge, or above the buttons.
+  const centre = r(257, 426, 379, 456);
+  const edge = r(470, 426, 592, 456);
+  const above = (top: number) => r(470, top - 38, 592, top - 8);
+
+  it('stays centred while it lies on nothing of the waiting card', () => {
+    const parts = [r(217, 120, 600, 144), r(217, 152, 600, 195), r(217, 300, 600, 340)];
+    expect(pillSpot([centre, edge, above(300)], parts, parts[2])).toBe(0);
+  });
+
+  it('the review’s defect 4: over "Allow for this session" and "Deny" it goes to the edge, off the buttons', () => {
+    const buttons = r(217, 415, 460, 455);
+    const parts = [r(217, 210, 600, 234), r(217, 242, 600, 285), buttons];
+    expect(pillSpot([centre, edge, above(buttons.top)], parts, buttons)).toBe(1);
+  });
+
+  it('above the buttons when the row is as wide as the thread, and never on the buttons when it can help it', () => {
+    const buttons = r(217, 415, 600, 455);
+    const parts = [r(217, 210, 600, 234), r(217, 242, 600, 285), buttons];
+    expect(pillSpot([centre, edge, above(buttons.top)], parts, buttons)).toBe(2);
+    // Above them it would lie on what the card asks: still off the buttons.
+    const tall = [r(217, 300, 600, 324), r(217, 332, 600, 400), buttons];
+    expect(pillSpot([centre, edge, above(buttons.top)], tall, buttons)).toBe(2);
+    // No spot off the buttons: the last one.
+    expect(pillSpot([centre, edge], parts, r(0, 0, 1000, 1000))).toBe(1);
   });
 });

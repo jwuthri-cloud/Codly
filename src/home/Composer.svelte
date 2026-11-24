@@ -139,8 +139,13 @@
     ui.holdDraft(thread, files.length > 0);
   }
 
+  // Not from the answer field of a card that waits for words (it took the focus when it came):
+  // an answer typed there must not land here.
   $effect(() => {
-    if (ui.composerFocus) tick().then(() => ta?.focus());
+    if (!ui.composerFocus) return;
+    tick().then(() => {
+      if (!document.activeElement?.closest('[data-answer-field]')) ta?.focus();
+    });
   });
 
   const agent = $derived(store.threadAgent(thread));

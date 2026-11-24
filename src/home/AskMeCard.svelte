@@ -1,7 +1,9 @@
 <!--
   One "ask me" card: who asks, whether it blocks their work or is a heads-up, the question in
   plain language, and a reply box. "Send answer" sends your answer to the waiting agent
-  (⌘↵); a heads-up needs nothing and is dismissed with "Got it". Answered cards show the reply.
+  (⌘↵ in its answer field: the keycap shows only there, where the key is its own; elsewhere ⌘↵
+  answers the approval that waits); a heads-up needs nothing and is dismissed with "Got it".
+  Answered cards show the reply.
 -->
 <script lang="ts">
   import type { Blocker } from '../lib/gen/Blocker';
@@ -114,7 +116,8 @@
   textarea.input { width: 100%; }
   footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .reply { flex: 1; min-width: 140px; }
-  .k { margin-left: 8px; opacity: 0.7; font-size: var(--t-xs); }
+  .k { margin-left: 8px; opacity: 0.7; font-size: var(--t-xs); visibility: hidden; }
+  .card:has(textarea:focus) .k { visibility: visible; }
   .answer { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: var(--r-md); background: var(--surface-2); font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-1); }
   .answer :global(svg) { margin-top: 4px; color: var(--ink-3); flex: none; }
   .err { font-size: var(--t-sm); color: var(--bad); }

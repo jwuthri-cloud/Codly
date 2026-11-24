@@ -34,6 +34,28 @@ export function newBelow(rows: { key: string; top: number }[], seen: ReadonlySet
   return rows.filter((r) => !seen.has(r.key) && r.top >= viewBottom).length;
 }
 
+/** A box on the screen, in px. */
+export type Rect = { left: number; top: number; right: number; bottom: number };
+
+const meetsRect = (a: Rect, b: Rect) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+/**
+ * Where the "N new below" pill goes, as an index into `spots` (its places, the one it prefers
+ * first: centred over the composer, then at the thread's edge, then above the waiting card's
+ * buttons). The first spot that lies on none of the waiting card's parts (`parts`: who asks,
+ * what, its buttons); else the first that does not lie on its buttons (`buttons`), where a click
+ * meant for a button would hit the pill; else the last one.
+ */
+export function pillSpot(spots: Rect[], parts: Rect[], buttons: Rect): number {
+  const free = spots.findIndex((s) => !parts.some((p) => meetsRect(s, p)));
+  if (free >= 0) return free;
+  const offButtons = spots.findIndex((s) => !meetsRect(s, buttons));
+  return offButtons >= 0 ? offButtons : spots.length - 1;
+}
+
+/** How long the thread's size must stay the same before a layout change counts as done (a panel opens in about 300 ms), in ms. */
+export const LAYOUT_REST_MS = 350;
+
 /** Whether some of `box` shows in `view`. */
 export function meets(view: Span, box: Span): boolean {
   return box.top < view.bottom && box.bottom > view.top;

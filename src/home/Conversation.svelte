@@ -10,6 +10,9 @@
   a quiet line; a click opens the agent's history there. All it told in one turn is one line
   that opens into the list (a hook that speaks on every tool call does not fill the thread).
   Hover a message (or tab to it) to copy it; one of yours can go back to the composer.
+  A card that waits stays in view through a change of layout (a panel opens or closes, the
+  window is resized): the thread brings it back once the layout is at rest. The "new below" pill
+  never lies on a waiting card's buttons: it goes to the thread's edge, or above the buttons.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -36,7 +39,8 @@
   import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
-  import { meets, newBelow, nextMove, oldestWaiting, revealTop } from './threadScroll';
+  import { LAYOUT_REST_MS, meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, type Rect } from './threadScroll';
+  import { boxOf, partsOf } from './cards/cardParts';
   import { workingTodo } from './todoLine';
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
   import { busy, queued, queuedHint, sendNowTip, type Sent } from '../lib/state/queue';
@@ -132,6 +136,37 @@
     const rows = [...list.children].map((li) => ({ key: (li as HTMLElement).dataset.key ?? '', top: offsetOf(li as HTMLElement) }));
     // The bottom padding fades out: a row that begins there is not in view yet.
     below = newBelow(rows, seen, scroller.clientHeight - parseFloat(getComputedStyle(scroller).paddingBottom));
+    cancelAnimationFrame(pillFrame);
+    pillFrame = requestAnimationFrame(placePill);
+  }
+
+  // ── the pill keeps off the waiting card's buttons ──
+  let bottomEl: HTMLDivElement | undefined = $state();
+  let pill: HTMLButtonElement | undefined = $state();
+  /** Where the pill is (see `pillSpot`): 0 centred, 1 at the thread's edge, 2 there and `lift` px higher, above the buttons. */
+  let pillAt = $state({ spot: 0, lift: 0 });
+  let pillFrame = 0;
+  /** Its gap to what it sits over, and to the thread's edge, in px. */
+  const PILL_GAP = 8;
+  const PILL_EDGE = 12;
+  function placePill() {
+    const card = waitingCard ? rowEl(waitingCard)?.querySelector<HTMLElement>('article.card') : null;
+    const parts = card ? partsOf(card) : null;
+    if (!pill || !bottomEl || !parts) {
+      pillAt = { spot: 0, lift: 0 };
+      return;
+    }
+    const boxes = parts.map(boxOf);
+    const buttons = boxes[2];
+    const b = bottomEl.getBoundingClientRect();
+    const w = pill.offsetWidth;
+    const h = pill.offsetHeight;
+    const base = b.top - PILL_GAP;
+    const at = (left: number, bottom: number): Rect => ({ left, right: left + w, top: bottom - h, bottom });
+    const edgeLeft = b.right - PILL_EDGE - w;
+    const lift = Math.max(0, base - (buttons.top - PILL_GAP));
+    const spot = pillSpot([at(b.left + (b.width - w) / 2, base), at(edgeLeft, base), at(edgeLeft, base - lift)], boxes, buttons);
+    pillAt = { spot, lift: spot === 2 ? lift : 0 };
   }
   /** The held card showed in the view, where it was last held or scrolled to. */
   const heldShows = (el: HTMLElement) => !!scroller && meets({ top: 0, bottom: scroller.clientHeight }, { top: heldAt, bottom: heldAt + el.offsetHeight });
@@ -214,6 +249,41 @@
     lastCount = items.length;
     lastFirst = items[0]?.key;
     tick().then(() => settle(grew));
+  });
+  // A change of layout (a panel opens or closes, the window is resized) moves the rows: once
+  // the thread's size has stayed the same for a moment, the waiting card that showed before is
+  // brought back into view.
+  $effect(() => {
+    if (!scroller) return;
+    const sc = scroller;
+    let size = [sc.clientWidth, sc.clientHeight];
+    let shown = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => {
+      if (sc.clientWidth === size[0] && sc.clientHeight === size[1]) return;
+      size = [sc.clientWidth, sc.clientHeight];
+      if (timer === undefined) {
+        // Where it was held before the change: did it show?
+        const el = heldKey ? rowEl(heldKey) : null;
+        shown = !!el && heldShows(el);
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        const el = heldKey ? rowEl(heldKey) : null;
+        if (shown && el) {
+          reveal(el);
+          heldAt = offsetOf(el);
+          atBottom = atEnd();
+        }
+        countBelow();
+      }, LAYOUT_REST_MS);
+    });
+    ro.observe(sc);
+    return () => {
+      ro.disconnect();
+      clearTimeout(timer);
+    };
   });
   $effect(() => {
     void thread;
@@ -361,11 +431,11 @@
     {/if}
   </div>
 
-  <div class="bottom">
+  <div class="bottom" bind:this={bottomEl}>
     {#if below}
-      <button class="newer" onclick={() => toBottom(!streamingLast && !heldKey)}><Icon name="chevron-down" size={13} /><span class="num">{below}</span> new below</button>
+      <button class="newer" class:edge={pillAt.spot > 0} style:--lift="{pillAt.lift}px" bind:this={pill} onclick={() => toBottom(!streamingLast && !heldKey)}><Icon name="chevron-down" size={13} /><span class="num">{below}</span> new below</button>
     {:else if unseen}
-      <button class="newer" onclick={() => toBottom(!streamingLast)}><Icon name="chevron-down" size={13} />New activity</button>
+      <button class="newer" class:edge={pillAt.spot > 0} style:--lift="{pillAt.lift}px" bind:this={pill} onclick={() => toBottom(!streamingLast)}><Icon name="chevron-down" size={13} />New activity</button>
     {/if}
     <NextRow {thread} queued={waiting.size} />
     <Composer {thread} />
@@ -427,6 +497,8 @@
   .say { max-width: 66ch; }
   .say.commentary :global(.md) { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
   .card-gap { margin-top: 14px; }
-  .newer { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); width: fit-content; margin: 0 auto; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border-radius: var(--r-full); background: var(--pop); box-shadow: var(--pop-shadow); font-size: var(--t-sm); color: var(--ink-1); animation: rise-in var(--d-3) var(--spring); z-index: 2; }
+  .newer { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px + var(--lift, 0px)); width: fit-content; margin: 0 auto; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border-radius: var(--r-full); background: var(--pop); box-shadow: var(--pop-shadow); font-size: var(--t-sm); color: var(--ink-1); animation: rise-in var(--d-3) var(--spring); z-index: 2; }
+  /* Off a waiting card's buttons (see `pillSpot`): at the thread's edge, 12 px in. */
+  .newer.edge { left: auto; right: 12px; margin: 0; }
   .bottom { position: relative; padding: 0 20px 18px; }
 </style>
