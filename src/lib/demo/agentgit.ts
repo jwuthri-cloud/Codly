@@ -1,26 +1,38 @@
 // The browser demo's answer to `agent_git` and `agent_diff`: an agent's worktree as the demo
-// agent left it. Its changed files are the ones it wrote in its own conversation (its file
-// changes outside any task, from the event log), so an agent that changed nothing lists no file
-// and has an empty diff, and the diff has exactly the files the Git tab lists. Commits and
-// branches are derived from its name, so each agent shows different (but stable) ones.
+// agent left it. Its changed files are the ones it wrote there (from the event log): a 1:1
+// agent's are its file changes outside any task, and a worker's, while it is on a task, are its
+// changes for that task since Codly last committed them (the worktree it works in is the
+// task's). So an agent that changed nothing lists no file and has an empty diff, and the diff has
+// exactly the files the Git tab lists. Commits and branches are derived from its name, so each
+// agent shows different (but stable) ones.
 import type { Agent } from '../gen/Agent';
 import type { AgentGit } from '../gen/AgentGit';
 import type { EventRow } from '../gen/EventRow';
+import { unifiedDiff, type RepoFile } from './repo';
 
 const MIN = 60_000;
 
 /** A stable 7-letter hex name for the `n`th object of the agent's worktree. */
 const sha = (agent: Agent, n: number) => Array.from({ length: 7 }, (_, i) => '0123456789abcdef'[(agent.name.charCodeAt(i % agent.name.length) * (n + 3) + i * 7) % 16]).join('');
 
-/** The files the agent changed in its own worktree, in the order it first wrote them: its file
- *  changes outside any task (a task's work is in the task's worktree), relative to the worktree.
- *  A path outside it (another repository it was allowed to write) is not in its git status. */
+/** The rows of the log that count for the agent's worktree now: those after Codly last committed the task it is on. */
+function sinceCommit(agent: Agent, log: readonly EventRow[]): readonly EventRow[] {
+  if (!agent.task_id) return log;
+  for (let i = log.length - 1; i >= 0; i--) if (log[i].task_id === agent.task_id && log[i].kind.type === 'committed') return log.slice(i + 1);
+  return log;
+}
+
+/** The files the agent changed in its worktree, in the order it first wrote them, relative to
+ *  the worktree: a 1:1 agent's changes outside any task, a worker's for the task it is on (not
+ *  committed yet). A path outside it (another repository it was allowed to write) is not in
+ *  its git status. */
 export function ownFiles(agent: Agent, log: readonly EventRow[]): string[] {
   const root = agent.worktree?.replace(/\/+$/, '');
   if (!root) return [];
+  const task = agent.task_id ?? null;
   const out = new Set<string>();
-  for (const row of log) {
-    if (row.agent_id !== agent.id || row.task_id || row.kind.type !== 'files_changed') continue;
+  for (const row of sinceCommit(agent, log)) {
+    if (row.agent_id !== agent.id || row.task_id !== task || row.kind.type !== 'files_changed') continue;
     for (const p of row.kind.paths) {
       const rel = p.startsWith(`${root}/`) ? p.slice(root.length + 1) : p;
       if (!rel.startsWith('/') && !rel.split('/').includes('..')) out.add(rel);
@@ -53,20 +65,53 @@ export function mockAgentGit(agent: Agent | undefined, now: number, log: readonl
 /** How a line of a note starts in a file of this kind. */
 const noteMark = (path: string) => (/\.(md|txt)$/i.test(path) ? '' : /\.(py|sh|ya?ml|toml)$/i.test(path) ? '# ' : '// ');
 
-/** `agent_diff`: one small change per file the Git tab lists (`mockAgentGit`), nothing for an agent that changed nothing. */
-export function mockAgentDiff(agent: Agent | undefined, log: readonly EventRow[]): string {
+/**
+ * The lines of the agent's last Claude `Edit` (or `Write`) of `path`, from the call's input as
+ * Claude Code sends it (`old_string` and `new_string`, or `content`): the lines both strings
+ * start with stay, the rest is taken out and put in. Null when no call of it carries the text.
+ */
+function editLines(agent: Agent, log: readonly EventRow[], path: string): string[] | null {
+  const inputs = new Map<string, unknown>();
+  let last: unknown = null;
+  for (const row of log) {
+    if (row.agent_id !== agent.id) continue;
+    if (row.kind.type === 'tool_started' && row.kind.call_id) inputs.set(row.kind.call_id, row.kind.input);
+    if (row.kind.type === 'files_changed' && row.kind.call_id && row.kind.paths.includes(path)) last = inputs.get(row.kind.call_id) ?? null;
+  }
+  const input = last && typeof last === 'object' && !Array.isArray(last) ? (last as Record<string, unknown>) : null;
+  if (typeof input?.content === 'string') return input.content.replace(/\n$/, '').split('\n').map((l) => `+${l}`);
+  if (typeof input?.old_string !== 'string' || typeof input.new_string !== 'string') return null;
+  const before = input.old_string.split('\n');
+  const after = input.new_string.split('\n');
+  let same = 0;
+  while (same < before.length && same < after.length && before[same] === after[same]) same++;
+  return [...before.slice(0, same).map((l) => ` ${l}`), ...before.slice(same).map((l) => `-${l}`), ...after.slice(same).map((l) => `+${l}`)];
+}
+
+/**
+ * `agent_diff`: one change per file the Git tab lists (`mockAgentGit`), nothing for an agent
+ * that changed nothing. `known`: the files of the task the agent is on, as the task's diff has
+ * them; a file it edited with a call that carries the text shows that text (the change you saw
+ * on its card); any other file a short note.
+ */
+export function mockAgentDiff(agent: Agent | undefined, log: readonly EventRow[], known: readonly RepoFile[] = []): string {
   if (!agent?.worktree) return '';
   return ownFiles(agent, log)
     .map((path, i) => {
+      const file = known.find((f) => f.path === path);
+      if (file) return `${unifiedDiff(file)}\n`;
+      const edit = editLines(agent, log, path);
       const mark = noteMark(path);
+      const lines = edit ?? [`+${mark}${agent.name}: a change from its 1:1 conversation.`, `+${mark}Not committed yet.`];
+      const removed = lines.filter((l) => !l.startsWith('+')).length;
+      const added = lines.filter((l) => !l.startsWith('-')).length;
       return [
         `diff --git a/${path} b/${path}`,
         `index ${sha(agent, 2 * i)}..${sha(agent, 2 * i + 1)} 100644`,
         `--- a/${path}`,
         `+++ b/${path}`,
-        '@@ -1,0 +2,2 @@',
-        `+${mark}${agent.name}: a change from its 1:1 conversation.`,
-        `+${mark}Not committed yet.`,
+        edit ? `@@ -1,${removed} +1,${added} @@` : '@@ -1,0 +2,2 @@',
+        ...lines,
         '',
       ].join('\n');
     })

@@ -41,6 +41,8 @@ export type DemoStates = {
   searchFails: boolean;
   /** `?requests=two`: both scripted requests are there when the page loads. */
   twoRequests: boolean;
+  /** `?cards=3`: the request is a plan of four tasks, and three of its workers ask you within seconds of each other. */
+  threeCards: boolean;
 };
 
 export function demoStates(params: URLSearchParams): DemoStates {
@@ -64,6 +66,7 @@ export function demoStates(params: URLSearchParams): DemoStates {
     prOpen: params.get('pr') === 'open',
     searchFails: params.get('search') === 'fail',
     twoRequests: params.get('requests') === 'two',
+    threeCards: params.get('cards') === '3',
   };
 }
 
@@ -74,6 +77,6 @@ export function demoStates(params: URLSearchParams): DemoStates {
 export function opensRepo(s: DemoStates): boolean {
   return (
     s.mergeConflict || s.mergeChecks || s.previewRunning || s.checksOn || s.slowHelper || s.planMode || s.intake !== null || s.approval !== null || s.resumeAsk || s.background ||
-    s.turnFailed || s.prOpen || s.searchFails || s.twoRequests
+    s.turnFailed || s.prOpen || s.searchFails || s.twoRequests || s.threeCards
   );
 }

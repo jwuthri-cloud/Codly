@@ -4,14 +4,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { rulePrefix } from '../demo/approvalRules';
 import { ChecksDemo } from '../demo/checks';
-import { MockControls } from '../demo/controls';
+import claudeRs from '../../../crates/codly-core/src/adapters/claude.rs?raw';
+import mergeConflictRs from '../../../crates/codly-core/src/orchestrator/merge_conflict.rs?raw';
+import runsRs from '../../../crates/codly-core/src/orchestrator/runs.rs?raw';
+import schedulerRs from '../../../crates/codly-core/src/orchestrator/scheduler.rs?raw';
+import workspaceRs from '../../../crates/codly-core/src/orchestrator/workspace.rs?raw';
+import { MockControls, NOT_RUNNING } from '../demo/controls';
 import { demoDraft, hireFromManifest, reviewHire } from '../demo/hire';
 import { demoIntake } from '../demo/intake';
 import { MergeConflictDemo } from '../demo/mergeConflict';
 import { PullRequestDemo } from '../demo/pullrequest';
-import { REPO, Sim } from '../demo/sim';
+import { REPO, Sim, WITHOUT_FOLDER_CONFIG } from '../demo/sim';
 import { demoStates, opensRepo } from '../demo/states';
-import { AMEND, REQUEST, REQUEST_B, Story, type StoryOptions } from '../demo/story';
+import { AMEND, AUTOPLAY, MERGE_FAILURES, REQUEST, REQUEST_B, REQUEST_CARDS, Story, type StoryOptions } from '../demo/story';
+import { TASK_FILES } from '../demo/repo';
+import { mockAgentDiff, mockAgentGit } from '../demo/agentgit';
+import { outcomeBy } from '../util/outcome';
+import { parseDiff } from '../util/diff';
+import { startedWithoutFolderConfig } from '../state/session';
+import type { Workspace } from '../gen/Workspace';
 import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { EventKind } from '../gen/EventKind';
@@ -504,17 +515,17 @@ describe('the MCP servers of a Lead you stop', () => {
 
 describe('the demo states of docs/DEMO.md', () => {
   it('reads each parameter, and a value it does not know starts nothing', () => {
-    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on&turn=failed&pr=open&search=fail&requests=two'));
+    const all = demoStates(new URLSearchParams('trust=ask&merge=conflict&preview=running&checks=on&helper=slow&mode=plan&intake=pr&approval=question-long&hour=21.5&resume=ask&background=on&turn=failed&pr=open&search=fail&requests=two&cards=3'));
     expect(all).toEqual({
       trustAsk: true, mergeConflict: true, mergeChecks: false, previewRunning: true, checksOn: true, slowHelper: true, planMode: true, intake: 'pull_request', approval: 'question-long', hour: 21.5,
-      resumeAsk: true, background: true, turnFailed: true, prOpen: true, searchFails: true, twoRequests: true,
+      resumeAsk: true, background: true, turnFailed: true, prOpen: true, searchFails: true, twoRequests: true, threeCards: true,
     });
     expect(demoStates(new URLSearchParams('merge=checks'))).toMatchObject({ mergeConflict: false, mergeChecks: true });
     expect(demoStates(new URLSearchParams('intake=issue')).intake).toBe('issue');
-    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off&turn=ok&pr=closed&search=ok&requests=2'));
+    const none = demoStates(new URLSearchParams('merge=yes&preview=1&checks=off&helper=fast&mode=ask&intake=linear&speed=2&approval=all&hour=24&resume=always&background=off&turn=ok&pr=closed&search=ok&requests=2&cards=2'));
     expect(none).toEqual({
       trustAsk: false, mergeConflict: false, mergeChecks: false, previewRunning: false, checksOn: false, slowHelper: false, planMode: false, intake: null, approval: null, hour: null,
-      resumeAsk: false, background: false, turnFailed: false, prOpen: false, searchFails: false, twoRequests: false,
+      resumeAsk: false, background: false, turnFailed: false, prOpen: false, searchFails: false, twoRequests: false, threeCards: false,
     });
     // Midnight is an hour; a parameter with no value, or with words, is none.
     expect(['hour=0', 'hour=', 'hour=noon', 'hour=-1'].map((q) => demoStates(new URLSearchParams(q)).hour)).toEqual([0, null, null, null]);
@@ -527,7 +538,7 @@ describe('the demo states of docs/DEMO.md', () => {
     expect(opensRepo({ ...none, approval: 'file' })).toBe(true);
     expect(opensRepo({ ...none, resumeAsk: true })).toBe(true);
     expect(opensRepo({ ...none, background: true })).toBe(true);
-    for (const on of ['mergeChecks', 'turnFailed', 'prOpen', 'searchFails', 'twoRequests'] as const) expect(opensRepo({ ...none, [on]: true })).toBe(true);
+    for (const on of ['mergeChecks', 'turnFailed', 'prOpen', 'searchFails', 'twoRequests', 'threeCards'] as const) expect(opensRepo({ ...none, [on]: true })).toBe(true);
   });
 
   it('a helper shows its kind, its own calls and its report; `?checks=on` runs your checks for each task', async () => {
@@ -897,8 +908,11 @@ describe('“Stop” on a helper whose call waits for it', () => {
     await until(() => sim.taskByKey('t1')?.status === 'done');
     expect(events(sim, 'turn_started', ada)).toHaveLength(1);
     expect(events(sim, 'turn_completed', ada).map((t) => t.status)).toEqual(['completed']);
-    // A second Stop finds it over.
-    expect(new MockControls(sim).stopTask(ada, row.call_id)).toBeNull();
+    // A second Stop finds it over: refused in the core's words, and nothing changes.
+    const said = /pub const NOT_RUNNING: &str = "([^"]+)";/.exec(claudeRs)?.[1];
+    expect(NOT_RUNNING).toBe(said);
+    expect(() => new MockControls(sim).stopTask(ada, row.call_id)).toThrow(NOT_RUNNING);
+    expect(() => new MockControls(sim).stopTask(ada, 'tid-nobody')).toThrow(NOT_RUNNING);
     expect(events(sim, 'sub_agent', ada).map((s) => s.status)).toEqual(['running', 'stopped']);
   });
 });
@@ -944,5 +958,214 @@ describe('`?merge=checks`: a check of the finished plan fails on its merge', () 
     const merge = new MergeConflictDemo('checks', sim, story);
     expect(() => merge.refuse(plan.id)).toThrow('failed, so nothing was merged');
     expect(() => merge.resolve({ kind: 'plan', id: plan.id })).toThrow('this plan was cancelled, so no agent works on it any more; fix the checks yourself');
+  });
+});
+
+describe('a cancelled plan with finished work', () => {
+  it('is merged as the core merges it: refused for its check, fixed by you, and merged anyway when you choose so', async () => {
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => sim.taskByKey('t1')?.status === 'done' && planOf(sim, 'lead')?.status === 'running');
+    const plan = planOf(sim, 'lead')!;
+    // While it runs it is not merged, in the core's words (orchestrator/workspace.rs `merge_plan`).
+    expect(workspaceRs).toContain('bail!("the plan is still running; wait until it is done (or cancel it)")');
+    expect(() => story.mergePlan(plan.id)).toThrow('the plan is still running; wait until it is done (or cancel it)');
+    story.cancelPlan(plan.id);
+    const merge = new MergeConflictDemo('checks', sim, story);
+    expect(() => merge.refuse(plan.id)).toThrow('failed, so nothing was merged');
+    // "Have an agent fix it" is the button that says to fix the checks yourself (merge_conflict.rs `cancelled_refusal`).
+    expect(mergeConflictRs).toContain('format!("this plan was cancelled, so no agent works on it any more; {left} yourself")');
+    expect(() => merge.resolve({ kind: 'plan', id: plan.id })).toThrow('this plan was cancelled, so no agent works on it any more; fix the checks yourself');
+    // "Merge anyway" runs no check and merges what the plan finished, as the refusal says it can.
+    expect(() => merge.refuse(plan.id, true)).not.toThrow();
+    expect(story.mergePlan(plan.id)).toMatch(/^[0-9a-f]{40}$/);
+    expect(sim.plans.get(plan.id)).toMatchObject({ status: 'cancelled', merged_sha: expect.any(String) });
+  });
+
+  it('a plan that never ran has nothing to merge', async () => {
+    const { sim, story } = demo();
+    await until(() => planOf(sim, 'lead')?.status === 'awaiting_approval');
+    expect(() => story.mergePlan(planOf(sim, 'lead')!.id)).toThrow('the plan never ran, so there is nothing to merge');
+  });
+});
+
+describe('the fix of a check that fails on the merge', () => {
+  it('knows the line it changes in each check’s test file', () => {
+    for (const [check, f] of Object.entries(MERGE_FAILURES)) {
+      const file = TASK_FILES[f.files].find((x) => x.path === f.path);
+      expect(file?.after, check).toContain(f.from);
+    }
+  });
+
+  it('prints the failing test as a sentence, and its diff is the line it changed', async () => {
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => planOf(sim, 'lead')?.status === 'done');
+    const plan = planOf(sim, 'lead')!;
+    const merge = new MergeConflictDemo('checks', sim, story);
+    expect(() => merge.refuse(plan.id)).toThrow('`npx playwright test settings-theme` failed');
+    const fix = sim.tasks.get(merge.resolve({ kind: 'plan', id: plan.id }).resolving!)!;
+    await until(() => sim.tasks.get(fix.id)!.status === 'done');
+    const fixer = sim.tasks.get(fix.id)!.assignee!;
+    const failed = events(sim, 'tool_completed', fixer).filter((c) => !c.ok).pop()!;
+    expect(failed.output).toContain('  ✘  tests/e2e/settings-theme.spec.ts: settings · theme › dark mode persists after reload: expected “dark”, got “light”');
+    // Its card counts what it changed: one line in one file, not "+0 −0 in 0 files".
+    expect(parseDiff(story.taskDiff(fix.id)).map((f) => [f.path, f.added, f.removed])).toEqual([['tests/e2e/settings-theme.spec.ts', 1, 0]]);
+    expect(story.taskDiff(fix.id)).toContain("+    await page.waitForResponse((res) => res.url().endsWith('/api/settings'));");
+  });
+});
+
+describe('a task that waits on others', () => {
+  it('says why in the core’s words, and says it again when a task it waits on is cancelled', async () => {
+    expect(schedulerRs).toContain('format!("blocked: depends on {}", stuck.join(", "))');
+    expect(schedulerRs).toContain('format!("waiting: depends on {}"');
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => planOf(sim, 'lead')?.status === 'running');
+    const plan = planOf(sim, 'lead')!;
+    const t3 = () => task(sim, plan.id, 't3')!;
+    expect(t3()).toMatchObject({ status: 'pending', status_reason: 'waiting: depends on t1, t2' });
+    story.moveTask(task(sim, plan.id, 't1')!.id, 'cancelled');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(t3()).toMatchObject({ status: 'pending', status_reason: 'blocked: depends on t1 (cancelled)' });
+    const said = sim.log.filter((e) => e.task_id === t3().id && e.kind.type === 'decision' && e.kind.decision_type === 'schedule');
+    expect(said.map((e) => e.kind.type === 'decision' && e.kind.summary)).toEqual(['waiting: depends on t1, t2', 'blocked: depends on t1 (cancelled)']);
+  });
+});
+
+describe('a plan’s worker you took a task away from', () => {
+  it('takes the task again when you retry it, also when a 1:1 agent you hired has its name', async () => {
+    const { sim, story } = demo({ autoplay: true, story: { yourRequestFirst: true } });
+    const fay = story.hire('codex');
+    story.userChat('lead', REQUEST_B);
+    const t1 = () => task(sim, planOf(sim, 'lead')!.id, 't1');
+    await until(() => !!planOf(sim, 'lead') && !!t1()?.assignee && sim.actor(t1()!.assignee!).inTurn);
+    const worker = t1()!.assignee!;
+    expect(sim.agents.get(worker)!.name).toBe('Fay 2');
+    // Stop it, unassign it, Retry.
+    story.moveTask(t1()!.id, 'blocked');
+    await until(() => sim.agents.get(worker)!.status === 'idle' && !sim.actor(worker).inTurn);
+    story.assignTask(t1()!.id, null);
+    story.moveTask(t1()!.id, 'ready');
+    await until(() => t1()!.status === 'running');
+    expect(t1()!.assignee).toBe(worker);
+    expect([...sim.agents.values()].map((a) => a.name)).not.toContain('Fay 3');
+    expect(sim.agents.get(fay.id)).toMatchObject({ role: 'solo', task_id: null });
+  });
+});
+
+describe('a request that autoplay answered', () => {
+  it('says autoplay answered it, not you', async () => {
+    const { sim } = demo({ autoplay: true });
+    const install = () => requests(sim, (a) => isCommand(a, 'npm install -D @testing-library/react'))[0];
+    await until(() => install()?.status === 'approved');
+    expect(install().decided_by).toBe(AUTOPLAY);
+    expect(events(sim, 'approval_resolved').find((e) => e.approval_id === install().id)).toMatchObject({ status: 'approved', by: AUTOPLAY });
+    expect(outcomeBy(install().decided_by)).toBe('by autoplay');
+  });
+});
+
+describe('`?resume=ask`: a worker that waited for your Resume', () => {
+  it('starts its run with its session line, in its task’s worktree, before its turn', async () => {
+    const { sim, story } = demo({ story: { resumeAsk: true } });
+    const ada = named(sim, 'Ada')!;
+    expect(events(sim, 'session_started', ada.id)).toEqual([]);
+    story.resumeWork();
+    await until(() => events(sim, 'turn_started', ada.id).length === 1);
+    const session = sim.log.find((e) => e.agent_id === ada.id && e.kind.type === 'session_started')!;
+    expect(session.run_id).toBe(sim.agents.get(ada.id)!.run_id);
+    expect(session.kind).toMatchObject({ provider: 'claude', cwd: ada.worktree, session_id: ada.session_id });
+    expect(sim.log.indexOf(session)).toBeLessThan(sim.log.findIndex((e) => e.agent_id === ada.id && e.kind.type === 'turn_started'));
+  });
+});
+
+describe('a run that leaves out the repo’s own configuration', () => {
+  it('says so once, in the core’s words, for each Claude run that starts while you have not trusted it', async () => {
+    const fmt = /"(Started without this folder's \{\} configuration[^"]+)"/.exec(runsRs)?.[1];
+    expect(fmt?.replace('{}', 'Claude Code')).toBe(WITHOUT_FOLDER_CONFIG);
+    const sim = new Sim({ speed: 1, skipMs: 0, autoplay: false }, DEFAULT_SETTINGS);
+    let without = false;
+    sim.withoutFolderConfig = () => without;
+    const story = new Story(sim, { yourRequestFirst: true });
+    story.openWorkspace(REPO);
+    const before = story.hire('claude');
+    without = true;
+    const eli = story.hire('claude');
+    const kit = story.hire('codex');
+    const notices = (id: string) => sim.log.filter((e) => e.agent_id === id && e.kind.type === 'notice');
+    expect(notices(before.id)).toEqual([]);
+    expect(notices(kit.id)).toEqual([]);
+    expect(notices(eli.id).map((e) => [e.kind.type === 'notice' && e.kind.text, e.run_id])).toEqual([[WITHOUT_FOLDER_CONFIG, eli.run_id]]);
+    expect(startedWithoutFolderConfig(sim.log, eli.id, sim.agents.get(eli.id)!.run_id)).toBe(true);
+    // The agent that started before keeps its run as it was; its next run says it.
+    expect(startedWithoutFolderConfig(sim.log, before.id, before.run_id)).toBe(false);
+    story.interrupt(before.id, true);
+    sim.patchAgent(before.id, { permission_mode: 'accept_edits' });
+    story.userChat(`agent:${before.id}`, 'Add a line about the changelog.');
+    await until(() => notices(before.id).length === 1);
+    expect(startedWithoutFolderConfig(sim.log, before.id, sim.agents.get(before.id)!.run_id)).toBe(true);
+  });
+});
+
+describe('the demo’s agents', () => {
+  it('get the same ids on every page load of the same office, and ids of their own', () => {
+    const office = (id: string) => {
+      const sim = new Sim({ speed: 1, skipMs: 0, autoplay: false }, DEFAULT_SETTINGS);
+      sim.workspace = { id } as Workspace;
+      return ['Ada', 'Ada', 'Bo'].map((name) => sim.newAgent({ name, provider: 'claude', model: null, role: 'worker', color: 0, billing: 'subscription' }).id);
+    };
+    const first = office('ws-0198-7abc');
+    expect(office('ws-0198-7abc')).toEqual(first);
+    expect(new Set(first).size).toBe(3);
+    expect(office('ws-0199-1234').some((id) => first.includes(id))).toBe(false);
+  });
+});
+
+describe('the Git tab of a worker on a task', () => {
+  it('lists the files it wrote for the task, with their text, until Codly commits them', async () => {
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => !!named(sim, 'Bo') && events(sim, 'files_changed', named(sim, 'Bo')!.id).length === 2);
+    const bo = named(sim, 'Bo')!;
+    const files = mockAgentGit(bo, sim.now(), sim.log).files.map((f) => f.path);
+    expect(files).toEqual(['prisma/schema.prisma', 'prisma/migrations/20261025093000_add_theme/migration.sql']);
+    const t2 = sim.tasks.get(bo.task_id!)!;
+    const diff = parseDiff(mockAgentDiff(bo, sim.log, story.taskFiles(t2)));
+    expect(diff.map((f) => f.path)).toEqual(files);
+    expect(diff[0].added).toBeGreaterThan(0);
+    // Committed: nothing is left in its worktree.
+    await until(() => events(sim, 'committed', bo.id).length === 1);
+    expect(mockAgentGit(sim.agents.get(bo.id)!, sim.now(), sim.log).files).toEqual([]);
+  });
+});
+
+describe('`?cards=3`: three cards wait in one thread', () => {
+  it('three workers of one plan ask within seconds of each other, and the fourth finishes while all three wait', async () => {
+    const { sim, story } = demo({ autoplay: true, story: { threeCards: true } });
+    const plan = () => planOf(sim, 'lead');
+    const t = (key: string) => task(sim, plan()!.id, key)!;
+    await until(() => !!plan() && task(sim, plan()!.id, 't4')?.status === 'done');
+    expect(sim.chats.filter((c) => c.author === 'user').map((c) => c.text)).toEqual([REQUEST_CARDS]);
+    expect([...sim.tasks.values()].filter((x) => x.plan_id === plan()!.id).map((x) => [x.key, x.depends_on])).toEqual([['t1', []], ['t2', []], ['t3', []], ['t4', []]]);
+    // The three requests, one of each kind, all before the fourth task is done, and all three wait.
+    const asked = sim.log.filter((e) => e.kind.type === 'approval_requested');
+    const done = sim.log.findIndex((e) => e.kind.type === 'task_changed' && e.kind.task.id === t('t4').id && e.kind.task.status === 'done');
+    expect(asked.map((e) => (e.kind.type === 'approval_requested' ? e.kind.approval.subject.kind : null)).sort()).toEqual(['command', 'file_change', 'question']);
+    expect(asked.every((e) => sim.log.indexOf(e) < done)).toBe(true);
+    expect(asked[2].ts - asked[0].ts).toBeLessThan(5000);
+    const waiting = requests(sim, (a) => a.status === 'pending');
+    expect(waiting.map((a) => sim.tasks.get(a.task_id!)!.key).sort()).toEqual(['t1', 't2', 't3']);
+    // A worker that waits with a file written has a diff on its unfinished task.
+    expect(parseDiff(story.taskDiff(t('t1').id)).map((f) => f.path)).toEqual(['.lintstagedrc.json']);
+    expect(parseDiff(story.taskDiff(t('t2').id)).map((f) => f.path)).toEqual(['docs/env.md']);
+    // Autoplay ran the plan, and leaves the three cards to you.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(requests(sim, (a) => a.status === 'pending')).toHaveLength(3);
+    for (const a of waiting) story.resolveApproval(a.id, 'allow_once', null, a.subject.kind === 'question' ? { 'The licence says 2024. Which years should it name?': '2026' } : null);
+    await until(() => plan()!.status === 'done');
+    expect(parseDiff(story.taskDiff(t('t2').id)).map((f) => f.path)).toEqual(['docs/env.md', 'README.md']);
+    expect(story.taskDiff(t('t3').id)).toContain('+Copyright (c) 2026 Acme Inc.');
+  });
+
+  it('changes nothing in the script without the parameter', async () => {
+    const { sim } = demo();
+    await until(() => sim.chats.some((c) => c.author === 'user'));
+    expect(sim.chats.filter((c) => c.author === 'user').map((c) => c.text)).toEqual([REQUEST]);
   });
 });

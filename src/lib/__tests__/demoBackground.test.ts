@@ -3,7 +3,7 @@
 // change, as the app gets it. "Stop" on her sheet ends the command sooner. With `?background=on`
 // a 1:1 agent leaves a command and a helper at work: "Stop" ends the one it names.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MockControls } from '../demo/controls';
+import { MockControls, NOT_RUNNING } from '../demo/controls';
 import { REPO, Sim } from '../demo/sim';
 import { Story } from '../demo/story';
 import type { Agent } from '../gen/Agent';
@@ -86,8 +86,8 @@ describe('the demo: a command an agent leaves running in the background', () => 
     // Your act is on record, as in the app: it names what you stopped.
     const yours = () => sim.log.slice(before).filter((e) => e.kind.type === 'decision').map((e) => (e.kind.type === 'decision' ? e.kind.summary : ''));
     expect(yours()).toEqual([`asked Ada to stop what it left running in the background: ${COMMAND}`]);
-    // A second Stop finds it over: it answers, and nothing is said or recorded again.
-    expect(controls.stopTask(ada(sim)!.id, id)).toBeNull();
+    // A second Stop finds it over: refused as the core refuses it, and nothing is said or recorded again.
+    expect(() => controls.stopTask(ada(sim)!.id, id)).toThrow(NOT_RUNNING);
     expect(lists(sim)).toHaveLength(2);
     expect(yours()).toHaveLength(1);
     expect(() => controls.stopTask(ada(sim)!.id, ' ')).toThrow('which background command?');
@@ -192,8 +192,8 @@ describe('`?background=on`: a 1:1 Claude agent leaves a command and a helper at 
     expect(said(sim).pop()).toBe('The helper was stopped before it reported, so I do not have its answer.');
     expect(eli(sim).status).toBe('idle');
 
-    // A second Stop finds it over. The helper does not report later, and no third turn comes.
-    expect(controls.stopTask(eli(sim).id, helper.id)).toBeNull();
+    // A second Stop finds it over, and is refused. The helper does not report later, and no third turn comes.
+    expect(() => controls.stopTask(eli(sim).id, helper.id)).toThrow(NOT_RUNNING);
     await vi.advanceTimersByTimeAsync(240_000);
     expect(of(sim, 'sub_agent').map((s) => s.status)).toEqual(['running', 'stopped']);
     expect(of(sim, 'background_tasks')).toHaveLength(3);

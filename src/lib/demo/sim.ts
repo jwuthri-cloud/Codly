@@ -61,6 +61,10 @@ export function uid(prefix = ''): string {
   return `${prefix}${t.slice(0, 8)}-${t.slice(8, 12)}-7${r.slice(0, 3)}-${r.slice(3, 7)}-${r.slice(7)}${Math.random().toString(16).slice(2, 6)}`;
 }
 
+/** The core's notice for a Claude run that started without the folder's own configuration (orchestrator/runs.rs, with `provider.label()`). */
+export const WITHOUT_FOLDER_CONFIG =
+  "Started without this folder's Claude Code configuration (its settings, hooks and MCP servers): you have not trusted these files. See Settings → Safety.";
+
 export const sha = () => Array.from({ length: 40 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 
 const PRICES: Record<string, { in: number; out: number; cacheRead: number }> = {
@@ -117,6 +121,10 @@ export class Sim {
   afterStep: ((act: Actor) => Promise<void>) | null = null;
   /** Runs when an agent's turn was stopped, after its `turn_completed` (the story sets it). */
   turnStopped: ((act: Actor) => void) | null = null;
+  /** Runs when an agent's process starts again, for a turn (the story sets it: the CLI's session line). */
+  runStarts: ((act: Actor) => void) | null = null;
+  /** Whether a Claude run that starts now leaves out the folder's own CLI configuration: you opened the repo without it (mock.ts sets it). */
+  withoutFolderConfig: () => boolean = () => false;
   /** The offices of this machine that the demo plays, this one included (`sameMachineAs`). */
   machine: Sim[] = [this];
   private waiters = new Set<Waiter>();
@@ -184,10 +192,12 @@ export class Sim {
 
   /**
    * The agent's process starts: a run of its own, as in the core. Like Claude Code at the start
-   * of a session, it says again where each of its MCP servers stands (here: as it last stood).
+   * of a session, it says which session it is, then where each of its MCP servers stands (here:
+   * as it last stood).
    */
   startRun(agentId: string) {
     const a = this.patchAgent(agentId, { run_id: uid('r-') });
+    this.runStarts?.(this.actor(agentId));
     for (const [key, row] of [...this.session]) if (key.startsWith(`${agentId}:mcp:`)) this.emit(row.kind, { agent: a.id, task: a.task_id, run: a.run_id });
   }
 
@@ -245,8 +255,13 @@ export class Sim {
   // ───────────── entities ─────────────
 
   putAgent(a: Agent) {
+    const before = this.agents.get(a.id)?.run_id ?? null;
     this.agents.set(a.id, a);
     this.emit({ type: 'agent_changed', agent: a }, { agent: a.id, task: a.task_id, run: a.run_id });
+    // Like the core (orchestrator/runs.rs), once per run: a Claude run that leaves out the folder's own configuration says so.
+    if (a.run_id && a.run_id !== before && a.provider === 'claude' && this.withoutFolderConfig()) {
+      this.emit({ type: 'notice', text: WITHOUT_FOLDER_CONFIG }, { agent: a.id, task: a.task_id, run: a.run_id });
+    }
     return a;
   }
 
@@ -374,10 +389,31 @@ export class Sim {
     return null;
   }
 
+  /** By name: how many agents of that name this office made so far (`agentId`). */
+  private named = new Map<string, number>();
+
+  /**
+   * A new agent's id: the same on every page load for the same office, name and count of that
+   * name, as a real office keeps its agents. What the office keeps of an agent by its id (its
+   * look, in the browser's storage) is then its own again after a reload.
+   */
+  private agentId(name: string): string {
+    const n = (this.named.get(name) ?? 0) + 1;
+    this.named.set(name, n);
+    const key = `${this.workspace?.id ?? ''}\u0000${name}\u0000${n}`;
+    // Two FNV-1a hashes of the key (the second of it read backwards): 64 bits, as 16 hex letters.
+    const fnv = (s: string) => {
+      let h = 2166136261;
+      for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+      return (h >>> 0).toString(16).padStart(8, '0');
+    };
+    return `a-${fnv(key)}${fnv([...key].reverse().join(''))}`;
+  }
+
   newAgent(o: { name: string; provider: Provider; model: string | null; role: Role; color: number; billing: Billing; taskId?: string | null; worktree?: string | null; status?: AgentStatus; thread?: string }): Agent {
     const now = this.now();
     return {
-      id: uid('a-'),
+      id: this.agentId(o.name),
       thread: o.role === 'lead' ? (o.thread ?? 'lead') : null,
       account: this.signIns.pick(o.provider, o.role, this.settings, this.clis, [...this.agents.values()], now),
       name: o.name,

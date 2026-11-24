@@ -19,6 +19,7 @@ import type { Snapshot } from '../gen/Snapshot';
 import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
 import { HELD, REQUEST, REQUEST_B, REQUEST_B_THREAD } from '../demo/story';
+import { REPO } from '../demo/sim';
 import { MockTransport } from '../mock';
 import { intakeUi } from '../state/intake.svelte';
 import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
@@ -458,6 +459,74 @@ describe('the demo transport', () => {
   it('`?search=fail`: a code search fails with a reason; without it, it answers', async () => {
     await expect(call(open('?search=fail'), 'search_code', { query: 'theme' })).rejects.toThrow('the code index could not be read');
     expect((await call<{ query: string }>(open('?ws=1'), 'search_code', { query: 'theme' })).query).toBe('theme');
+  });
+
+  it('`?merge=checks`: the merge is refused for a check that fails on the merge result, and "merge anyway" merges', async () => {
+    const t = open('?merge=checks&autoplay=1');
+    const plan = await finished(t);
+    expect((await call<MergeState>(t, 'merge_state', { source: { kind: 'plan', id: plan.id } })).behind).toBe(1);
+    await expect(call(t, 'merge_plan', { planId: plan.id, into: null, unchecked: false })).rejects.toThrow('`npx playwright test settings-theme` failed, so nothing was merged');
+    expect((await call<RepoSync>(t, 'repo_sync')).ahead).toBe(0);
+    expect(await call<string>(t, 'merge_plan', { planId: plan.id, into: null, unchecked: true })).toMatch(/^[0-9a-f]{40}$/);
+    // Without the parameter nothing fails on the merge.
+    const plain = open('?autoplay=1&ws=1');
+    expect(await call<string>(plain, 'merge_plan', { planId: (await finished(plain)).id, into: null, unchecked: false })).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it('`?turn=failed`: the first turn of the 1:1 agent you hire fails; without it, it does not', async () => {
+    /** Hire a Codex agent (it only answers), send it a message, and read how its first turn ended. */
+    const firstTurn = async (search: string) => {
+      const t = open(search);
+      const manifest = { ...reviewHire(demoDraft('Keep the docs up to date')).manifest, provider: 'codex' };
+      const agent = await call<Agent>(t, 'hire_from_manifest', { manifest, confirmShell: false });
+      await call(t, 'send_chat', { thread: `agent:${agent.id}`, text: 'Are you free?' });
+      let ended: EventRow | undefined;
+      for (let i = 0; i < 30 && !ended; i++) {
+        await vi.advanceTimersByTimeAsync(1000);
+        ended = (await snapshot(t)).events.find((e) => e.agent_id === agent.id && e.kind.type === 'turn_completed');
+      }
+      return ended?.kind.type === 'turn_completed' ? ended.kind.status : null;
+    };
+    expect(await firstTurn('?turn=failed')).toBe('failed');
+    expect(await firstTurn('?intake=issue')).toBe('completed');
+  });
+
+  it('merging a 1:1 agent’s branch with no commit of its own brings no commit onto main', async () => {
+    const t = open('?intake=issue');
+    const agent = await call<Agent>(t, 'hire_from_manifest', { manifest: reviewHire(demoDraft('Keep the docs up to date')).manifest, confirmShell: false });
+    expect(await call<string>(t, 'merge_agent', { agentId: agent.id })).toMatch(/^[0-9a-f]{10}$/);
+    expect((await call<RepoSync>(t, 'repo_sync')).ahead).toBe(0);
+  });
+
+  it('`?cards=3&autoplay=1`: three cards of one plan wait, and its fourth task finishes meanwhile', async () => {
+    const t = open('?cards=3&autoplay=1');
+    let s = await snapshot(t);
+    for (let i = 0; i < 60 && !s.tasks.some((x) => x.plan_id && x.key === 't4' && x.status === 'done'); i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      s = await snapshot(t);
+    }
+    const plan = s.plans.find((p) => p.thread === 'lead')!;
+    expect(plan.summary).toBe('Release checklist');
+    expect(s.approvals.filter((a) => a.status === 'pending').map((a) => s.tasks.find((x) => x.id === a.task_id)?.key).sort()).toEqual(['t1', 't2', 't3']);
+  });
+
+  it('`?trust=ask`: after "Open without…", a Claude agent’s run says it started without the repo’s own configuration', async () => {
+    const t = open('?trust=ask');
+    const asked = await call<{ state: string }>(t, 'workspace_trust', { set: null });
+    expect(asked.state).toBe('ask');
+    expect((await call<{ state: string }>(t, 'workspace_trust', { set: { trust: null } })).state).toBe('without');
+    await call(t, 'open_workspace', { repoPath: REPO });
+    let notice: EventRow | undefined;
+    for (let i = 0; i < 10 && !notice; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      notice = (await snapshot(t)).events.find((e) => e.kind.type === 'notice' && e.kind.text.startsWith('Started without this folder'));
+    }
+    const lead = (await snapshot(t)).agents.find((a) => a.role === 'lead')!;
+    expect(notice).toMatchObject({ agent_id: lead.id, run_id: lead.run_id });
+    // Trusted (the plain demo): no run says so.
+    const plain = open('?ws=1');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((await snapshot(plain)).events.some((e) => e.kind.type === 'notice')).toBe(false);
   });
 
   // The last test of this file: the demo's neighbourhood is one for the page, and an office that closed stays closed.

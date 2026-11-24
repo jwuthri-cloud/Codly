@@ -18,7 +18,7 @@ Parameters go in the URL and can be combined. They are read once, when the page 
 | `?ws=1` | Opens `acme/web` at once. |
 | `?speed=2` | Plays the script faster (`0.5` is slower). |
 | `?skip=90` | Starts 90 seconds into the script. Any value, `0` included, also opens the repo. |
-| `?autoplay=1` | Runs each plan and allows each request by itself. |
+| `?autoplay=1` | Runs each plan and allows each request by itself. A request it allowed says "by autoplay", not "by you". |
 | `?onboard=1` | A machine with no agent CLI installed, to see the first-run quest. |
 
 `?autoplay=1&skip=180` is the short way to both plans finished.
@@ -29,9 +29,9 @@ Each of these opens `acme/web` at once, except `?trust=ask` and `?hour=`.
 
 | Parameter | What you get | Where to look |
 | --- | --- | --- |
-| `?trust=ask` | The repo has CLI settings of its own, and you were never asked about them. | Open `acme/web`: the trust dialog. |
+| `?trust=ask` | The repo has CLI settings of its own, and you were never asked about them. After "Open without…", each Claude Code agent that starts from then on says that its run started without them. | Open `acme/web`: the trust dialog; then the Lead's sheet, under "MCP servers". |
 | `?merge=conflict` | Your branch changed a file that each finished plan changed too. Merge is refused. "Have an agent resolve it" gives the plan one more task; when it is done, the plan merges. | The plan's finished card: `?merge=conflict&autoplay=1&skip=180` |
-| `?merge=checks` | Your branch moved since each plan started, and one check of a finished plan fails on the merge result. Merge is refused and says which check; "Have an agent fix it" gives the plan one more task (`fix-checks`); when it is done, the plan merges. Cancel a plan with finished work, then try to merge it: the refusal says to fix the checks yourself. | The plan's finished card: `?merge=checks&autoplay=1&skip=180` |
+| `?merge=checks` | Your branch moved since each plan started, and one check of a finished plan fails on the merge result. Merge is refused and says which check, with the failing test; "Have an agent fix it" gives the plan one more task (`fix-checks`) that changes one line of that test; when it is done, the plan merges. "Merge anyway" merges without the check. Cancel a plan with finished work, then: Merge is refused for its check as well, "Have an agent fix it" says to fix the checks yourself (no agent works on a cancelled plan), and "Merge anyway" merges the work it finished. | The plan's finished card: `?merge=checks&autoplay=1&skip=180` |
 | `?pr=open` | Each finished plan has an open pull request whose checks are not read yet. Refresh finds them running, then passed. | The plan's finished card: `?pr=open&autoplay=1&skip=180` |
 | `?turn=failed` | The first turn of the first 1:1 agent you talk to fails: the API is overloaded. The thread shows the trouble row with "Send again", and sending again works. | Hire a 1:1 agent and send it a message. |
 | `?requests=two` | Both scripted requests (the dark-mode toggle and the sign-in lockout) are there when the page loads, not 1.6 and 24 seconds later. The demo repo keeps its id in this browser, so after a reload Codly opens on the request you left. | Open the lockout request, then reload the page. |
@@ -43,6 +43,7 @@ Each of these opens `acme/web` at once, except `?trust=ask` and `?hour=`.
 | `?mode=plan` | Eli, a 1:1 Claude agent in the mode "plan first", was asked for a small change and shows a plan. Send it back with a note and it comes again; accept it and Eli asks before the edit. | Eli's conversation; the mode switch is in Eli's sheet, under Controls. |
 | `?resume=ask` | Codly "closed" while the first plan ran: two of its tasks were in work and wait, each with its worker (offline) and its branch, and nothing starts. The bar at the top asks. "Resume work" starts them, with the same workers and the same attempt; "Not now" keeps them waiting, with the button; cancel a waiting task and the bar counts one less. (`billing-api` plays its own script: it is not held.) | The bar at the top of the window, and the two tasks on the board. |
 | `?background=on` | Eli, a 1:1 Claude agent, ended its turn with two things at work in the background: a dev server and a helper. "Stop" ends the one you press it on. After the helper's stop Eli says so in a short turn of its own, as Claude Code does; after the command's stop no turn follows. Left alone, the helper reports after about three minutes. | Eli's sheet, under "In the background". |
+| `?cards=3` | The one request is a release checklist: a plan of four tasks that wait on nothing. Three of its workers ask you within a few seconds of each other (Max a command, Noa a change to `README.md`, Rio a question), and Sam finishes the fourth task while the three cards wait. Max and Noa have written a file before they ask, so their unfinished tasks have a diff. With `?autoplay=1` the plan runs by itself, and the three cards still wait for you. | The request's thread: `?cards=3&autoplay=1` |
 | `?hour=13` | The demo's clock says 13:00 when the page loads, and goes on from there (from `0`, below `24`; `21.5` is 21:30). The office and the map are lit for the hour of the clock, so this sets their light; every time on screen follows. It opens no repo. | The office and the map: `?hour=13&ws=1` with the app's dark theme (a bright office under a dark app), `?hour=23&ws=1` with its light theme. |
 
 ### A kind of request (`?approval=`)

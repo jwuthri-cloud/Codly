@@ -44,6 +44,35 @@ describe('the demo agent’s worktree', () => {
     expect(files.every((f) => f.added === 2 && f.removed === 0)).toBe(true);
   });
 
+  it('a worker on a task lists what it wrote for that task since Codly last committed it, not its other work', () => {
+    const fay = { id: 'w1', name: 'Fay', role: 'worker', task_id: 't2', worktree: '/demo/.codly/worktrees/t2-fay' } as Agent;
+    const log = [
+      wrote('w1', 't1', 'src/old.ts'),
+      wrote('w1', null, 'notes.md'),
+      wrote('w1', 't2', 'src/first.ts'),
+      row('w1', 't2', { type: 'committed', sha: 'abc', files: ['src/first.ts'], message: 't2: first' }),
+      wrote('w1', 't2', 'src/second.ts', 'src/third.ts'),
+      wrote('w2', 't2', 'src/someone-else.ts'),
+    ];
+    expect(mockAgentGit(fay, 0, log).files.map((f) => f.path)).toEqual(['src/second.ts', 'src/third.ts']);
+    // The files the task knows show their text; the diff has exactly the files the Git tab lists.
+    const known = [{ path: 'src/second.ts', before: 'a\n', after: 'a\nb\n' }];
+    const files = parseDiff(mockAgentDiff(fay, log, known));
+    expect(files.map((f) => [f.path, f.added, f.removed])).toEqual([['src/second.ts', 1, 0], ['src/third.ts', 2, 0]]);
+    // Off its task, it is back to its own changes outside any task.
+    expect(ownFiles({ ...fay, task_id: null }, log)).toEqual(['notes.md']);
+  });
+
+  it('a 1:1 agent’s edit shows the lines its call wrote, the ones its card showed', () => {
+    const edit = (call: string, input: unknown) => row('s1', null, { type: 'tool_started', call_id: call, name: 'Edit', activity: 'edit', target: { path: 'README.md', paths: [], command: null, query: null, url: null, server: null, tool: null }, input: input as never, confidence: 'observed' });
+    const log = [
+      edit('c1', { file_path: 'README.md', old_string: '- npm test', new_string: '- npm test\n\n## Notes\n\n- Theming' }),
+      row('s1', null, { type: 'files_changed', call_id: 'c1', paths: ['README.md'], source: 'tool_input' }),
+    ];
+    const [file] = parseDiff(mockAgentDiff(eli, log));
+    expect(file.hunks[0].lines.map((l) => [l.kind, l.text])).toEqual([['ctx', '- npm test'], ['add', ''], ['add', '## Notes'], ['add', ''], ['add', '- Theming']]);
+  });
+
   it('an agent with no worktree has neither', () => {
     const none = { ...eli, worktree: null } as Agent;
     expect(mockAgentGit(none, 0, [wrote('s1', null, 'a.ts')]).worktree).toBeNull();
