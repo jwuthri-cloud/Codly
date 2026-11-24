@@ -510,7 +510,7 @@
       <Section id="subagents" title="Helpers" summary={helpersSummary(subs)}>
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
-            {@const halt = canStopHelpers ? helperStop(s, subsRunning, background, clean(agent.name), turnRuns(agent)) : null}
+            {@const halt = canStopHelpers ? helperStop(s, subsRunning, background, clean(agent.name), turnRuns(agent, live)) : null}
             {@const halting = helperStopping(s.callId)}
             <li>
               <div class="s-row">

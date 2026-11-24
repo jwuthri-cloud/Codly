@@ -67,7 +67,7 @@
             <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
             <span class="meta num">{kind ? `${kind} · ` : ''}{w.startedAt == null ? 'running' : timer(ui.now - w.startedAt)}</span>
             {#if canStop(w)}
-              <button class="btn sm ghost" disabled={stopping(w)} aria-label={stopLabel(w, stopping(w))} data-tip={stopHint(w, agent.name, turnRuns(agent))} data-tip-place="below" onclick={() => stop(w)}><Icon name="stop" size={12} />{stopping(w) ? STOP_BUSY : 'Stop'}</button>
+              <button class="btn sm ghost" disabled={stopping(w)} aria-label={stopLabel(w, stopping(w))} data-tip={stopHint(w, agent.name, turnRuns(agent, store.live[agent.id]))} data-tip-place="below" onclick={() => stop(w)}><Icon name="stop" size={12} />{stopping(w) ? STOP_BUSY : 'Stop'}</button>
             {/if}
           </li>
         {:else}

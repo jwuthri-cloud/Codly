@@ -1221,7 +1221,8 @@ class CodlyStore {
    * What the agent is doing right now: its own open tool call first, then the agent's own
    * activity. A call of one of its helpers (`seg.parent`) is never the agent's own: while a turn
    * of the agent runs and only such calls are open, it waits for its helper (`seg` null: the
-   * call is not the agent's); between turns it rests (narrate.ts `turnRuns`: the same rule).
+   * call is not the agent's); between turns it rests, also while a helper's calls set its state
+   * "working" or "thinking" (narrate.ts `turnRuns`: the same rule).
    */
   now(agentId: string): { activity: ActivityKind; label: string; since: number; seg: Seg | null } | null {
     const a = this.agentMap.get(agentId);
@@ -1246,11 +1247,12 @@ class CodlyStore {
     if (!a) return null;
     for (const s of this.streams.values())
       if (s.agentId === agentId) return { activity: s.kind === 'text' ? 'replying' : 'thinking', label: '', since: s.ts, seg: null };
-    const turnRuns = a.status === 'working' || a.status === 'thinking' || a.status === 'starting';
+    const turnRuns = l?.turn ? l.turn.endedAt == null : a.status === 'working' || a.status === 'thinking' || a.status === 'starting';
     if (helping && turnRuns) {
       const parent = helping.parent;
       return { activity: 'delegate', label: l?.subagents.find((h) => h.callId === parent)?.description ?? '', since: helping.start, seg: null };
     }
+    if (!turnRuns && a.status !== 'starting') return null;
     if (a.activity && a.activity !== 'idle' && a.status !== 'idle' && a.status !== 'done' && a.status !== 'offline')
       return { activity: a.activity, label: a.activity_label ?? '', since: l?.statusSince ?? a.updated_at, seg: null };
     if (a.status === 'thinking' || a.status === 'starting') return { activity: 'thinking', label: '', since: l?.statusSince ?? a.updated_at, seg: null };

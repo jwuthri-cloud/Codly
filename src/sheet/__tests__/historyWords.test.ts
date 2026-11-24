@@ -360,8 +360,9 @@ describe('History is one row per act', () => {
   });
 
   it('a reconnect of a connected server is a restart, and says so', () => {
-    const reconnect = (server: string) => row({ type: 'decision', id: `d${n}`, decision_type: 'control', method: 'human', summary: `asked Lead to reconnect its MCP server ${server}`, detail: null });
-    const server = (name: string, status: string) => row({ type: 'mcp_server', name, status, error: null });
+    // The core writes the record of a reconnect with no run id (controls.rs `control_decision`).
+    const reconnect = (server: string): EventRow => ({ ...row({ type: 'decision', id: `d${n}`, decision_type: 'control', method: 'human', summary: `asked Lead to reconnect its MCP server ${server}`, detail: null }), run_id: null });
+    const server = (name: string, status: string, run = 'r1'): EventRow => ({ ...row({ type: 'mcp_server', name, status, error: null }), run_id: run });
     const restart = reconnect('docs');
     const retry = reconnect('linear');
     const facts = historyFacts([server('docs', 'connected'), server('linear', 'failed'), restart, retry], 'eli', 'claude');
@@ -369,8 +370,11 @@ describe('History is one row per act', () => {
     expect(restartLine((restart.kind as Extract<EventKind, { type: 'decision' }>).summary)).toBe('You restarted docs for Lead’s run');
     expect(reconnectAsked('asked Eli 2 to reconnect its MCP server my server')).toEqual({ agent: 'Eli 2', server: 'my server' });
     expect(restartLine('you turned docs off for Lead’s run')).toBeNull();
-    // A server of another run is not this one.
-    expect([...historyFacts([server('docs', 'connected'), { ...reconnect('docs'), run_id: 'r2' }], 'eli', 'claude').restarts]).toEqual([]);
+    // A server of an earlier run is gone with that run: a newer run that lists other servers does not have it.
+    expect([...historyFacts([server('docs', 'connected'), server('linear', 'connected', 'r2'), reconnect('docs')], 'eli', 'claude').restarts]).toEqual([]);
+    // Its status in the newer run is what counts.
+    const again = reconnect('docs');
+    expect([...historyFacts([server('docs', 'failed'), server('docs', 'connected', 'r2'), again], 'eli', 'claude').restarts]).toEqual([again.id]);
   });
 
   // Package claude-part5-truth words the record of the switch for the folder: History shows it as a sentence.

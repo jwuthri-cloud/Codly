@@ -168,11 +168,16 @@ function testCounts(s: Seg): string | null {
 const plainOf = (parts: Part[]) => parts.map((p) => (p.code ? `\`${p.t}\`` : p.t)).join('');
 
 /**
- * Whether a turn of the agent runs, by the core's word for its state (the store's `now` reads it
- * the same way). Between turns the agent rests, whatever its helpers still do.
+ * Whether a turn of the agent runs: by the store's record of its turn when it has one (as
+ * queue.ts `busy` reads it), else by the core's word for its state. The state alone is not
+ * enough: a helper's tool calls set its agent "working" and "thinking" between turns too (the
+ * Claude adapter sets the state for every tool call, a helper's too). The store's `now` reads it
+ * the same way. Between turns the agent rests, whatever its helpers still do.
  */
-export const turnRuns = (a: Pick<Agent, 'status'>): boolean =>
-  a.status === 'working' || a.status === 'thinking' || a.status === 'starting' || a.status === 'waiting_approval';
+export const turnRuns = (a: Pick<Agent, 'status'>, live: Pick<AgentLive, 'turn'> | null | undefined): boolean =>
+  live?.turn
+    ? live.turn.endedAt == null
+    : a.status === 'working' || a.status === 'thinking' || a.status === 'starting' || a.status === 'waiting_approval';
 
 /** The newest open tool call of `live` that `mine` accepts. */
 function newestOpen(live: AgentLive | null | undefined, mine: (s: Seg) => boolean): Seg | null {
@@ -248,15 +253,15 @@ export function narrateFrom(i: NarrationInput): Narration {
   if (i.streaming === 'reasoning') return out([txt('Thinking')], 'live');
 
   // 4b · Its turn runs and only its helpers' calls are open: it waits for its helper.
-  const helping = turnRuns(a) ? newestOpen(live, (s) => s.parent != null) : null;
+  const runs = turnRuns(a, live);
+  const helping = runs ? newestOpen(live, (s) => s.parent != null) : null;
   if (helping) {
     const h = live?.subagents.find((s) => s.callId === helping.parent);
     return out(h?.description ? [txt('Waiting for its helper '), txt(`“${oneLine(h.description, 48)}”`)] : [txt('Waiting for its helper')], 'live', helping.start);
   }
 
-  const busy = a.status === 'working' || a.status === 'thinking' || a.status === 'starting';
-  if (busy) {
-    if (a.status === 'starting') return out([txt('Starting up')], 'live');
+  if (a.status === 'starting') return out([txt('Starting up')], 'live');
+  if (runs && (a.status === 'working' || a.status === 'thinking')) {
     const last = live?.segments[live.segments.length - 1];
     const counts = last && last.activity === 'test' && last.end != null ? testCounts(last) : null;
     return out([txt(counts ? `Thinking · last run: ${counts}` : 'Thinking')], 'live');

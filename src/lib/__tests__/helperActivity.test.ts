@@ -42,6 +42,16 @@ describe('what an agent does now while its helper works', () => {
     expect(store.now('e1')).toBeNull();
   });
 
+  it('after its turn ended, it rests also while the helper’s calls set it “working” or “thinking”', () => {
+    // The Claude adapter sets the agent's state for every tool call, a helper's too.
+    load('working');
+    apply(...helperAtWork(), ev(14, { type: 'turn_completed', status: 'completed', result_text: null, duration_ms: 4 }));
+    expect(store.now('e1')).toBeNull();
+    apply(ev(15, { type: 'status_changed', status: 'thinking' }));
+    expect(store.agentMap.get('e1')?.status).toBe('thinking');
+    expect(store.now('e1')).toBeNull();
+  });
+
   it('while its turn runs and only the helper’s call is open, it waits for its helper', () => {
     load('working');
     apply(...helperAtWork());

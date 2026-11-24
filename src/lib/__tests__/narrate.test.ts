@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { Task } from '../gen/Task';
-import { narrateFrom, type NarrationInput } from '../narrate';
+import { narrateFrom, turnRuns, type NarrationInput } from '../narrate';
+import { stopHint } from '../state/session';
 import type { AgentLive, Seg, SubAgent } from '../state/store.svelte';
 import { repoMap } from '../demo/repomap';
 import { emptyCareer } from '../util/career';
@@ -155,6 +156,28 @@ describe('an agent whose helper works', () => {
     const n = narrateFrom(input({ agent: solo('working'), task: null, live: live([glob], { subagents: [helper('h1', 'Look at the docs')] }) }));
     expect(n.text).toBe('Waiting for its helper “Look at the docs”');
     expect(n.tone).toBe('live');
+  });
+
+  // A helper's tool calls set its agent "working" (a call starts) and "thinking" (a result
+  // comes) between turns too: the store's record of the turn says whether one runs.
+  const ended = { startedAt: T0 - 9000, input: 'Look at the docs in the background', endedAt: T0 - 1000, status: 'completed' };
+  for (const status of ['working', 'thinking'] as const) {
+    it(`rests once its turn ended, though a helper’s call set it “${status}”`, () => {
+      const n = narrateFrom(input({ agent: solo(status), task: null, live: live([glob], { turn: ended, subagents: [helper('h1', 'Look at the docs')] }) }));
+      expect(n.text).toBe('Ready to chat · 1 helper at work in the background');
+      expect(n.tone).toBe('idle');
+      expect(turnRuns(solo(status), { turn: ended })).toBe(false);
+      // The Stop of that helper says what Claude Code does with no turn running (part 5, section 11).
+      const w = { id: 'h1', kind: 'helper', description: 'Look at the docs', status: 'running', runId: 'r1', startedAt: T0, endedAt: null };
+      expect(stopHint(w, 'Eli', turnRuns(solo(status), { turn: ended }))).toBe('Stops this helper. Eli is told and goes on with a turn of its own.');
+    });
+  }
+
+  it('waits for its helper while the turn it records runs', () => {
+    const running = { ...ended, endedAt: null, status: null };
+    const n = narrateFrom(input({ agent: solo('working'), task: null, live: live([glob], { turn: running, subagents: [helper('h1', 'Look at the docs')] }) }));
+    expect(n.text).toBe('Waiting for its helper “Look at the docs”');
+    expect(turnRuns(solo('working'), { turn: running })).toBe(true);
   });
 
   it('says its own call while its turn runs, not its helper’s newer one', () => {

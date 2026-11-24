@@ -69,8 +69,13 @@ export function historyFacts(events: readonly EventRow[], agentId: string, provi
   const facts: HistoryFacts = { planCalls: new Set(), said: new Set(), helpers: new Map(), helperOf: new Map(), backgroundBefore: new Map(), ends: new Map(), starts: new Map(), restarts: new Set() };
   /** The ids of the last list of background work of each run. */
   const listed = new Map<string | null, ReadonlySet<string>>();
-  /** Where each server of each run stood last ("<run> <server>" → its status). */
+  /**
+   * Where each server stood last, by its name, in the run of the newest `mcp_server` row (`run`):
+   * the servers of an earlier run are gone with its process. The core writes the record of a
+   * reconnect with no run id, so it is matched by the server's name alone.
+   */
   const servers = new Map<string, string>();
+  let run: string | null = null;
   for (const e of events) {
     if (e.agent_id !== agentId) continue;
     const k = e.kind;
@@ -78,10 +83,13 @@ export function historyFacts(events: readonly EventRow[], agentId: string, provi
       facts.starts.set(k.call_id, k);
       if (isPlanCall(k.name, provider)) facts.planCalls.add(k.call_id);
     } else if (k.type === 'tool_completed') facts.ends.set(k.call_id, k);
-    else if (k.type === 'mcp_server') servers.set(`${e.run_id ?? ''} ${k.name}`, k.status);
-    else if (k.type === 'decision') {
+    else if (k.type === 'mcp_server') {
+      if (e.run_id !== run) servers.clear();
+      run = e.run_id;
+      servers.set(k.name, k.status);
+    } else if (k.type === 'decision') {
       const asked = reconnectAsked(k.summary);
-      if (asked && servers.get(`${e.run_id ?? ''} ${asked.server}`) === 'connected') facts.restarts.add(e.id);
+      if (asked && servers.get(asked.server) === 'connected') facts.restarts.add(e.id);
     } else if (k.type === 'message') facts.said.add(k.text);
     else if (k.type === 'sub_agent') facts.helpers.set(k.call_id, k.status);
     else if (k.type === 'sub_agent_progress' && k.tool_call_id != null) facts.helperOf.set(k.tool_call_id, k.call_id);

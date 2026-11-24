@@ -231,18 +231,30 @@ export const mcpButtonLabel = (shown: string, server: string): string => `${show
 /**
  * Turn an MCP server of the agent's live run off or on. Returns whether Claude Code took
  * the request; the server's next `mcp_server` event says where it stands. A refusal (Codly's
- * own server, a server that does not start again) is said in a toast, with the reason.
+ * own server, a server that does not start again) is said in a toast, with the reason. Only
+ * an answer of Claude Code to a "Turn on" (`cliAnswer`) saved the switch on.
  */
 export async function switchMcp(agentId: string, server: string, enabled: boolean): Promise<boolean> {
   try {
     await api.setAgentMcpEnabled(agentId, server, enabled);
     return true;
   } catch (e) {
-    if (enabled) toast({ kind: 'error', title: mcpStartFailure(server, msg(e), true) });
-    else toast({ kind: 'error', title: `Couldn’t turn ${clean(server)} off`, body: msg(e) });
+    const said = enabled ? cliAnswer(msg(e)) : null;
+    if (said != null) toast({ kind: 'error', title: mcpStartFailure(server, said, true) });
+    else toast({ kind: 'error', title: `Couldn’t turn ${clean(server)} ${enabled ? 'on' : 'off'}`, body: msg(e) });
     return false;
   }
 }
+
+/** What the core puts before an error that Claude Code itself answered (orchestrator/controls.rs `session_answer_within`). */
+const CLI_ANSWERED = 'Claude Code answered: ';
+
+/**
+ * Claude Code's own words in an error of the core, or null for an error of Codly's own (the
+ * agent is not running, is still starting, or Claude Code did not answer): then nothing
+ * reached Claude Code, and nothing was switched or started.
+ */
+export const cliAnswer = (error: string): string | null => (error.startsWith(CLI_ANSWERED) ? error.slice(CLI_ANSWERED.length) : null);
 
 /**
  * Why a server you turned on or restarted did not start, from Claude Code's answer. Recorded
@@ -405,12 +417,16 @@ export async function reconnectMcp(agentId: string, server: string): Promise<str
 
 /**
  * Ask Claude Code to start a connected MCP server again (the request of Reconnect). Returns
- * whether it did; an answer that it did not is said in a toast, with Claude Code's reason.
+ * whether it did; an answer that it did not is said in a toast, with Claude Code's reason, and
+ * a refusal of Codly's own (nothing reached Claude Code) with the refusal.
  */
 export async function restartMcp(agentId: string, server: string): Promise<boolean> {
   const failed = await reconnectMcp(agentId, server);
-  if (failed != null) toast({ kind: 'error', title: mcpStartFailure(server, failed, false) });
-  return failed == null;
+  if (failed == null) return true;
+  const said = cliAnswer(failed);
+  if (said != null) toast({ kind: 'error', title: mcpStartFailure(server, said, false) });
+  else toast({ kind: 'error', title: `Couldn’t restart ${clean(server)}`, body: failed });
+  return false;
 }
 
 /** Stop a background command or helper. Returns whether Claude Code took the request; its next list of background tasks says that the work stopped. */

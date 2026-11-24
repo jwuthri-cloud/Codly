@@ -8,7 +8,7 @@ import type { EventKind } from '../gen/EventKind';
 import type { EventRow } from '../gen/EventRow';
 import type { McpServerStatus } from '../gen/McpServerStatus';
 import type { Snapshot } from '../gen/Snapshot';
-import { HOLD_MS, KEEP_STOPPED_MS, MCP_ASK_WAIT_MS, MCP_BUSY, MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundRows, backgroundSummary, canReconnect, canRestart, canStop, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpButtonLabel, mcpRowLocked, mcpStartFailure, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, rowOrder, showsMcpSection, signInSteps, startedWithoutFolderConfig, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, switchMcp, waitedHelperStopHint, type BackgroundWork } from '../state/session';
+import { HOLD_MS, KEEP_STOPPED_MS, MCP_ASK_WAIT_MS, MCP_BUSY, MCP_HINT, MCP_LABEL, STOP_WAIT_MS, backgroundKind, backgroundRows, backgroundSummary, canReconnect, canRestart, canStop, cliAnswer, mcpAnswered, mcpAskOnItsWay, mcpAsked, mcpButtonLabel, mcpRowLocked, mcpStartFailure, mcpSummary, mcpSwitch, mcpSwitchHint, ofLiveRun, reconnectAnswer, reconnectMcp, restartHint, restartMcp, rowOrder, showsMcpSection, signInSteps, startedWithoutFolderConfig, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, switchMcp, waitedHelperStopHint, type BackgroundWork } from '../state/session';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 import { mkAgent } from '../../office/demo/script';
@@ -164,7 +164,12 @@ describe('the MCP servers of an agent', () => {
     expect(again).toHaveBeenLastCalledWith('a1', 'docs');
     expect(toasts.list).toEqual([]);
     expect(await restartMcp('a1', 'docs')).toBe(false);
-    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'docs did not start: Claude Code answered: spawn npx ENOENT.', undefined]]);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'docs did not start: spawn npx ENOENT.', undefined]]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
+    // A refusal of Codly's own reached no Claude Code: it is said as it is.
+    again.mockRejectedValueOnce(new Error('Bo is not running'));
+    expect(await restartMcp('a1', 'docs')).toBe(false);
+    expect(toasts.list.map((t) => [t.title, t.body])).toEqual([['Couldn’t restart docs', 'Bo is not running']]);
     for (const t of toasts.list) toasts.dismiss(t.id);
   });
 
@@ -182,13 +187,27 @@ describe('the MCP servers of an agent', () => {
 
   it('a "Turn on" that fails says why in a toast; a "Turn off" that fails says it could not', async () => {
     for (const t of toasts.list) toasts.dismiss(t.id);
-    vi.spyOn(api, 'setAgentMcpEnabled').mockRejectedValueOnce('Executable not found in $PATH: "stdio"').mockRejectedValueOnce('Bo is not running');
+    vi.spyOn(api, 'setAgentMcpEnabled')
+      .mockRejectedValueOnce('Claude Code answered: Executable not found in $PATH: "stdio"')
+      .mockRejectedValueOnce('Bo is not running')
+      .mockRejectedValueOnce('that agent is still starting; try again in a moment')
+      .mockRejectedValueOnce('Claude Code did not answer within 10 s');
     expect(await switchMcp('a1', 'no-such-command', true)).toBe(false);
     expect(await switchMcp('a1', 'docs', false)).toBe(false);
     expect(toasts.list.map((t) => [t.title, t.body])).toEqual([
       ['no-such-command did not start: its program was not found on your PATH. It stays switched on: Reconnect tries again.', undefined],
       ['Couldn’t turn docs off', 'Bo is not running'],
     ]);
+    for (const t of toasts.list) toasts.dismiss(t.id);
+    // A refusal of Codly's own, or no answer: nothing reached Claude Code, nothing was switched on.
+    expect(await switchMcp('a1', 'docs', true)).toBe(false);
+    expect(await switchMcp('a1', 'docs', true)).toBe(false);
+    expect(toasts.list.map((t) => [t.title, t.body])).toEqual([
+      ['Couldn’t turn docs on', 'that agent is still starting; try again in a moment'],
+      ['Couldn’t turn docs on', 'Claude Code did not answer within 10 s'],
+    ]);
+    expect(cliAnswer('Claude Code answered: Connection closed')).toBe('Connection closed');
+    expect(cliAnswer('Bo is not running')).toBeNull();
     for (const t of toasts.list) toasts.dismiss(t.id);
   });
 
