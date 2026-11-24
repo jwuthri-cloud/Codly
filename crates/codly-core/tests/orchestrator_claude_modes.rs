@@ -1018,8 +1018,8 @@ async fn an_mcp_server_is_turned_off_and_on_through_the_live_session() {
     // Claude Code saves the switch for the folder the run works in: this agent's own worktree.
     let worktree = agent(&core, &id).await.worktree.expect("a hired 1:1 agent's worktree");
     assert!(Path::new(&worktree).starts_with(dir.path().join("data").join("worktrees")), "{worktree}");
-    let off = format!("you turned docs off for Claude Code in {name}'s worktree ({name}'s run and every later one there, until you turn it on)");
-    assert_eq!(your_acts(&core, &id).await, [off, format!("you turned docs on for Claude Code in {name}'s worktree")]);
+    let off = format!("you turned docs off for Claude Code in the folder {name} works in (this run and every later one there, until you turn it on)");
+    assert_eq!(your_acts(&core, &id).await, [off, format!("you turned docs on for Claude Code in the folder {name} works in")]);
 
     // Claude Code refuses a switch: its reason is yours, and the record says what you asked
     // and what came back. It does not say "you turned": the server was not turned on.
