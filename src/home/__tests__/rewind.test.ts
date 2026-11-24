@@ -3,7 +3,8 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentCheckpoints } from '../../lib/gen/AgentCheckpoints';
 import type { Checkpoint } from '../../lib/gen/Checkpoint';
-import { confirmLine, namesLine, pick, putBackTitle, REWIND_ROWS, rewindItems, rewindKey, rewindOff, rewindRows, rewindStart, toggleFiles, turnPoint, type RewindNav } from '../rewind';
+import { ESC_PAIR_WINDOW } from '../../lib/state/esc';
+import { confirmLine, focusRow, heldAfterClose, leftOutLine, namesLine, pick, putBackTitle, REWIND_ROWS, rewindItems, rewindKey, rewindOff, rewindRows, rewindStart, rewindWhere, toggleFiles, turnPoint, type RewindNav } from '../rewind';
 
 const NOW = 1_760_000_000_000;
 const MIN = 60_000;
@@ -116,6 +117,56 @@ describe('the keys of the list', () => {
   it('with no turn the keys have only "All checkpoints…"', () => {
     expect(rewindStart([])).toEqual({ at: 0, open: null, asking: null });
     expect(rewindKey(rewindStart([]), [], 'Enter').act).toEqual({ kind: 'sheet' });
+  });
+});
+
+describe('the keys and the focus are on one row', () => {
+  const rows = rewindRows(kept([point(3, { changed: 0, files: [] }), point(2, { changed: 2, files: ['a.ts', 'b.ts'] }), point(1)]), NOW);
+  const start = rewindStart(rows);
+
+  it('Tab or a press onto another row moves the keys there: ↵ acts on the row that has the focus', () => {
+    const tabbed = focusRow(start, rows, 2);
+    expect(tabbed).toEqual({ ...start, at: 2 });
+    const asked = rewindKey(tabbed, rows, 'Enter');
+    expect(asked.nav.asking).toEqual({ n: 1, path: null });
+    expect(rewindKey(asked.nav, rows, 'Enter').act).toEqual({ kind: 'restore', n: 1, path: null });
+  });
+
+  it('the focus leaving a row that asks closes its confirm line: a later ↵ never restores that row', () => {
+    const asked = rewindKey(start, rows, 'Enter').nav;
+    expect(asked.asking).toEqual({ n: 2, path: null });
+    const moved = focusRow(asked, rows, 2);
+    expect(moved).toEqual({ at: 2, open: null, asking: null });
+    expect(rewindKey(moved, rows, 'Enter').act).toBeNull();
+    // On the same row (its file count, its "Put back"), the confirm line stays.
+    expect(focusRow(asked, rows, asked.at)).toBe(asked);
+  });
+
+  it('a file row can take the keys; a turn with nothing to put back, or no row, cannot', () => {
+    const open = toggleFiles(start, rows, 2);
+    const file = focusRow(open, rows, 3);
+    expect(rewindItems(rows, file.open)[file.at]).toEqual({ kind: 'file', n: 2, path: 'b.ts' });
+    expect(rewindKey(rewindKey(file, rows, 'Enter').nav, rows, 'Enter').act).toEqual({ kind: 'restore', n: 2, path: 'b.ts' });
+    expect(focusRow(start, rows, 0)).toBe(start);
+    expect(focusRow(start, rows, 99)).toBe(start);
+  });
+});
+
+describe('the head of the list', () => {
+  it('says when the turns are of a task’s worktree, and names the files too big to keep', () => {
+    expect(rewindWhere(kept([], { task: 'T-4' }))).toBe('Turns of task T-4, in its worktree');
+    expect(rewindWhere(kept([]))).toBeNull();
+    expect(leftOutLine(kept([], { left_out: ['node_modules/ (20000 new files)', 'dist/app.bin'] }))).toBe('Not kept, too big: node_modules/ (20000 new files), dist/app.bin');
+    expect(leftOutLine(kept([]))).toBeNull();
+  });
+});
+
+describe('the Esc right after the one that closed the list', () => {
+  it('is held for the pair window only: it begins no pair that opens the list again', () => {
+    expect(heldAfterClose(NOW, NOW + 4)).toBe(true);
+    expect(heldAfterClose(NOW, NOW + ESC_PAIR_WINDOW)).toBe(true);
+    expect(heldAfterClose(NOW, NOW + ESC_PAIR_WINDOW + 1)).toBe(false);
+    expect(heldAfterClose(NOW, NOW - 1)).toBe(false);
   });
 });
 

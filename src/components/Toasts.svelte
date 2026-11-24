@@ -37,6 +37,9 @@
   most four times a second.
   Not when the page scrolls: what scrolls under a toast can be scrolled out again, and a toast
   takes presses only on itself.
+  While the page is out of view (another tab or window is in front) no toast counts down, and a
+  toast that goes leaves at once: its fade would wait for the page to be drawn again, and the
+  toasts that went would pile up on the screen. When the page is seen the stack looks again.
 -->
 <script lang="ts">
   import { flushSync, untrack } from 'svelte';
@@ -78,6 +81,9 @@
   let height = $state(0);
   /** The window changed size this many times. */
   let resizes = $state(0);
+  /** The page is not in front (another tab or window is): no toast counts down (`toasts.seen`), and
+   *  one that goes leaves at once, with no fade that a page out of view would never end. */
+  let hidden = $state(typeof document !== 'undefined' && document.hidden);
   /** What is in the page's main column changed its height this many times (counted once in PACE ms). */
   let arrivals = $state(0);
   /** How far under its first place (right under the top bar) the stack is, in px. */
@@ -294,9 +300,19 @@
       resizes,
       ui.sheetOpen, blockers.panel, ide.visible, ui.findOpen, resumeWork.offer, resumeWork.later,
       ui.railOpen, ui.mode, ui.room, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.thread, ui.closedRev,
-      store.workspace?.id, ui.onboarded, ui.onboardingOpen, ui.layoutRev,
+      store.workspace?.id, ui.onboarded, ui.onboardingOpen, ui.layoutRev, hidden,
     ];
     untrack(() => look('layout'));
+  });
+  $effect(() => {
+    const changed = () => (hidden = document.hidden);
+    document.addEventListener('visibilitychange', changed);
+    return () => document.removeEventListener('visibilitychange', changed);
+  });
+  // Toasts that came while the page was out of view start their time when it is seen.
+  $effect(() => {
+    const seen = !hidden;
+    untrack(() => toasts.seen(seen));
   });
   // The stack changes: no box of the page moves.
   $effect(() => {
@@ -318,8 +334,9 @@
     arrived.stop();
     content.stop();
     cancelAnimationFrame(painted);
-    // With no stack on screen no toast is put away.
+    // With no stack on screen no toast is put away, or waits for the page to be seen.
     toasts.putAway([]);
+    toasts.seen(true);
   });
 
   // Which texts are longer than they show. Read again when a text or the stack's width changes.
@@ -420,7 +437,7 @@
         onpointerenter={() => toasts.pause(t.id)}
         onpointerleave={() => toasts.resume(t.id)}
         onoutroend={gone}
-        out:fade|global={{ duration: ui.reducedMotion || gaps.some((g) => g.id === t.id) ? 0 : 120 }}
+        out:fade|global={{ duration: ui.reducedMotion || hidden || gaps.some((g) => g.id === t.id) ? 0 : 120 }}
       >
         <span class="ic" class:spin={t.kind === 'progress'}><Icon name={ICON[t.kind]} size={16} /></span>
         <div class="txt">

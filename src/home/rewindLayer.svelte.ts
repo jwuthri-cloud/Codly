@@ -1,9 +1,11 @@
 // Whose "Undo a turn" list is open over the composer (Esc Esc, `/undo`, the palette's row), and
 // the restore that list and the sheet's Last turn share: a toast says what went back, with Undo.
+import { on } from 'svelte/events';
 import { api } from '../lib/api';
+import { ESC_PAIR_WINDOW } from '../lib/state/esc';
 import { toast } from '../lib/state/toasts.svelte';
 import { plural } from '../lib/util/format';
-import { putBackTitle } from './rewind';
+import { heldAfterClose, putBackTitle } from './rewind';
 
 /** How long the toast after a restore offers Undo. Later, Checkpoints in the agent's sheet still can. */
 const UNDO_MS = 10_000;
@@ -33,6 +35,28 @@ class RewindLayer {
 }
 
 export const rewindLayer = new RewindLayer();
+
+/**
+ * An Esc closed the list, and the focus went back to the composer. The next Esc there, within
+ * `ESC_PAIR_WINDOW`, only leaves the composer: it begins no pair in keys.ts, so a third fast press
+ * does not open the list again (`heldAfterClose`). It runs after the composer's own Esc (a menu,
+ * a toast that waits), on the document, before keys.ts on the window. Armed after the closing
+ * Esc is done, so that one is not counted.
+ */
+export function closedByEsc() {
+  const closedAt = Date.now();
+  setTimeout(() => {
+    const off = on(document, 'keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      off();
+      const field = e.target as HTMLElement;
+      if (!heldAfterClose(closedAt, Date.now()) || field.tagName !== 'TEXTAREA' || !field.closest('[aria-label="Composer"]')) return;
+      e.stopPropagation();
+      if (!e.defaultPrevented) field.blur();
+    });
+    setTimeout(off, ESC_PAIR_WINDOW);
+  });
+}
 
 const words = (e: unknown) => (e instanceof Error ? e.message : String(e));
 

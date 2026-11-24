@@ -20,7 +20,6 @@
   import { ui } from '../lib/state/ui.svelte';
   import { ago, plural } from '../lib/util/format';
   import { oneAtATime } from '../lib/util/oneAtATime';
-  import { rewindLayer } from '../home/rewindLayer.svelte';
   import Icon from '../components/Icon.svelte';
 
   interface Props {
@@ -56,11 +55,11 @@
       if (id === agent.id) error = e instanceof Error ? e.message : String(e);
     }
   });
-  // Only `refresh` starts a read, and files put back elsewhere ("Undo a turn", Last turn, their
-  // Undo). The agent object is new on every step of its turn (each tool call, each usage
-  // report): that alone must not start git.
+  // Only `refresh` starts a read: the Git tab reads the worktree again also when files were put
+  // back elsewhere ("Undo a turn", Last turn, their Undo). The agent object is new on every step
+  // of its turn (each tool call, each usage report): that alone must not start git.
   $effect(() => {
-    void [refresh, rewindLayer.restored];
+    void refresh;
     untrack(() => {
       if (resting || !view) void load();
     });
@@ -109,9 +108,10 @@
               <time>{ago(c.ts, ui.now)}</time>
               <button
                 class="btn sm"
-                disabled={busy || !resting || !c.changed}
+                disabled={busy}
+                aria-disabled={!resting || !c.changed}
                 data-tip={!c.changed ? 'The files are as they were at this point' : resting ? 'Restore files to this point' : 'Wait until its turn ends'}
-                onclick={() => (asking = { n: c.n, path: null })}><Icon name="refresh" size={12} />Restore files</button>
+                onclick={() => { if (resting && c.changed) asking = { n: c.n, path: null }; }}><Icon name="refresh" size={12} />Restore files</button>
             </div>
             {#if c.changed}
               <button class="since files-t" aria-expanded={open === c.n} data-tip="Show the files. Each one can go back alone." onclick={() => (open = open === c.n ? null : c.n)}>
@@ -127,9 +127,10 @@
                     <code class="path truncate" data-tip={f}>{f}</code>
                     <button
                       class="btn sm ghost"
-                      disabled={busy || !resting}
+                      disabled={busy}
+                      aria-disabled={!resting}
                       data-tip={resting ? 'Put only this file back to this point' : 'Wait until its turn ends'}
-                      onclick={() => (asking = { n: c.n, path: f })}>Restore this file</button>
+                      onclick={() => { if (resting) asking = { n: c.n, path: f }; }}>Restore this file</button>
                   </li>
                 {/each}
                 {#if c.changed > c.files.length}<li class="small">… and {c.changed - c.files.length} more. “Restore files” puts all of them back.</li>{/if}
@@ -166,6 +167,8 @@
 
 <style>
   .eyebrow { margin-top: 8px; }
+  /* Off with a reason: not `disabled`, which would never show its tip (base.css). */
+  .btn[aria-disabled='true'] { opacity: 0.42; }
   .small { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .small.bad { color: var(--bad); }
   .points { display: flex; flex-direction: column; gap: 6px; }

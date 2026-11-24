@@ -7,6 +7,7 @@
   import { ago } from '../lib/util/format';
   import { mergeAgent } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
+  import { rewindLayer } from '../home/rewindLayer.svelte';
   import Icon from '../components/Icon.svelte';
   import MergeConflictStep from '../components/MergeConflictStep.svelte';
   import RepoSyncBar from '../components/RepoSyncBar.svelte';
@@ -42,9 +43,11 @@
       busy = false;
     }
   }
-  // Load when opened, and again when the agent changes or its status does (it just did something).
+  // Load when opened, and again when the agent changes or its status does (it just did something),
+  // and when files were put back ("Undo a turn", Last turn, or the Undo of their toast): the
+  // parts below (Last turn, Checkpoints) read again with it.
   $effect(() => {
-    void agent.status;
+    void [agent.status, rewindLayer.restored];
     void load(agent.id);
   });
 

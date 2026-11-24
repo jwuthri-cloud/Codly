@@ -23,7 +23,7 @@
   import { idVar } from '../lib/util/labels';
   import { oneAtATime } from '../lib/util/oneAtATime';
   import { turnPoint } from '../home/rewind';
-  import { putBack, rewindLayer } from '../home/rewindLayer.svelte';
+  import { putBack } from '../home/rewindLayer.svelte';
   import DiffView from '../rooms/changes/DiffView.svelte';
 
   interface Props {
@@ -58,9 +58,10 @@
       if (id === agent.id) error = e instanceof Error ? e.message : String(e);
     }
   });
-  // Files put back here or from "Undo a turn" (and their Undo): the turn is read again.
+  // The Git tab read the worktree again, also after files were put back here or from "Undo a
+  // turn" (and their Undo): the turn is read again.
   $effect(() => {
-    void [refresh, rewindLayer.restored];
+    void refresh;
     untrack(() => void load());
   });
 
@@ -105,7 +106,7 @@
           </div>
         {:else}
           <div class="row end">
-            <button class="btn sm ghost" disabled={restoring || !resting} data-tip={resting ? 'Only this file goes back to before this turn' : 'Wait until its turn ends'} onclick={() => (asking = f.path)}>Put this file back</button>
+            <button class="btn sm ghost" disabled={restoring} aria-disabled={!resting} data-tip={resting ? 'Only this file goes back to before this turn' : 'Wait until its turn ends'} onclick={() => { if (resting) asking = f.path; }}>Put this file back</button>
           </div>
         {/if}
         <DiffView file={f} hue={idVar(agent.color)} collapsed={open !== f.path} ontoggle={() => (open = open === f.path ? null : f.path)} />
@@ -115,6 +116,8 @@
 {/if}
 
 <style>
+  /* Off with a reason: not `disabled`, which would never show its tip (base.css). */
+  .btn[aria-disabled='true'] { opacity: 0.42; }
   .small { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .small.bad { color: var(--bad); }
   .turn { display: flex; flex-direction: column; gap: 6px; }

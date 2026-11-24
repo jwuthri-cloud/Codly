@@ -210,7 +210,7 @@ function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
     sim, story, checks,
     ctl: new MockControls(sim), breaker: new MockBreaker(sim), askMe: new MockAskMe(sim, !billing),
     conflicts: new MergeConflictDemo(trouble, sim, story), previews: new PreviewDemo(states.previewRunning),
-    workspaceTrust, pullRequests: new PullRequestDemo(states.prOpen), checkpoints: new DemoCheckpoints((id) => sim.edited.has(id)),
+    workspaceTrust, pullRequests: new PullRequestDemo(states.prOpen), checkpoints: new DemoCheckpoints(sim),
     takeovers: new DemoTakeovers(), worktrees: new WorktreeDemo(), hk: undefined, pushed: false, ahead: 0, closed: [], merge: null, mergeCommits: 0,
   };
 }
