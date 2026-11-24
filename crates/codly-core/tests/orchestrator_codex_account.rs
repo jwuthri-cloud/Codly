@@ -12,8 +12,29 @@ use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -109,7 +130,7 @@ async fn started(dir: &Path, prompts: &Arc<Mutex<Vec<String>>>) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(prompts.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![cli(Provider::Claude), cli(Provider::Codex)]),
         index: false,
     };
@@ -133,7 +154,7 @@ async fn the_catalog_falls_back_to_the_built_in_codex_models_and_says_why() {
     // Claude has no list to ask for: its aliases are the list.
     let claude = core.model_catalog(Provider::Claude).await.unwrap();
     assert_eq!(claude.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["opus", "sonnet", "haiku", "fable"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// "Compact now" is for an agent that runs and is between turns (a Claude agent takes Claude
@@ -170,5 +191,5 @@ async fn compact_now_is_refused_unless_a_codex_agent_is_idle() {
         !events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("compact"))),
         "nothing was asked of Codex, so the History says nothing"
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }

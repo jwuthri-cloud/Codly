@@ -1058,8 +1058,29 @@ mod what_you_said {
     use serde_json::{Value, json};
     use tokio::sync::mpsc;
 
+    /// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+    /// the stop fails here, in its own test: else the shutdown's last resort kills every process
+    /// group this test process started, the check commands of the tests beside it too.
+    async fn shut_down(core: &Core) {
+        core.shutdown().await;
+        assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+    }
+
+    /// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+    /// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+    const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+    /// Who the test's own commits are by, whatever the repository says.
+    const TEST_AUTHOR: [(&str, &str); 4] =
+        [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+    /// The environment the core runs with: this process's, without your git settings.
+    fn core_env() -> std::collections::HashMap<String, String> {
+        std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+    }
+
     fn git(dir: &Path, args: &[&str]) {
-        let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+        let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
@@ -1193,7 +1214,7 @@ mod what_you_said {
             install: codly_core::env::install_hint(provider),
             default_model: None,
         };
-        let opts = StartOptions { spawner: Some(Arc::new(Fake)), env: Some(std::env::vars().collect()), clis: Some(vec![cli]), index: false };
+        let opts = StartOptions { spawner: Some(Arc::new(Fake)), env: Some(core_env()), clis: Some(vec![cli]), index: false };
         let core = Core::start_with(cfg, opts).await.unwrap();
         core.open_workspace(repo.to_str().unwrap()).await.unwrap();
         let agent = core.hire_agent(provider, None, None).await.unwrap();
@@ -1269,7 +1290,7 @@ mod what_you_said {
         // Claude Code took the note with the deny: no message of yours follows it (one would
         // have come before the second request).
         assert_eq!(notes(&agent), Vec::<String>::new());
-        core.shutdown().await;
+        shut_down(&core).await;
     }
 
     /// Codex takes no note with its answer: after the decline, the note goes to the agent as
@@ -1311,7 +1332,7 @@ mod what_you_said {
         assert_eq!(rows(&core, &last).await, [resolved(&last, "expired")]);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(notes(&agent).len(), 1, "{:?}", heard(&agent));
-        core.shutdown().await;
+        shut_down(&core).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1336,7 +1357,7 @@ mod what_you_said {
         let plain = ask(&core, &agent, "plan").await;
         core.resolve_approval(&plain.id, ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).await.unwrap();
         assert_eq!(rows(&core, &plain).await, [resolved(&plain, "approved")]);
-        core.shutdown().await;
+        shut_down(&core).await;
     }
 
     /// The agent was killed while its request waited: an answer that still arrives is refused,
@@ -1352,6 +1373,6 @@ mod what_you_said {
         let refused = core.resolve_approval(&command.id, no).await.expect_err("a killed agent takes no answer").to_string();
         assert_eq!(refused, "the agent that asked is no longer running; the request expired");
         assert_eq!(rows(&core, &command).await, [resolved(&command, "expired")]);
-        core.shutdown().await;
+        shut_down(&core).await;
     }
 }

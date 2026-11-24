@@ -9,8 +9,29 @@ use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, StartOptions};
 use codly_core::store::Store;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -80,7 +101,7 @@ fn seed_worker(data: &Path, xp: i64) -> Id {
 
 async fn start(root: &Path) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: None, env: Some(std::env::vars().collect()), clis: Some(vec![]), index: false };
+    let opts = StartOptions { spawner: None, env: Some(core_env()), clis: Some(vec![]), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -121,7 +142,7 @@ async fn cheats_need_developer_mode_and_flag_the_wallet() {
     core.update_settings(Settings { developer_mode: false, ..core.settings() }).await.unwrap();
     assert!(core.dev_grant(1000).is_err());
     assert!(core.wallet().unwrap().cheated);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -152,7 +173,7 @@ async fn games_and_coffee_are_earned_and_stand_in_the_lot() {
     assert_eq!(foos(&core.lot(None).unwrap()), Some(3.0));
     core.sell(None, "foos").unwrap();
     assert_eq!(foos(&core.lot(None).unwrap()), None);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Build mode saves as it closes, and switching office closes it: that save (and the furniture
@@ -180,5 +201,5 @@ async fn a_save_for_the_office_you_left_stays_in_it() {
     assert!(has(&in_a, "sofa") && has(&in_a, "chair"), "the office you left has what you did there");
     assert_eq!(serde_json::to_string(&core.lot(Some(&wb)).unwrap()).unwrap(), b_before, "the office you are in keeps its own");
     assert!(core.shop(None).unwrap().placed.is_empty(), "and its shop shows none of A's");
-    core.shutdown().await;
+    shut_down(&core).await;
 }

@@ -8,6 +8,19 @@ use codly_core::git::Git;
 use codly_core::index::{Index, WorktreeView};
 use codly_core::model::{Confidence, SearchResult};
 
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn write(root: &Path, rel: &str, body: &str) {
     let p = root.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -481,7 +494,7 @@ fn an_index_opened_again_says_that_it_is_from_an_earlier_run() {
 // ───────────── a search asked from an agent's worktree ─────────────
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = std::process::Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -531,7 +544,7 @@ async fn a_search_from_a_worktree_says_what_differs_there() {
     git(wt, &["commit", "-qm", "task"]);
     write(wt, "src/cache/ttl.rs", "pub struct TtlCache {}\n");
     write(wt, "Cargo.lock", "[[package]]\n");
-    let cli = Git::from_process_env();
+    let cli = Git::new("git".into(), core_env());
     let view = WorktreeView::read(&cli, repo, wt, Duration::from_secs(60)).await;
 
     // A file the task changed: cited, and marked, because its lines are the checkout's.
@@ -587,7 +600,7 @@ async fn a_worktree_that_git_cannot_compare_is_named_in_the_result() {
     // Not a checkout of this repository.
     let elsewhere = tempfile::tempdir().unwrap();
     write(elsewhere.path(), "src/net/upload.rs", "pub struct UploadClient;\n");
-    let view = WorktreeView::read(&Git::from_process_env(), &c.repo, elsewhere.path(), Duration::from_secs(60)).await;
+    let view = WorktreeView::read(&Git::new("git".into(), core_env()), &c.repo, elsewhere.path(), Duration::from_secs(60)).await;
     let r = c.index.search_in(&view, "UploadClient SessionStore", 5).unwrap();
     assert_eq!(r.citations[0].path, "src/net/upload.rs");
     assert!(!paths(&r).contains(&"src/web/session.ts"), "a match in a file that is not there is left out: {:?}", paths(&r));

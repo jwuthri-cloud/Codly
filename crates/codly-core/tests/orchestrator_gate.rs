@@ -20,7 +20,7 @@
 //!   asked to continue) does not leave the task waiting;
 //! - after a context compaction the next prompt to the worker carries its task again.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -35,8 +35,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git").arg("-C").arg(dir).args(args).output().unwrap()
+    Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap()
 }
 
 fn temp_repo(root: &Path) -> PathBuf {
@@ -121,6 +142,41 @@ struct FakeSpawner {
     turns: Turns,
 }
 
+/// How long a turn still has to end once its run is told to stop: well inside the 4 s that
+/// `Core::shutdown` gives every run.
+const STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// Run a turn to its end, like a CLI: what comes meanwhile waits for that end. A stop gives the
+/// turn `STOP_GRACE` more to end (the run then exits after it), else the run exits in the middle
+/// of it: false. A turn that waits for the test and never looks at its run's commands would
+/// keep the run alive through `Core::shutdown`, whose last resort kills every process group
+/// this test process started, the check commands of the tests beside it too.
+async fn end_turn(
+    mut turn: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    rx: &mut mpsc::UnboundedReceiver<AgentCmd>,
+    waiting: &mut VecDeque<AgentCmd>,
+) -> bool {
+    loop {
+        tokio::select! {
+            _ = &mut turn => return true,
+            cmd = rx.recv() => match cmd {
+                Some(AgentCmd::Shutdown) => break,
+                Some(cmd) => waiting.push_back(cmd),
+                // Nobody is left to tell it anything: the turn runs to its end.
+                None => {
+                    turn.await;
+                    return true;
+                }
+            },
+        }
+    }
+    let ended = tokio::time::timeout(STOP_GRACE, turn).await.is_ok();
+    if ended {
+        waiting.push_back(AgentCmd::Shutdown);
+    }
+    ended
+}
+
 impl Spawner for FakeSpawner {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         let behavior = if spec.role == Role::Lead { self.lead.clone() } else { self.worker.clone() };
@@ -149,14 +205,26 @@ impl Spawner for FakeSpawner {
             });
             let spec2 = spec.clone();
             tokio::spawn(async move {
-                while let Some(cmd) = rx.recv().await {
+                // What came while a turn ran: read when the turn is over, in order.
+                let mut waiting = VecDeque::new();
+                loop {
+                    let cmd = match waiting.pop_front() {
+                        Some(cmd) => cmd,
+                        None => match rx.recv().await {
+                            Some(cmd) => cmd,
+                            None => break,
+                        },
+                    };
                     match cmd {
                         AgentCmd::Prompt(text) => {
                             turns.lock().unwrap().push((spec2.role, spec2.agent_id.clone(), text.clone()));
                             send(EventKind::TurnStarted { input: Some(text.clone()) });
                             send(EventKind::StatusChanged { status: AgentStatus::Thinking });
                             let error = Arc::new(Mutex::new(None));
-                            behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone(), error: error.clone() }).await;
+                            if !end_turn(behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone(), error: error.clone() }), &mut rx, &mut waiting).await {
+                                send(EventKind::Exited { code: Some(0) });
+                                break;
+                            }
                             let result_text = error.lock().unwrap().take();
                             let status = if result_text.is_some() { TurnStatus::Failed } else { TurnStatus::Completed };
                             send(EventKind::TurnCompleted { status, result_text, duration_ms: Some(5) });
@@ -212,7 +280,7 @@ fn hello_worker() -> Behavior {
 async fn start(root: &Path, spawner: FakeSpawner, settings: Settings) -> Arc<Core> {
     let repo = temp_repo(root);
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(vec![claude()]), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
@@ -310,7 +378,7 @@ async fn a_check_that_runs_out_of_time_blocks_the_task_and_costs_no_fix_round() 
     assert_eq!(worker_prompts(&turns).len(), 1, "re-running the checks needs no worker turn");
     let e = core.recheck_task(&t.id, vec![]).await.unwrap_err().to_string();
     assert!(e.contains("only a blocked or failed task"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -345,7 +413,7 @@ async fn a_risky_check_is_not_run_until_you_allow_it() {
     let allowed = decisions(&after).into_iter().find(|d| d.0 == "human" && d.1.contains("allowed")).expect("your OK is on record");
     assert_eq!(allowed.2["allowed"], json!([risky]));
     assert_eq!(worker_prompts(&turns).len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -382,7 +450,7 @@ async fn a_risky_integration_check_is_refused() {
     let merge = decisions(&all).into_iter().rfind(|d| !d.2["refused_checks"].is_null()).expect("the decision keeps the refused check");
     assert_eq!(merge.2["refused_checks"], json!([{ "command": "rm -f stale.txt", "risks": ["deletes files"] }]));
     assert_eq!(merge.2["failed_checks"], json!([]));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -414,7 +482,7 @@ async fn merge_anyway_lands_a_task_whose_checks_failed() {
     assert_eq!(worker_prompts(&turns).len(), 3, "merging anyway needs no worker turn");
     let e = core.accept_task(&t.id).await.unwrap_err().to_string();
     assert!(e.contains("can be merged anyway"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -441,7 +509,7 @@ async fn merge_anyway_is_only_for_a_task_its_checks_stopped() {
     assert_eq!((after.status, &after.status_reason), (TaskStatus::Failed, &t.status_reason));
     assert_eq!(worker_prompts(&turns).len(), 3, "the brief and two fix rounds");
     assert!(!decisions(&events(&core).await).iter().any(|d| d.1.contains("anyway")), "no choice of yours is on record");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A plan of two tasks for the team member Ana: t1 has a verify command with a risk (it is
@@ -510,7 +578,7 @@ async fn a_members_stopped_task_is_checked_after_its_worktree_moved_on() {
     let all = events(&core).await;
     assert!(verified(&all).contains(&(RISKY.to_string(), true)), "{:?}", verified(&all));
     assert_eq!(worker_prompts(&turns).len(), 2, "one brief per task, and no turn for the re-run");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -541,7 +609,7 @@ async fn a_members_stopped_task_waits_for_the_member_and_keeps_your_choice() {
     assert!(decisions(&all).iter().any(|d| d.1 == "t1: checks not run, you chose to merge anyway"));
     let prompts = worker_prompts(&turns);
     assert!(prompts.len() == 3 && prompts[2].contains("You are back on task t1"), "{prompts:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// What t2's worker does on a turn, given its prompt: the task it waits to see merged first
@@ -661,7 +729,7 @@ async fn a_conflict_after_two_fix_rounds_still_goes_to_the_worker() {
     assert!(!said.iter().any(|d| d.1.contains("failed:")), "a conflict does not cost a fix round: {said:?}");
     let conflict = worker_prompts(&turns).into_iter().find(|p| p.contains(CONFLICT)).expect("the worker is asked to resolve it");
     assert!(conflict.contains("(round 1/3)") && conflict.contains("shared.txt"), "{conflict}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -684,7 +752,7 @@ async fn a_task_that_fails_with_markers_is_not_left_mid_merge() {
     let said = decisions(&all);
     assert!(said.iter().any(|d| d.1.starts_with("t2: conflict round 1/3")), "{said:?}");
     assert!(said.iter().any(|d| d.1.contains("after 2 fix rounds") && d.2["merge_aborted"] == true), "{said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -724,7 +792,7 @@ async fn a_task_out_of_conflict_rounds_waits_for_you_with_no_merge_started() {
     assert_eq!(asked(), 4);
     let last = worker_prompts(&turns).into_iter().rfind(|p| p.contains(CONFLICT)).unwrap();
     assert!(last.contains("(round 1/3)"), "{last}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// How Codly asks a worker for a report it did not give.
@@ -759,7 +827,7 @@ async fn a_worker_that_ends_without_a_report_is_asked_for_it_before_its_work_is_
     assert_eq!(verified(&all), [(HELLO_CHECK.to_string(), true)], "the half-done file was never checked, so no fix round was spent");
     let said = decisions(&all);
     assert!(said.iter().any(|d| d.1 == "t1: the worker ended its turn without a report; Codly asked for it"), "{said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -774,7 +842,7 @@ async fn a_worker_that_never_reports_is_asked_once_and_then_checked() {
     let prompts = worker_prompts(&turns);
     assert!(prompts.len() == 2 && prompts[1].contains(NO_REPORT), "asked once, then its work is checked as it is: {prompts:?}");
     assert_eq!(verified(&events(&core).await), [(HELLO_CHECK.to_string(), true)]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker leaves a dependency folder that the repository forgot to ignore. Codly commits the
@@ -835,7 +903,7 @@ async fn a_huge_new_folder_is_left_out_of_the_commit_and_the_worker_is_asked_onc
     assert!(merged.contains("hello.txt") && !merged.contains("node_modules"), "{merged}");
     let worktree = cwd.lock().unwrap().clone().unwrap();
     assert!(worktree.join("node_modules/m0/0.js").exists(), "left where it was");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// What the Lead was told about paths that a commit left out, once it was told.
@@ -885,7 +953,7 @@ async fn what_your_own_pass_leaves_out_goes_to_the_lead() {
     let branch = core.snapshot().await.unwrap().plans.remove(0).integration_branch.unwrap();
     let merged = String::from_utf8(git(&dir.path().join("repo"), &["ls-tree", "-r", "--name-only", &branch]).stdout).unwrap();
     assert!(merged.contains("hello.txt") && !merged.contains("node_modules"), "{merged}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A new file one byte over what a commit takes (sparse: nothing is written).
@@ -932,7 +1000,7 @@ async fn what_the_workers_answer_leaves_out_goes_to_the_lead() {
     let branch = core.snapshot().await.unwrap().plans.remove(0).integration_branch.unwrap();
     let merged = String::from_utf8(git(&dir.path().join("repo"), &["ls-tree", "-r", "--name-only", &branch]).stdout).unwrap();
     assert!(merged.contains("hello.txt") && !merged.contains("core.bin"), "{merged}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// t2's merge into the plan's branch conflicts with t1's shared.txt where Codly tries it, and
@@ -995,7 +1063,7 @@ async fn a_merge_that_codly_concludes_says_what_its_commit_left_out() {
     let shared = String::from_utf8(git(&repo, &["show", &format!("{branch}:shared.txt")]).stdout).unwrap();
     assert!(shared.contains("from t1") && shared.contains("from t2"), "{shared}");
     assert!(PathBuf::from(t2.worktree.unwrap()).join("dump.bin").exists(), "left where it was");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The reviewer approves, the first time only when the test ends that review (`end`); every
@@ -1071,7 +1139,7 @@ async fn a_turn_that_failed_during_the_review_is_not_checked_when_the_review_end
     let asked = worker_prompts(&turns).iter().filter(|p| p.contains("Your last turn on task")).count();
     assert_eq!(asked, 1, "the worker was asked to continue, once");
     assert_eq!(merged_hello(&core).await, "hello\nworld\n");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1113,7 +1181,7 @@ async fn a_turn_that_ended_on_the_usage_limit_during_the_review_does_not_leave_t
     let prompts = worker_prompts(&turns);
     assert_eq!(prompts.len(), 2, "the brief and your message, nothing else: {prompts:?}");
     assert_eq!(merged_hello(&core).await, "hello\nworld\n");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1158,5 +1226,5 @@ async fn after_a_compaction_the_next_prompt_carries_the_task_again() {
     let said = decisions(&events(&core).await);
     let sent_again = said.iter().filter(|d| d.1 == "t1: the worker's context was compacted; its next prompt carries the task again").count();
     assert_eq!(sent_again, 1, "{said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }

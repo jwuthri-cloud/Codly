@@ -9,8 +9,29 @@ use codly_core::model::*;
 use codly_core::orchestrator::{Core, CoreConfig, StartOptions};
 use codly_core::store::Store;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -87,7 +108,7 @@ fn put(store: &Store, ws: &Workspace, a: &Agent) {
 
 async fn start(root: &Path) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: None, env: Some(std::env::vars().collect()), clis: Some(vec![]), index: false };
+    let opts = StartOptions { spawner: None, env: Some(core_env()), clis: Some(vec![]), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -197,7 +218,7 @@ async fn a_transfer_keeps_the_career_and_leaves_the_repo_behind() {
 
     // It's gone from here: transferring it again from this office is refused.
     assert!(no(core.transfer_agent(&dee.id, &b.id).await).contains("doesn't work in this office"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The Neighbourhood map walks agents at home down the street: every other office lists who is
@@ -235,7 +256,7 @@ async fn offices_list_who_is_at_home() {
     assert_eq!(longer.away_since, Some(since));
     let in_again = core.set_agent_home(&dee.id, None).unwrap();
     assert_eq!((in_again.away_until, in_again.away_since), (None, None));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test]
@@ -294,5 +315,5 @@ async fn letting_an_agent_go_makes_a_ghost_you_can_bring_back() {
 
     let back = core.bring_back(&hana.id).unwrap();
     assert!(!back.archived && back.role == Role::Solo);
-    core.shutdown().await;
+    shut_down(&core).await;
 }

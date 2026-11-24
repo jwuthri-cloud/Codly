@@ -53,8 +53,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap()
+    Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap()
 }
 
 fn sh(dir: &Path, args: &[&str]) -> String {
@@ -250,7 +271,7 @@ async fn start(root: &Path, lead: Behavior, worker: Behavior, turns: Turns) -> (
 async fn boot(root: &Path, repo: &Path, lead: Behavior, worker: Behavior, turns: Turns) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let spawner = FakeSpawner { lead, worker, turns };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(vec![claude()]), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     let settings = Settings { auto_run_plans: true, lead_followups: false, worker_providers: vec![Provider::Claude], ..Default::default() };
     core.update_settings(settings).await.unwrap();
@@ -444,7 +465,7 @@ async fn an_agent_resolves_a_plans_conflict_with_your_branch_and_the_merge_goes_
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), mine);
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), "hello from main\n");
     assert_eq!(kept_before_merge(&repo), None, "main is back there: nothing is left to keep");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The agent could not resolve it and you cancel its task: the merge Codly had started in the
@@ -505,7 +526,7 @@ async fn a_cancelled_resolution_leaves_the_plan_as_it_was_and_can_be_tried_again
     assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), RESOLVED);
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -574,7 +595,7 @@ async fn the_plans_checks_run_on_the_merge_result_before_your_branch_moves() {
     let err = core.undo_merge(&sha).await.unwrap_err().to_string();
     assert!(err.starts_with("the merge cannot be undone: main has changed since this merge"), "{err}");
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (yours, Some(fixed)));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -666,7 +687,7 @@ async fn a_solo_agent_resolves_the_conflict_of_its_own_branch() {
     assert_ne!(sh(&repo, &["rev-parse", &branch]), sha);
     let state = core.merge_state(&source).await.unwrap();
     assert_eq!((state.conflicts.len(), state.resolving, state.behind), (0, None, 0));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker for a plan whose resolution takes two tries: asked to resolve, the first agent
@@ -743,7 +764,7 @@ async fn a_resolution_that_failed_its_checks_is_taken_off_the_plans_branch() {
     let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
     assert!(err.contains("merging into main conflicts in greeting.txt"), "{err}");
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (mine, String::new()));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Cancel plan while an agent resolves the conflict of a finished plan: the resolution is
@@ -781,7 +802,7 @@ async fn cancel_plan_during_a_resolution_cancels_the_resolution_only() {
     wait_plan(&core, PlanStatus::Done).await;
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The plan started from main and your checkout is on another branch now: like the merge
@@ -830,7 +851,7 @@ async fn a_plan_from_another_branch_is_resolved_only_after_you_confirm_the_branc
     let sha = core.merge_plan(&plan.id).await.unwrap();
     assert_eq!((sh(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]), sh(&repo, &["rev-parse", "HEAD"])), ("feature-x".to_string(), sha));
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The worktree for the checks on the merge result cannot be set up (the repo's setup script
@@ -874,7 +895,7 @@ async fn a_merge_whose_checks_could_not_run_is_not_made_until_you_merge_anyway()
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), sha);
     assert!(repo.join("feature.txt").exists());
     assert_eq!(core.merge_state(&source).await.unwrap().checks_not_run, None);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The agent left the markers in through all its rounds: the task fails and the merge is
@@ -922,7 +943,7 @@ async fn a_retry_starts_the_merge_again_after_the_rounds_ran_out() {
     assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), RESOLVED);
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Codly is closed while a resolution waits for you: the merge in the plan's worktree is not
@@ -941,7 +962,7 @@ async fn a_restart_of_codly_keeps_the_merge_of_an_open_resolution() {
     core.resolve_merge_conflict(&source).await.unwrap();
     let task = task_with(&core, "resolve", TaskStatus::Blocked).await;
     assert!(in_merge(&integ_wt));
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     let core = boot(dir.path(), &repo, lead, gives_up_once(tries), Default::default()).await;
@@ -957,7 +978,7 @@ async fn a_restart_of_codly_keeps_the_merge_of_an_open_resolution() {
     assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), RESOLVED);
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Your branch moves while the plan's checks run on the merge result: what they checked is
@@ -1003,7 +1024,7 @@ async fn a_merge_is_not_made_when_your_branch_moved_while_its_checks_ran() {
     assert_eq!(sh(&repo, &["rev-parse", "HEAD"]), sha);
     assert_eq!(verified(&core).await.len(), runs + 1);
     assert!(repo.join("feature.txt").exists());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The agent cannot resolve it: you stop the resolution, and its worktree is no longer in a
@@ -1045,7 +1066,7 @@ async fn you_can_stop_a_solo_agents_resolution() {
     assert_eq!(std::fs::read_to_string(wt.join("greeting.txt")).unwrap(), "hello from the agent\n");
     let lines = said(&core, &thread).await;
     assert!(lines.last().unwrap().starts_with("You stopped the conflict resolution. Codly took the merge out of"), "{lines:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// `worker` for every task, and a reviewer that approves what it is given.
@@ -1095,7 +1116,7 @@ async fn the_reviewer_of_a_resolution_reads_the_resolution_only() {
     assert!(brief.contains("\n-<<<<<<<") && brief.contains("\n-hello from the plan\n") && brief.contains("\n-hello from main\n") && brief.contains("\n+hello from main and the plan\n"), "{brief}");
     assert!(!brief.contains("mine") && !brief.contains("README.md"), "your own commit merged by itself: it is not for review: {brief}");
     assert!(brief.contains("About the diff: this task worked on a merge of the plan's branch with the user's branch.") && brief.contains("Check that each resolution keeps what both sides changed."), "{brief}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// mode.txt as the task that fixes the checks leaves it: written from the plan's feature.txt
@@ -1194,7 +1215,7 @@ async fn an_agent_fixes_checks_that_fail_on_the_merge_result() {
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (sha, Some(bad)));
     assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
     assert_eq!(std::fs::read_to_string(repo.join("feature.txt")).unwrap(), "on\n");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The agent cannot make the check pass and you cancel its task: the merge of your branch is
@@ -1242,7 +1263,7 @@ async fn a_fix_of_the_checks_that_does_not_finish_takes_the_merge_back() {
     let state = core.merge_state(&source).await.unwrap();
     assert_eq!((&state.failed_checks, state.resolving, state.behind), (&vec![check.to_string()], None, 1));
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["status", "--porcelain"])), (bad, String::new()));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A resolution that does not finish takes the new files of its worker out of the plan's
@@ -1288,7 +1309,7 @@ async fn the_new_files_of_a_resolution_that_did_not_finish_go() {
     assert_eq!(std::fs::read_to_string(integ_wt.join("local.env")).unwrap(), "PORT=1\n");
     assert_eq!(sh(&integ_wt, &["status", "--porcelain"]), "?? cache/\n?? local.env".to_string());
     assert_eq!(std::fs::read_to_string(integ_wt.join("greeting.txt")).unwrap(), "hello from the plan\n");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Makes the store refuse one write of a resolution's start (`write`: the trigger's event, in
@@ -1361,7 +1382,7 @@ async fn a_fix_of_the_checks_that_cannot_start_leaves_no_unchecked_merge_behind(
     task_with(&core, "fix-checks", TaskStatus::Done).await;
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The same with a conflict: the merge is open in the plan's worktree, with its markers, the
@@ -1401,7 +1422,7 @@ async fn a_resolution_that_cannot_start_leaves_no_open_merge_behind() {
     wait_plan(&core, PlanStatus::Done).await;
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The rows of Codly's store whose key starts with `prefix`, read through a connection of the
@@ -1476,7 +1497,7 @@ async fn a_start_that_codly_was_closed_in_the_middle_of_is_taken_back_before_the
     assert_eq!(start_records(dir.path()), Vec::<String>::new());
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Every record of a merge that Codly keeps in the store, the first one a start writes after
@@ -1535,7 +1556,7 @@ async fn a_take_back_that_cannot_be_written_down_still_says_the_branch_is_back()
     wait_plan(&core, PlanStatus::Done).await;
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The write that cancels a task.
@@ -1619,7 +1640,7 @@ async fn a_start_cut_short_after_its_task_was_made_cancels_that_task() {
     assert_eq!(core.snapshot().await.unwrap().tasks.iter().find(|t| t.id == task.id).unwrap().status, TaskStatus::Cancelled);
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// No agent works on a cancelled plan any more, and the refusal says what is left for you to
@@ -1665,7 +1686,7 @@ async fn a_cancelled_plan_says_what_is_left_for_you_to_do() {
     drop(db);
     let err = core.resolve_merge_conflict(&source).await.unwrap_err().to_string();
     assert_eq!(err, format!("{CANCELLED}; resolve the conflict yourself"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A new file that was in the plan's worktree before a fix of the checks started (a check's
@@ -1730,7 +1751,7 @@ async fn a_file_that_was_in_the_plans_worktree_before_a_fix_stays_out_of_its_com
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("new.txt")).unwrap(), "made by the task\n");
     assert!(!repo.join("notes.tmp").exists() && !repo.join("cache").exists());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// What the workers were told in their scope rounds.
@@ -1785,7 +1806,7 @@ async fn a_fix_of_the_checks_outside_the_plans_files_needs_a_declared_exception(
     assert!(!told[0].contains("README.md"), "your own file came with the merge: it is not the task's change: {}", told[0]);
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("mode.txt")).unwrap(), FIXED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The task that resolves a conflict is held to its write scope too, the files with the
@@ -1833,7 +1854,7 @@ async fn a_resolution_that_touches_another_file_gets_a_scope_round() {
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("greeting.txt")).unwrap(), RESOLVED);
     assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "# demo\nmine\n");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A file's name can hold what a write scope reads as a pattern: a route folder like `[id]`.
@@ -1876,7 +1897,7 @@ async fn a_resolution_in_a_file_whose_name_reads_as_a_pattern_is_in_its_scope() 
     assert_eq!(scope_rounds(&turns), Vec::<String>::new());
     core.merge_plan(&plan.id).await.unwrap();
     assert_eq!(std::fs::read_to_string(repo.join(PAGE)).unwrap(), RESOLVED);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// With reviews on, a fix of the checks that changed no file by hand (the check passes on the
@@ -1920,7 +1941,7 @@ async fn a_fix_of_the_checks_that_changed_nothing_is_not_reviewed() {
     assert_eq!(reviews, 1, "t1 was reviewed, the fix of the checks was not");
     core.merge_plan(&plan.id).await.unwrap();
     assert!(repo.join("feature.txt").exists());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A merge of a solo agent's branch keeps your branch as it was under the same ref as a merge
@@ -1959,7 +1980,7 @@ async fn a_merge_of_a_solo_agents_branch_keeps_your_branch_as_it_was() {
     let err = core.merge_agent(&solo.id).await.unwrap_err().to_string();
     assert!(err.starts_with("main already has everything on "), "{err}");
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), kept_before_merge(&repo)), (again, Some(yours)));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The last write of a take-back: the records of the start go.
@@ -2005,5 +2026,5 @@ async fn a_take_back_whose_records_stay_says_it_once() {
     assert_eq!(did_not_start(&record), 1, "{record:?}");
     assert!(!record.iter().any(|d| d.contains("did not finish")), "no second line for the same start: {record:?}");
     assert_eq!((sh(&repo, &["rev-parse", "HEAD"]), sh(&repo, &["rev-parse", &branch])), (mine, tip));
-    core.shutdown().await;
+    shut_down(&core).await;
 }

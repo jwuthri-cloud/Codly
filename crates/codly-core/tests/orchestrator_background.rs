@@ -30,11 +30,32 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 const VERIFY: &str = "grep -q hello hello.txt";
 const HELPER: &str = "Ada (explorer): find the callers";
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git").arg("-C").arg(dir).args(args).output().unwrap()
+    Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap()
 }
 
 fn temp_repo(root: &Path) -> PathBuf {
@@ -264,7 +285,7 @@ async fn start(root: &Path, worker: Provider, behavior: Behavior, cli_state: &Cl
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let clis = if worker == Provider::Claude { vec![cli(Provider::Claude)] } else { vec![cli(Provider::Claude), cli(worker)] };
     let spawner = FakeSpawner { worker: behavior, cli: cli_state.clone() };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(clis), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(clis), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     let settings = Settings {
         auto_run_plans: true,
@@ -390,7 +411,7 @@ async fn a_task_is_not_checked_while_its_worker_has_a_background_command() {
     assert_eq!(verified(&after), [true], "checked once, on the file the command wrote; the draft would have failed");
     assert_eq!(cli.lock().unwrap().prompts.len(), 1, "no fix round: the draft was never checked");
     assert!(cli.lock().unwrap().stops.is_empty(), "nothing was stopped");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -417,7 +438,7 @@ async fn a_codex_subagent_that_still_works_holds_the_gate_until_it_ends() {
     let cli = cli.lock().unwrap();
     assert_eq!((cli.prompts.len(), cli.stops.len()), (1, 0), "no other turn of the worker, and nothing was stopped");
     drop(cli);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -465,7 +486,7 @@ async fn background_work_that_does_not_end_is_stopped_when_the_wait_runs_out() {
     let committed = after.iter().position(|e| matches!(e.kind, EventKind::Committed { .. })).unwrap();
     assert!(stopped < committed, "Codly committed after it stopped the command");
     assert_eq!(cli.lock().unwrap().prompts.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -502,7 +523,7 @@ async fn a_turn_while_codly_stops_the_work_does_not_leave_the_task_waiting() {
     assert_eq!(said, [waits, stopped], "the first pass waits its 6 s, and the stop ends that wait and the wait of the turn's pass");
     assert_eq!(verified(&after), [true]);
     assert_eq!(cli.lock().unwrap().prompts.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -540,7 +561,7 @@ async fn a_worker_that_waits_for_its_own_command_is_not_asked_for_a_report_first
     assert_eq!(verified(&after), [true]);
     assert_eq!(cli.lock().unwrap().prompts.len(), 1, "the worker was never asked for its report");
     assert!(!after.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("without a report"))));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -585,7 +606,7 @@ async fn the_question_about_a_missing_report_comes_once_after_the_wait() {
     assert!(prompts[1].starts_with(REPORT_QUESTION), "{}", prompts[1]);
     assert_eq!(cli.lock().unwrap().stops, ["tid-1"]);
     assert_eq!(verified(&after), [true]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker that was asked for its report before is not asked a second time. When Codly then
@@ -627,7 +648,7 @@ async fn a_stop_after_the_question_is_followed_by_the_checks() {
     let prompts = cli.lock().unwrap().prompts.clone();
     assert_eq!(prompts.len(), 2, "the task, and one question: {prompts:?}");
     assert_eq!(verified(&after), [true]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -688,7 +709,7 @@ async fn the_wait_for_background_work_is_one_budget_inside_a_round() {
     assert_eq!(said[2].0, "t1: the background command `npm run dev` still ran after Codly waited 8 s in all. Codly stopped it and checks the work now");
     assert_eq!(verified(&after), [true]);
     assert_eq!(cli.lock().unwrap().prompts.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The first round uses the whole wait on a dev server, and its check fails. The gate sends
@@ -727,7 +748,7 @@ async fn a_round_that_the_gate_starts_waits_again_for_background_work() {
     assert_eq!(cli.lock().unwrap().stops, ["tid-1", "tid-2"]);
     assert_eq!(verified(&after), [false, true], "the draft failed its check, and the fix passed");
     assert_eq!(cli.lock().unwrap().prompts.len(), 2, "the task, and one fix round");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Your own "Send back" from the diff starts a round too. The first round has used 2 seconds
@@ -791,7 +812,7 @@ async fn a_round_that_your_send_back_starts_waits_again_for_background_work() {
     let prompts = cli.lock().unwrap().prompts.clone();
     assert_eq!(prompts.len(), 2, "the task, and your comments");
     assert!(prompts[1].contains(COMMENTS), "{}", prompts[1]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -811,7 +832,7 @@ async fn a_codex_subagent_that_does_not_end_is_interrupted_when_the_wait_runs_ou
     assert_eq!(said[1].0, format!("t1: the helper `{HELPER}` still ran after 1 s. Codly stopped it and checks the work now"));
     assert_eq!(said[1].1["not_stopped"], json!([]));
     assert_eq!(verified(&after), [true]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A Claude worker leaves a helper and a command running. When the wait runs out, the helper
@@ -847,7 +868,7 @@ async fn a_claude_workers_helper_is_stopped_with_an_interrupt_and_its_command_wi
     assert_eq!(said[1].1["not_stopped"], json!([]));
     assert_eq!(verified(&after), [true], "checked once");
     assert_eq!(cli.lock().unwrap().prompts.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A wait with nothing left of its budget, for a worker that gave no report: the task says
@@ -890,5 +911,5 @@ async fn a_wait_with_nothing_left_names_the_question_about_the_report_as_the_nex
     assert_eq!(prompts.len(), 2, "the task, and the question: {prompts:?}");
     assert!(prompts[1].starts_with(REPORT_QUESTION), "{}", prompts[1]);
     assert_eq!(verified(&after), [true]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }

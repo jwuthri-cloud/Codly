@@ -12,8 +12,29 @@ use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOpti
 use codly_core::store::Store;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -123,10 +144,14 @@ impl Spawner for Fake {
                                 };
                                 send(EventKind::ApprovalRequested { approval });
                                 // The answer arrives as the next command.
-                                if let Ok(Some(AgentCmd::Approval { decision, .. })) =
-                                    tokio::time::timeout(Duration::from_secs(5), rx.recv()).await
-                                {
-                                    seen.lock().unwrap().answers.push(decision.choice);
+                                match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                                    Ok(Some(AgentCmd::Approval { decision, .. })) => seen.lock().unwrap().answers.push(decision.choice),
+                                    // Told to stop while it waited for the answer: no answer comes, and the run ends.
+                                    Ok(Some(AgentCmd::Shutdown)) => {
+                                        send(EventKind::Exited { code: Some(0) });
+                                        break;
+                                    }
+                                    _ => {}
                                 }
                             }
                             send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(1) });
@@ -166,7 +191,7 @@ async fn hired_agent(dir: &Path, seen: &Arc<Mutex<Seen>>) -> (Arc<Core>, String)
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -211,7 +236,7 @@ async fn blocked_tools_are_denied_and_allowed_again() {
     core.set_agent_block_tools(&id, false).await.unwrap();
     assert!(!core.agent_control(&id).await.unwrap().block_tools);
     assert!(core.set_agent_block_tools("nobody", true).await.is_err());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -249,7 +274,7 @@ async fn stop_after_step_holds_steer_notes_until_resume() {
     assert!(prompts[2].ends_with("prefer the v2 client"));
     assert!(core.resume_agent(&id).await.is_err(), "not paused any more");
     assert!(core.steer_agent(&id, "  ").await.is_err());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -271,7 +296,7 @@ async fn idle_agent_pauses_at_once_and_kill_clears_the_controls() {
         events.iter().any(|e| matches!(&e.kind, EventKind::ControlChanged { control } if control.is_default())).then_some(())
     })
     .await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -289,7 +314,7 @@ async fn a_run_that_dies_during_startup_leaves_no_ghost() {
     assert_eq!(runs.len(), 2);
     let store = Store::open(&dir.path().join("data/codly.sqlite")).unwrap();
     assert_ne!(store.run(&runs[0]).unwrap().unwrap().status, "running", "the run that died is over");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -308,7 +333,7 @@ async fn two_quick_messages_start_one_run_and_both_arrive() {
         ["one", "two"].iter().all(|t| prompts.iter().any(|p| p.ends_with(t))).then_some(())
     })
     .await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -329,7 +354,7 @@ async fn a_message_sent_while_an_agent_starts_follows_the_one_that_started_it() 
     let prompts = seen.lock().unwrap().prompts.clone();
     assert!(prompts[0].ends_with("one") && prompts[1].ends_with("two"), "in the order you sent them: {prompts:?}");
     assert_eq!(seen.lock().unwrap().runs.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -344,5 +369,5 @@ async fn a_message_after_stop_starts_a_fresh_run() {
     wait_for("the message to arrive", async || seen.lock().unwrap().prompts.iter().any(|p| p.ends_with("still there?")).then_some(())).await;
     let spawns = seen.lock().unwrap().runs.len();
     assert_eq!(spawns, 2, "a new run took it");
-    core.shutdown().await;
+    shut_down(&core).await;
 }

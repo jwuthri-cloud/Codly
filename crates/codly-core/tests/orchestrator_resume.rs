@@ -19,8 +19,29 @@ use codly_core::orchestrator::trust::TrustChoice;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -208,7 +229,7 @@ async fn core_with(dir: &Path, seen: &Arc<Mutex<Seen>>) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -225,7 +246,7 @@ async fn a_resume_that_fails_says_so_and_goes_on_in_a_new_conversation() {
     let cfg = CoreConfig { data_dir: dir.path().join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -259,7 +280,7 @@ async fn a_resume_that_fails_says_so_and_goes_on_in_a_new_conversation() {
     });
     assert!(recorded, "the decision log has it too");
     assert_eq!(agent_now(&core, &id).await.session_id.as_deref(), Some("sess-2"), "the next message resumes the new conversation");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -270,7 +291,7 @@ async fn a_worker_whose_resume_fails_says_so_and_the_decision_is_on_its_task() {
     let cfg = CoreConfig { data_dir: dir.path().join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -301,7 +322,7 @@ async fn a_worker_whose_resume_fails_says_so_and_the_decision_is_on_its_task() {
         _ => false,
     });
     assert!(on_task, "the decision is on the task");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The Claude adapter's typed start error: the CLI said that it no longer has the
@@ -324,7 +345,7 @@ async fn a_conversation_the_cli_no_longer_has_is_said_as_that() {
     wait_for("the notice", async || codly_said(&core, &id).await.contains(&notice).then_some(())).await;
     assert_eq!(codly_said(&core, &id).await, [notice], "said once");
     assert_eq!(agent_now(&core, &id).await.session_id.as_deref(), Some("sess-2"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A resume fails and a new session does not start either (the CLI is signed out): nothing
@@ -357,7 +378,7 @@ async fn a_conversation_is_kept_when_no_new_one_starts_either() {
     say(&core, &seen, &id, "and now?").await;
     assert_eq!(seen.lock().unwrap().starts.last().map(String::as_str), Some("resume sess-1"));
     assert!(codly_said(&core, &id).await.is_empty());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A Lead goes the same way as a 1:1 agent: its request thread says that its conversation is
@@ -385,7 +406,7 @@ async fn a_lead_whose_conversation_is_gone_says_so_in_its_request_thread() {
     let notice = format!("Claude Code no longer has {name}'s earlier conversation. A new one started: {name} does not know what was said before.");
     wait_for("the notice", async || codly_said_in(&core, "lead").await.contains(&notice).then_some(())).await;
     wait_for("the new conversation on the Lead", async || lead().await.filter(|l| l.session_id.as_deref() == Some("sess-2"))).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A core on a new repo with these CLIs and settings, and the fake agent in place of each CLI.
@@ -394,7 +415,7 @@ async fn core_on(dir: &Path, seen: &Arc<Mutex<Seen>>, providers: &[Provider], se
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(providers.iter().map(|p| cli(*p)).collect()),
         index: false,
     };
@@ -442,7 +463,7 @@ async fn a_worker_whose_resume_codly_refused_keeps_its_session() {
     wait_for("the worker's next turn", async || (seen.lock().unwrap().prompts.len() == 2).then_some(())).await;
     assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1", "resume sess-1"]);
     assert!(codly_said(&core, &worker).await.is_empty());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The team's agent called `name`.
@@ -470,7 +491,7 @@ async fn a_team_member_whose_conversation_is_gone_says_so_in_its_thread() {
     wait_for("the notice", async || codly_said(&core, &ana).await.contains(&notice).then_some(())).await;
     assert_eq!(codly_said(&core, &ana).await, [notice], "said once");
     assert_eq!(agent_now(&core, &ana).await.session_id.as_deref(), Some("sess-2"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A team member's CLI is not started in its worktree while the worktree has configuration
@@ -500,7 +521,7 @@ async fn a_team_member_keeps_its_conversation_while_its_folder_waits_for_your_tr
     core.workspace_trust(Some(TrustChoice { trust: Some(asked.worktrees[0].fingerprint.clone()) })).await.unwrap();
     say(&core, &seen, &gil, "and now?").await;
     assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A Lead on a CLI that Codly does not start in your folder while the folder has configuration
@@ -545,5 +566,5 @@ async fn a_lead_keeps_its_conversation_while_your_folder_waits_for_your_trust() 
     assert_eq!(seen.lock().unwrap().starts, ["new", "resume sess-1"]);
     let said = codly_said_in(&core, "lead").await;
     assert!(!said.iter().any(|text| text.contains("earlier conversation")), "no conversation was lost: {said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }

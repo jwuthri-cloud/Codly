@@ -5,6 +5,7 @@
 //! command), crash recovery resuming a lost run by session id, and parallel request
 //! threads (one Lead each, at most 3 live, plans running side by side).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -21,8 +22,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn sh(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -81,6 +103,9 @@ struct FakeTurn {
     /// The turn itself read that its run is told to stop (it was waiting for a command): the
     /// run ends in the middle of this turn.
     stopped: Arc<AtomicBool>,
+    /// Commands that came while the turn held (`hold`): the run reads them after the turn,
+    /// as it would have read them from its channel.
+    later: Arc<Mutex<VecDeque<AgentCmd>>>,
 }
 
 impl FakeTurn {
@@ -169,7 +194,55 @@ impl FakeTurn {
             }
         }
     }
+
+    /// Wait for `word` (the test's signal), like a CLI that works until then. A stop that comes
+    /// meanwhile is kept for after the turn, and the turn waits at most `STOP_GRACE` more for
+    /// the word: a CLI that is told to stop does not work on for long. Without that bound, a
+    /// turn the test never lets go keeps its run alive through `Core::shutdown` (see
+    /// `work_until_stopped`). True when the word came; false: the run ends in the middle of
+    /// this turn, and the turn returns.
+    async fn hold(&self, word: impl std::future::Future<Output = ()>) -> bool {
+        let mut word = std::pin::pin!(word);
+        let mut cmds = self.cmds.lock().await;
+        let told = loop {
+            tokio::select! {
+                _ = &mut word => return true,
+                cmd = cmds.recv() => match cmd {
+                    Some(AgentCmd::Shutdown) => break true,
+                    Some(cmd) => self.later.lock().unwrap().push_back(cmd),
+                    None => break false,
+                },
+            }
+        };
+        drop(cmds);
+        let came = tokio::time::timeout(STOP_GRACE, word).await.is_ok();
+        if !came {
+            self.stopped.store(true, Ordering::SeqCst);
+        } else if told {
+            self.later.lock().unwrap().push_back(AgentCmd::Shutdown);
+        }
+        came
+    }
+
+    /// The next prompt that reaches this turn within `secs` (a CLI that steers it into the
+    /// running turn); None for anything else. A stop in its place ends the run in the middle
+    /// of this turn.
+    async fn steered_prompt(&self, secs: u64) -> Option<String> {
+        let next = tokio::time::timeout(Duration::from_secs(secs), async { self.cmds.lock().await.recv().await }).await;
+        match next {
+            Ok(Some(AgentCmd::Prompt(text))) => Some(text),
+            Ok(Some(AgentCmd::Shutdown)) => {
+                self.stopped.store(true, Ordering::SeqCst);
+                None
+            }
+            _ => None,
+        }
+    }
 }
+
+/// How long a held turn (`FakeTurn::hold`) still waits for the test's word once its run is told
+/// to stop: well inside the 4 s `Core::shutdown` gives every run.
+const STOP_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct Log {
@@ -230,8 +303,13 @@ impl Spawner for FakeSpawner {
             let (spec2, events2, cmds2) = (spec.clone(), events.clone(), cmds.clone());
             tokio::spawn(async move {
                 let stopped = Arc::new(AtomicBool::new(false));
+                let later = Arc::new(Mutex::new(VecDeque::new()));
                 loop {
-                    let cmd = { cmds2.lock().await.recv().await };
+                    let held = later.lock().unwrap().pop_front();
+                    let cmd = match held {
+                        Some(cmd) => Some(cmd),
+                        None => cmds2.lock().await.recv().await,
+                    };
                     let Some(cmd) = cmd else { break };
                     let send = |kind| {
                         let _ = events2.send(AdapterEvent { agent_id: spec2.agent_id.clone(), run_id: spec2.run_id.clone(), kind });
@@ -249,7 +327,7 @@ impl Spawner for FakeSpawner {
                             }
                             send(EventKind::TurnStarted { input: Some(text.clone()) });
                             send(EventKind::StatusChanged { status: AgentStatus::Thinking });
-                            let turn = FakeTurn { spec: spec2.clone(), prompt: text, events: events2.clone(), cmds: cmds2.clone(), stopped: stopped.clone() };
+                            let turn = FakeTurn { spec: spec2.clone(), prompt: text, events: events2.clone(), cmds: cmds2.clone(), stopped: stopped.clone(), later: later.clone() };
                             behavior(turn).await;
                             // The turn read the Shutdown itself: the run ends without a turn end.
                             if stopped.load(Ordering::SeqCst) {
@@ -393,6 +471,17 @@ fn planning_lead_with(scope: &[&str], verify: &str) -> Behavior {
     })
 }
 
+/// Some once the check `command` has ended (passed or failed).
+async fn verified(core: &Core, command: &str) -> Option<()> {
+    let events = core.events(None, None, 2000).await.unwrap();
+    events.iter().any(|e| matches!(&e.kind, EventKind::Verified { command: c, .. } if c == command)).then_some(())
+}
+
+/// Some once `agent` has had a turn on a prompt that ends with `text`.
+fn chat_turn(log: &Mutex<Log>, agent: &str, text: &str) -> Option<()> {
+    log.lock().unwrap().turns.iter().any(|t| t.0 == agent && t.1.ends_with(text)).then_some(())
+}
+
 async fn task_status(core: &Core) -> Option<(Task, Plan)> {
     let s = core.snapshot().await.unwrap();
     Some((s.tasks.first()?.clone(), s.plans.first()?.clone()))
@@ -408,7 +497,7 @@ async fn start_with_clis(root: &Path, spawner: impl Spawner, clis: Vec<CliInfo>)
 
 async fn start_full(root: &Path, spawner: impl Spawner, clis: Vec<CliInfo>, index: bool) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(clis), index };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(clis), index };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -582,7 +671,7 @@ async fn single_task_plan_runs_end_to_end() {
     let err = core.merge_plan(&plan.id).await.unwrap_err().to_string();
     assert!(err.contains("uncommitted changes in hello.txt, which this plan also changes"), "{err}");
     assert!(!err.contains("README.md"), "{err}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A plan that started on another branch than the one checked out at merge time is merged only
@@ -660,7 +749,7 @@ async fn a_plan_asks_before_merging_into_another_branch_and_its_merge_can_be_und
     sh(&repo, &["checkout", "-q", "feature-x"]);
     core.merge_plan(&plan.id).await.unwrap();
     assert!(repo.join("hello.txt").exists());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A solo agent's merge takes everything in its worktree, also what its last turn left
@@ -707,7 +796,7 @@ async fn a_solo_merge_takes_uncommitted_work_and_can_be_undone() {
     // The same work can be merged again.
     core.merge_agent(&solo.id).await.unwrap();
     assert!(repo.join("notes.txt").exists());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -779,7 +868,7 @@ async fn verify_failure_gets_one_fix_round_and_a_lesson() {
     assert!(prompts[1].starts_with("[Codly] Verification failed (fix round 1/2): `grep -q hello hello.txt` exited 1"), "{}", prompts[1]);
     let spawns = log.lock().unwrap().spawns.iter().filter(|s| s.0 == Role::Worker).count();
     assert_eq!(spawns, 1, "the fix round reuses the live worker");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -953,7 +1042,7 @@ async fn crash_recovery_marks_lost_runs_and_resumes_the_session() {
 
     let store = Store::open(&data.join("codly.sqlite")).unwrap();
     assert_eq!(store.run(&run_id).unwrap().unwrap().status, "lost");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -990,7 +1079,7 @@ async fn recover_expires_pending_approvals_nobody_owns() {
     assert!(events.iter().any(
         |e| matches!(&e.kind, EventKind::ApprovalResolved { approval_id: id, status: ApprovalStatus::Expired, .. } if *id == approval_id)
     ));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1014,7 +1103,7 @@ async fn board_moves_follow_the_rules() {
     assert!(core.hire_agent(Provider::Codex, None, None).await.is_err(), "Codex is not installed here");
     let e = core.send_chat("nowhere", "hi").await.unwrap_err().to_string();
     assert!(e.contains("unknown thread"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1036,7 +1125,7 @@ async fn solo_model_switches_and_ignores_no_change() {
     assert_eq!(looked.look_seed, "moss#style=3&hair=2");
     assert!(core.set_agent_look(&solo.id, "  ").await.is_err());
     assert!(core.set_agent_look(&solo.id, "a\nb").await.is_err());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1071,7 +1160,7 @@ async fn solo_chat_uses_its_own_permissions() {
     wait_for("the approval", 20, async || (!choices.lock().unwrap().is_empty()).then_some(())).await;
     assert_eq!(choices.lock().unwrap().as_slice(), &[Some(ApprovalChoice::AllowOnce)]);
     assert_eq!(core.snapshot().await.unwrap().request_prefs[&thread].approval_mode, Some(ApprovalMode::Autonomous));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Trust is yours to give whatever the rank: a new hire you trust works on its own where
@@ -1111,7 +1200,7 @@ async fn a_new_hire_you_trust_works_on_its_own_and_the_decision_says_why() {
     assert_eq!(why, "auto-allowed autonomous: no risk detected (you trust it to work on its own)");
     wait_for("the agent to get its answer", 20, async || (!choices.lock().unwrap().is_empty()).then_some(())).await;
     assert_eq!(choices.lock().unwrap().as_slice(), &[Some(ApprovalChoice::AllowOnce)]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1146,7 +1235,7 @@ async fn one_to_one_prefs_are_saved_in_the_agents_office() {
     wait_for("the approval", 20, async || (!choices.lock().unwrap().is_empty()).then_some(())).await;
     assert_eq!(choices.lock().unwrap().as_slice(), &[Some(ApprovalChoice::AllowOnce)]);
     assert_eq!(core.snapshot().await.unwrap().request_prefs.get(&thread).and_then(|p| p.approval_mode), Some(ApprovalMode::Autonomous));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Kill an agent while its request waits for you: the request is closed, and an answer that
@@ -1186,7 +1275,7 @@ async fn a_killed_agents_request_is_closed_and_takes_no_answer() {
     assert_eq!(ends, [ApprovalStatus::Expired], "closed once, as expired: never as approved");
     let again = core.resolve_approval(&ask.id, allow()).await.expect_err("a closed request takes no answer").to_string();
     assert_eq!(again, "that approval was already expired");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1208,7 +1297,8 @@ async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
     let (_, plan) =
         wait_for("verification to start", 20, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Verifying)).await;
     core.cancel_plan(&plan.id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(2500)).await; // the verify command finishes meanwhile
+    wait_for("the verify command to finish", 20, async || verified(&core, "sleep 1 && grep -q hello hello.txt").await).await;
+    tokio::time::sleep(Duration::from_millis(500)).await; // what its end set off has run its course
     let (task, plan) = task_status(&core).await.unwrap();
     assert_eq!(plan.status, PlanStatus::Cancelled);
     assert_eq!(task.status, TaskStatus::Cancelled, "an in-flight gate never resurrects a cancelled task");
@@ -1217,7 +1307,7 @@ async fn cancelling_mid_gate_stays_cancelled_and_merges_nothing() {
     let integ = PathBuf::from(plan.integration_worktree.unwrap());
     assert!(!integ.join("hello.txt").exists());
     assert!(sh(&repo, &["branch", "--list", "codly/*"]).contains("/t1"), "the task branch is kept");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1240,7 +1330,8 @@ async fn stopping_mid_gate_stays_blocked_and_the_plan_still_cancels() {
         wait_for("verification to start", 20, async || task_status(&core).await.filter(|(t, _)| t.status == TaskStatus::Verifying)).await;
     let worker_id = task.assignee.clone().unwrap();
     core.stop_agent(&worker_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(2500)).await; // the verify command fails meanwhile
+    wait_for("the verify command to fail", 20, async || verified(&core, "sleep 1 && false").await).await;
+    tokio::time::sleep(Duration::from_millis(500)).await; // what its end set off has run its course
     let (task, _) = task_status(&core).await.unwrap();
     assert_eq!(task.status, TaskStatus::Blocked, "an in-flight gate never restarts a task you stopped");
     assert!(task.status_reason.as_deref().is_some_and(|r| r.starts_with("stopped by you")), "{:?}", task.status_reason);
@@ -1252,7 +1343,7 @@ async fn stopping_mid_gate_stays_blocked_and_the_plan_still_cancels() {
     let (task, plan) = task_status(&core).await.unwrap();
     assert_eq!(plan.status, PlanStatus::Cancelled);
     assert_eq!(task.status, TaskStatus::Cancelled);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1307,7 +1398,7 @@ async fn a_plan_cancelled_while_integrating_stays_cancelled() {
     let snap = core.snapshot().await.unwrap();
     assert_eq!(snap.plans[0].status, PlanStatus::Cancelled, "a finished check never brings a cancelled plan back");
     assert!(!snap.chats.iter().any(|c| c.text.starts_with("Plan done")), "no \"Plan done\" for a cancelled plan");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1345,7 +1436,7 @@ async fn cancelling_while_the_worker_starts_sends_no_brief() {
     let events = core.events(None, None, 2000).await.unwrap();
     let failed_start = |e: &EventRow| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("could not start"));
     assert!(!events.iter().any(failed_start), "a cancel is not a failed start");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1362,7 +1453,7 @@ async fn quitting_while_a_worker_starts_leaves_its_task_to_resume() {
     core.send_chat("lead", "Please add a hello file").await.unwrap();
     wait_for("the worker's process to start", 20, async || log.lock().unwrap().spawns.iter().any(|s| s.0 == Role::Worker).then_some(())).await;
     // Quit; its handshake finishes right after, into a run that takes no brief any more.
-    tokio::join!(core.shutdown(), async { up.notify_one() });
+    tokio::join!(shut_down(&core), async { up.notify_one() });
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (task, _) = task_status(&core).await.unwrap();
     assert_eq!(task.status, TaskStatus::Running, "the next start resumes it: {:?}", task.status_reason);
@@ -1379,7 +1470,9 @@ async fn a_running_task_can_be_stopped_from_the_board() {
     let worker: Behavior = Arc::new(move |turn: FakeTurn| {
         let wait = wait.clone();
         Box::pin(async move {
-            wait.notified().await;
+            if !turn.hold(wait.notified()).await {
+                return;
+            }
             turn.write("hello.txt", "hello\n");
             turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote it." })).await;
         })
@@ -1407,7 +1500,7 @@ async fn a_running_task_can_be_stopped_from_the_board() {
     go.notify_one();
     core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
     wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The repo's setup script fails in the plan's integration worktree: the plan does not start
@@ -1484,7 +1577,7 @@ async fn a_failing_setup_script_holds_the_plan_until_it_is_fixed() {
     let (ready, port) = &seen[0];
     assert!(port.as_deref().is_some_and(|p| p.parse::<u16>().is_ok()), "the worker has ports of its own: {port:?}");
     assert_eq!(ready.as_deref().map(str::trim), port.as_deref(), "the script ran in the task's worktree before the worker's first turn");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1526,7 +1619,7 @@ async fn a_gate_failure_frees_the_worker_so_retry_works() {
     core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
     let (task, _) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
     assert_eq!(task.status, TaskStatus::Done);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1572,7 +1665,7 @@ async fn a_task_that_is_merging_cannot_be_cancelled() {
     assert!(e.contains("is merging now"), "{e}");
     let (task, _) = wait_for("the plan to finish", 30, async || task_status(&core).await.filter(|(_, p)| p.status == PlanStatus::Done)).await;
     assert_eq!(task.status, TaskStatus::Done);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Quit while a start is on its way: a run that comes up after Codly began to quit is told to
@@ -1587,7 +1680,7 @@ async fn a_run_that_comes_up_while_codly_quits_is_told_to_stop() {
     let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: stay.clone(), worker: stay }).await;
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
     let solo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
-    core.shutdown().await;
+    shut_down(&core).await;
     // The quit has begun (and is over: no run was up to wait for). This message's run starts now.
     let _ = core.send_chat(&format!("agent:{}", solo.id), "are you there?").await;
     wait_for("the late run to be told to stop", 10, async || log.lock().unwrap().shutdowns.contains(&solo.id).then_some(())).await;
@@ -1615,7 +1708,10 @@ async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat
     // Its worktree is still being added: stop it, then talk to it.
     core.stop_agent(&worker_id).await.unwrap();
     core.send_chat(&format!("agent:{worker_id}"), "are you there?").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(2000)).await; // the stopped start runs its course meanwhile
+    // The stopped start runs its course: it notes the worktree once it is added, then stops short.
+    wait_for("the worktree to be added", 20, async || task_status(&core).await.filter(|(t, _)| t.worktree.is_some())).await;
+    wait_for("the chat's turn", 20, async || chat_turn(&log, &worker_id, "are you there?")).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     {
         let log = log.lock().unwrap();
         assert!(log.turns.iter().any(|t| t.0 == worker_id && t.1.ends_with("are you there?")), "{:?}", log.turns);
@@ -1625,7 +1721,7 @@ async fn a_start_stopped_while_its_worktree_is_added_leaves_the_agents_next_chat
     let snap = core.snapshot().await.unwrap();
     assert_eq!(snap.tasks[0].status, TaskStatus::Blocked);
     assert!(snap.agents.iter().any(|a| a.id == worker_id && a.run_id.is_some()), "the chat is still running");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1652,6 +1748,7 @@ async fn cancelling_a_plan_while_a_worktree_is_added_leaves_the_agents_chat_alon
     core.cancel_plan(&plan.id).await.unwrap();
     // The cancelled start runs its course: it notes the worktree once it is added, then stops short.
     wait_for("the worktree to be added", 20, async || task_status(&core).await.filter(|(t, _)| t.worktree.is_some())).await;
+    wait_for("the chat's turn", 20, async || chat_turn(&log, &worker_id, "are you there?")).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     {
         let log = log.lock().unwrap();
@@ -1662,7 +1759,7 @@ async fn cancelling_a_plan_while_a_worktree_is_added_leaves_the_agents_chat_alon
     let snap = core.snapshot().await.unwrap();
     assert_eq!(snap.tasks[0].status, TaskStatus::Cancelled);
     assert!(snap.agents.iter().any(|a| a.id == worker_id && a.run_id.is_some()), "the chat is still running");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1693,7 +1790,7 @@ async fn an_answer_for_a_worker_that_is_shutting_down_restarts_its_task_with_it(
     wait_for("the restarted worker to get the answer", 20, async || turns_of(&log, &worker).iter().any(|t| t.starts_with(answer)).then_some(())).await;
     let runs = log.lock().unwrap().runs.iter().filter(|r| r.0 == worker).count();
     assert_eq!(runs, 2, "a new run of the task took the answer");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1715,7 +1812,7 @@ async fn late_events_of_a_failed_start_change_nothing() {
     assert_eq!(store.run(&run_id).unwrap().unwrap().status, "failed", "a late exit does not turn a failed start into a completed run");
     let agent = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == solo.id).unwrap();
     assert_ne!(agent.session_id.as_deref(), Some("stale"), "the session of a start that failed is not the agent's");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1747,7 +1844,7 @@ async fn a_rejected_event_is_not_broadcast() {
         }
     }
     assert!(shown.is_empty(), "a row that is not on record was shown, with id {shown:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1784,7 +1881,7 @@ async fn a_user_steer_during_the_gate_is_committed_before_merging() {
     let snap = core.snapshot().await.unwrap();
     assert!(snap.chats.iter().any(|c| c.thread == format!("agent:{worker_id}") && c.author == "user" && c.text == "also add bye.txt"));
     assert!(snap.chats.iter().any(|c| c.thread == format!("agent:{worker_id}") && c.text == "Added bye.txt too."));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Codex puts a prompt that arrives while a turn runs into that turn: no turn of its own, only
@@ -1798,8 +1895,7 @@ async fn a_prompt_steered_into_the_running_turn_does_not_hold_the_gate() {
     let worker: Behavior = Arc::new(|turn: FakeTurn| {
         Box::pin(async move {
             // Like the Codex adapter: the next prompt lands in this turn.
-            let next = tokio::time::timeout(Duration::from_secs(5), async { turn.cmds.lock().await.recv().await }).await;
-            let Ok(Some(AgentCmd::Prompt(text))) = next else { return };
+            let Some(text) = turn.steered_prompt(5).await else { return };
             turn.emit(EventKind::PromptSteered { input: text });
             turn.write("hello.txt", "hello\n");
             turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Wrote hello.txt." })).await;
@@ -1831,7 +1927,7 @@ async fn a_prompt_steered_into_the_running_turn_does_not_hold_the_gate() {
     let events = core.events(None, None, 3000).await.unwrap();
     assert!(events.iter().any(|e| matches!(&e.kind, EventKind::AgentChanged { agent } if agent.id == worker_id && agent.provider == Provider::Codex)));
     assert!(events.iter().any(|e| matches!(&e.kind, EventKind::PromptSteered { input } if input.contains("keep the greeting lowercase"))));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Claude starts a turn by itself when a background task ends: a `TurnStarted` with no input.
@@ -1846,8 +1942,7 @@ async fn a_turn_the_cli_starts_by_itself_takes_no_waiting_prompt() {
         Box::pin(async move {
             // Like the Claude adapter: the message waits in the CLI and the brief's turn ends
             // without it, ...
-            let next = tokio::time::timeout(Duration::from_secs(5), async { turn.cmds.lock().await.recv().await }).await;
-            let Ok(Some(AgentCmd::Prompt(text))) = next else { return };
+            let Some(text) = turn.steered_prompt(5).await else { return };
             let end = || turn.emit(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(5) });
             end();
             // ... a background task that ended wakes the CLI for a turn of its own ...
@@ -1882,7 +1977,7 @@ async fn a_turn_the_cli_starts_by_itself_takes_no_waiting_prompt() {
     .await;
     assert_eq!((task.status, plan.status), (TaskStatus::Done, PlanStatus::Done));
     assert_eq!(turns_of(&log, &worker_id).len(), 1, "the gate asked the worker for nothing before the message's turn had ended");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A Lead's message that goes into a member's running turn (`PromptSteered`) is answered by
@@ -1904,8 +1999,7 @@ async fn a_members_answer_follows_a_message_steered_into_its_turn() {
     let worker: Behavior = Arc::new(|turn: FakeTurn| {
         Box::pin(async move {
             // The Lead's message arrives while this turn runs, and goes into it.
-            let next = tokio::time::timeout(Duration::from_secs(10), async { turn.cmds.lock().await.recv().await }).await;
-            let Ok(Some(AgentCmd::Prompt(text))) = next else { return };
+            let Some(text) = turn.steered_prompt(10).await else { return };
             tokio::time::sleep(Duration::from_millis(50)).await; // a CLI takes it at its next tool boundary, not at once
             turn.emit(EventKind::PromptSteered { input: text });
             turn.say("I changed nothing yet.");
@@ -1929,7 +2023,7 @@ async fn a_members_answer_follows_a_message_steered_into_its_turn() {
     })
     .await;
     assert_eq!(turns_of(&log, &ana).len(), 1, "one turn took both messages");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2012,7 +2106,7 @@ async fn cross_vendor_review_requests_changes_then_approves() {
     let fix = log.lock().unwrap().prompts.iter().find(|p| p.0 == Role::Worker && p.1.contains("requested changes")).unwrap().1.clone();
     assert!(fix.contains("[major] hello.txt:1 should greet the world"), "{fix}");
     assert!(fix.contains("<untrusted from=\"reviewer\">"), "reviewer text is quoted as data");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2062,7 +2156,7 @@ async fn a_reviewer_that_got_busy_after_it_was_picked_is_replaced_not_skipped() 
     assert!(!events.iter().any(skipped), "a reviewer that is busy elsewhere is no reason to merge unreviewed");
     let reviewed = events.iter().find(|e| matches!(&e.kind, EventKind::Reviewed { verdict, .. } if verdict == "approve")).expect("someone reviewed it");
     assert_ne!(reviewed.agent_id.as_deref(), Some(picked.id.as_str()), "by another reviewer");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A reviewer whose session is in your terminal ("Open in my terminal") reviews nothing until
@@ -2098,8 +2192,13 @@ async fn a_reviewer_in_your_terminal_is_not_picked_and_no_review_is_skipped() {
         let go = gate.clone();
         Box::pin(async move {
             if turn.spec.cwd.join("a.txt").exists() {
-                while !go.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                let went = turn.hold(async {
+                    while !go.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                });
+                if !went.await {
+                    return;
                 }
                 turn.write("b.txt", "b\n");
             } else {
@@ -2156,7 +2255,7 @@ async fn a_reviewer_in_your_terminal_is_not_picked_and_no_review_is_skipped() {
     assert_eq!(approved_by.iter().filter(|r| **r == first).count(), 1, "the second review is another reviewer's");
     let runs = log.lock().unwrap().runs.iter().filter(|(agent, _)| *agent == first).count();
     assert_eq!(runs, 1, "Codly started nothing for the reviewer in your terminal");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2174,9 +2273,11 @@ async fn stopping_a_reviewer_blocks_the_task_and_frees_its_worker() {
     // still closes its turn with a TurnCompleted before it exits).
     let stopped = Arc::new(tokio::sync::Notify::new());
     let wait = stopped.clone();
-    let reviewer: Behavior = Arc::new(move |_: FakeTurn| {
+    let reviewer: Behavior = Arc::new(move |turn: FakeTurn| {
         let wait = wait.clone();
-        Box::pin(async move { wait.notified().await })
+        Box::pin(async move {
+            turn.hold(wait.notified()).await;
+        })
     });
     let codex = CliInfo { provider: Provider::Codex, ..claude() };
     let spawner = FakeSpawner { log: log.clone(), lead: planning_lead(), worker: by_role(worker, reviewer) };
@@ -2204,7 +2305,7 @@ async fn stopping_a_reviewer_blocks_the_task_and_frees_its_worker() {
     assert!(log.lock().unwrap().shutdowns.contains(&worker_id), "its worker is released too: a Retry can start it");
     let events = core.events(None, None, 3000).await.unwrap();
     assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })), "a review you stopped merges nothing");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2243,7 +2344,7 @@ async fn a_review_that_ends_twice_merges_once() {
     assert_eq!(count(|k| matches!(k, EventKind::Merged { .. })), 1, "merged once");
     let merged = |k: &EventKind| matches!(k, EventKind::Decision { summary, .. } if summary.contains("merged at"));
     assert_eq!(count(merged), 1, "and recorded once");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2268,8 +2369,8 @@ async fn a_steer_during_review_is_gated_before_merging() {
     let reviewer: Behavior = Arc::new(move |turn: FakeTurn| {
         let wait = wait.clone();
         Box::pin(async move {
-            if !turn.prompt.contains("bye.txt") {
-                wait.notified().await;
+            if !turn.prompt.contains("bye.txt") && !turn.hold(wait.notified()).await {
+                return;
             }
             let criteria = json!([{ "criterion": "hello.txt contains hello", "met": true }]);
             turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
@@ -2302,7 +2403,7 @@ async fn a_steer_during_review_is_gated_before_merging() {
     assert!(integ.join("bye.txt").exists(), "the steered turn's work was committed, reviewed and merged");
     let reviews = log.lock().unwrap().prompts.iter().filter(|p| p.0 == Role::Reviewer).count();
     assert_eq!(reviews, 2, "the work the first review never saw got its own review");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2364,7 +2465,7 @@ async fn a_steer_during_verify_is_reviewed_before_merging() {
     let reviews: Vec<String> = log.lock().unwrap().prompts.iter().filter(|p| p.0 == Role::Reviewer).map(|p| p.1.clone()).collect();
     assert_eq!(reviews.len(), 1, "one review, of the whole work");
     assert!(reviews[0].contains("bye.txt"), "the review read the steered turn's work: {}", reviews[0]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A check that runs out of time blocks the task for you, but not under a worker that got a
@@ -2381,7 +2482,9 @@ async fn a_check_that_times_out_during_a_steer_waits_for_the_workers_turn() {
         let wait = wait.clone();
         Box::pin(async move {
             if turn.prompt.starts_with("[User]") {
-                wait.notified().await;
+                if !turn.hold(wait.notified()).await {
+                    return;
+                }
                 turn.write("bye.txt", "bye\n");
                 turn.say("Added bye.txt too.");
             } else {
@@ -2434,7 +2537,7 @@ async fn a_check_that_times_out_during_a_steer_waits_for_the_workers_turn() {
     let said = |what: &str| events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains(what)));
     assert!(!said("blocked:") && !said("fix round"), "neither blocked nor a fix round");
     assert_eq!(log.lock().unwrap().runs.iter().filter(|r| r.0 == worker_id).count(), 1, "the same worker run did both turns");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2495,7 +2598,7 @@ async fn a_worker_at_its_usage_limit_hands_the_task_to_the_next_provider() {
     assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Decision { decision_type, summary, .. }
         if decision_type == "retry" && summary.contains("Claude Code hit its usage limit"))));
     assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("fix round"))));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A team member's half-done work is in its own worktree, on the task's branch: nobody else
@@ -2556,7 +2659,7 @@ async fn a_member_at_its_limit_keeps_its_task() {
     assert!(runs.len() == 2 && matches!(&runs[1], SessionMode::Resume { session_id } if session_id == first), "it continues its session: {runs:?}");
     let events = core.events(None, None, 3000).await.unwrap();
     assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::Decision { summary, .. } if summary.contains("could not start the worker"))));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The Tauri shell awaits these inside `#[tauri::command] async fn`s, which need `Send`
@@ -2668,8 +2771,13 @@ fn echo_lead(hold: Arc<AtomicBool>) -> Behavior {
             let text = turn.prompt.lines().last().unwrap_or_default().to_string();
             if text.starts_with("hold") {
                 let until = Instant::now() + Duration::from_secs(20);
-                while hold.load(Ordering::SeqCst) && Instant::now() < until {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                let held = turn.hold(async {
+                    while hold.load(Ordering::SeqCst) && Instant::now() < until {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                });
+                if !held.await {
+                    return;
                 }
             }
             turn.say(&format!("ok: {text}"));
@@ -2751,7 +2859,7 @@ async fn closing_a_request_cancels_its_plan_and_frees_the_thread() {
     assert_ne!(new.id, old.id);
     assert!(log.lock().unwrap().runs.iter().any(|(a, m)| a == &new.id && matches!(m, SessionMode::New { .. })));
     assert!(core.close_thread("agent:x").await.is_err(), "only requests close");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2779,7 +2887,7 @@ async fn a_new_lead_model_restarts_an_idle_lead_on_its_session() {
     let runs: Vec<&SessionMode> = l.runs.iter().filter(|r| r.0 == lead.id).map(|r| &r.1).collect();
     assert!(matches!(runs[1], SessionMode::Resume { .. }), "same conversation: {runs:?}");
     drop(l);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Two requests at once. A message kept for a Lead that restarts goes out as soon as that Lead
@@ -2833,7 +2941,7 @@ async fn a_message_kept_for_a_restarting_lead_goes_out_when_it_has_exited() {
     wait_chat(&core, "lead:a", "ok: hold on").await;
     let models: Vec<Option<String>> = log.lock().unwrap().models.iter().filter(|m| m.0 == lead.id).map(|m| m.1.clone()).collect();
     assert_eq!(models, [None, Some("opus:high".to_string())], "restarted once, on the new model");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2922,7 +3030,7 @@ async fn two_requests_plan_and_run_side_by_side() {
         "{first}"
     );
     assert!(first.ends_with("Please add a bye file"), "{first}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2993,7 +3101,7 @@ async fn a_workers_question_goes_to_its_plans_lead() {
     assert!(!turns_of(&log, &lead1.id).iter().any(|t| t.contains("asks:")), "the other request's Lead is not asked");
     let fwd = turns_of(&log, &worker.id).into_iter().find(|t| t.contains("Answer from the lead")).unwrap();
     assert!(fwd.contains("Use lowercase bye."), "{fwd}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3060,7 +3168,8 @@ async fn at_most_three_leads_run_and_a_paused_one_resumes_its_session() {
     .await;
     let t0 = Instant::now();
     core.send_chat("lead:2", "hi while busy").await.unwrap();
-    assert!(t0.elapsed() < Duration::from_secs(2), "send_chat does not wait for a Lead slot");
+    // A send that waited would wait for a held Lead's turn (<= 20 s); a slow box needs far less.
+    assert!(t0.elapsed() < Duration::from_secs(10), "send_chat does not wait for a Lead slot");
     let snap = core.snapshot().await.unwrap();
     let queued: Vec<_> = chats(&snap, "lead:2").into_iter().filter(|c| c.author == "codly" && c.text.starts_with("Queued:")).collect();
     assert_eq!(queued.len(), 1, "{:?}", chats(&snap, "lead:2"));
@@ -3088,7 +3197,7 @@ async fn at_most_three_leads_run_and_a_paused_one_resumes_its_session() {
     })
     .await;
     assert_eq!(snap.agents.iter().filter(|a| a.role == Role::Lead).count(), 4);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 fn turns_of_locked(log: &Log, agent: &str) -> Vec<String> {
@@ -3105,7 +3214,8 @@ async fn send_chat_returns_while_the_lead_is_still_working() {
     let core = start(dir.path(), FakeSpawner { log: log.clone(), lead: echo_lead(hold.clone()), worker: idle }).await;
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
 
-    let quick = Duration::from_secs(2);
+    // A send that waited would wait for the held Lead's turn (<= 20 s); a slow box needs far less.
+    let quick = Duration::from_secs(10);
     tokio::time::timeout(quick, core.send_chat("lead", "hold the first")).await.expect("send_chat returns at once").unwrap();
     tokio::time::timeout(quick, core.send_chat("lead", "then this")).await.expect("a second message too").unwrap();
     tokio::time::timeout(quick, core.send_chat("lead:2", "hold another request")).await.expect("another request too").unwrap();
@@ -3124,7 +3234,7 @@ async fn send_chat_returns_while_the_lead_is_still_working() {
     let replies: Vec<&str> = chats(&snap, "lead").iter().filter(|c| c.text.starts_with("ok:")).map(|c| c.text.as_str()).collect();
     assert_eq!(replies, vec!["ok: hold the first", "ok: then this"], "one thread's messages run in order");
     wait_chat(&core, "lead:2", "ok: hold another request").await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3141,7 +3251,7 @@ async fn a_requests_lead_survives_a_restart() {
     let lead = lead_of(&snap, "lead:7").unwrap().clone();
     assert_eq!(lead.name, "Lead", "the first Lead created is \"Lead\", whatever its thread");
     let session = lead.session_id.clone().unwrap();
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     let log = Arc::new(Mutex::new(Log::default()));
@@ -3153,14 +3263,14 @@ async fn a_requests_lead_survives_a_restart() {
     assert_eq!(leads[0].id, lead.id, "the thread's Lead is found again after the restart");
     let runs = log.lock().unwrap().runs.clone();
     assert!(matches!(&runs[0], (a, SessionMode::Resume { session_id }) if *a == lead.id && *session_id == session), "{runs:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 // ───────────── accounts (several sign-ins of one CLI) ─────────────
 
 /// Like `start`, with the login shell's CLAUDE_CONFIG_DIR unset (its sign-in is the default).
 async fn start_signed_in(root: &Path, spawner: FakeSpawner) -> Arc<Core> {
-    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let mut env: std::collections::HashMap<String, String> = core_env();
     env.remove("CLAUDE_CONFIG_DIR");
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(env), clis: Some(vec![claude()]), index: false };
@@ -3230,7 +3340,7 @@ async fn a_plan_finishes_without_the_task_you_cancelled() {
     .await;
     let s = core.snapshot().await.unwrap();
     assert!(chats(&s, "lead").iter().any(|c| c.text.contains("1 task merged")), "the cancelled task isn't counted");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3254,7 +3364,7 @@ async fn a_plan_with_every_task_cancelled_is_cancelled() {
     })
     .await;
     assert!(!log.lock().unwrap().spawns.iter().any(|s| s.0 == Role::Worker), "nothing was started");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3336,7 +3446,7 @@ async fn parallel_tasks_spread_over_two_claude_accounts_and_skip_a_hot_one() {
         .collect();
     assert!(routes.iter().any(|s| s.starts_with("Claude Code · work · new consultant")), "{routes:?}");
     assert!(routes.iter().any(|s| s.starts_with("Claude Code · perso · new consultant")), "{routes:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     // A restart still knows them.
@@ -3397,7 +3507,7 @@ async fn the_lead_pins_a_task_to_the_account_the_user_names() {
     assert_eq!(task.account_hint.as_deref(), Some(perso_id.as_str()));
     let worker_dir = log.lock().unwrap().envs.iter().find(|e| e.0 == Role::Worker).unwrap().2.clone();
     assert_eq!(worker_dir, Some(perso.clone()), "the pinned account, not the emptier one");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3493,7 +3603,7 @@ async fn a_resumed_run_keeps_its_account() {
     let store = Store::open(&data.join("codly.sqlite")).unwrap();
     let resumed = store.latest_task_run(&task_id, Some(Role::Worker)).unwrap().unwrap();
     assert_eq!(resumed.account.as_deref(), Some(work_id.as_str()), "the run records its account");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A team member works task after task in its own worktree, continuing its own conversation;
@@ -3590,7 +3700,7 @@ async fn a_team_member_keeps_its_session_and_worktree_across_tasks() {
     assert!(chat.1.contains("/team/ana-") && matches!(&chat.2, SessionMode::Resume { session_id } if session_id == first), "{chat:?}");
     drop(l);
     wait_for("the answer-only run to stop", 10, async || log.lock().unwrap().shutdowns.iter().any(|a| a == &ana.id).then_some(())).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 fn cwds_first(log: &Mutex<Log>) -> &'static str {
@@ -3645,7 +3755,7 @@ async fn a_consultant_is_hired_with_the_leads_model_and_let_go() {
     assert!(c.consultant && c.archived);
     assert_eq!(c.title.as_deref(), Some("Frontend"), "a consultant wears the Lead's title");
     assert!(log.lock().unwrap().models.iter().any(|(a, m)| a == &c.id && m.as_deref() == Some("haiku")), "spawned with the Lead's model");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A request's own mode and Lead model, picked in the composer: Ask refuses plans, Direct runs
@@ -3709,7 +3819,7 @@ async fn a_requests_mode_and_model_steer_its_lead() {
 
     core.close_thread("lead").await.unwrap();
     assert!(core.snapshot().await.unwrap().request_prefs.is_empty(), "a closed request forgets its choices");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A request can pick its own Lead CLI: its Lead runs there on that CLI's default model, while
@@ -3738,7 +3848,7 @@ async fn a_request_picks_its_own_lead_cli() {
     let model = |id: &str| log.lock().unwrap().models.iter().rfind(|m| m.0 == id).and_then(|m| m.1.clone());
     assert_eq!((own.provider, model(&own.id)), (Provider::Codex, None), "Codex on its default model, not opus");
     assert_eq!((usual.provider, model(&usual.id).as_deref()), (Provider::Claude, Some("opus")));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Your staff works before anyone is hired: the Lead sees a free agent you keep on its Team
@@ -3787,7 +3897,7 @@ async fn a_free_agent_on_staff_takes_the_task_before_a_hire() {
     let prompts = log.lock().unwrap().prompts.clone();
     let board = prompts.iter().find(|(r, _)| *r == Role::Lead).map(|(_, p)| p.clone()).unwrap();
     assert!(board.contains(&format!("Team (assign tasks by name):\n  {}", ivo.name)), "{board}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A 1:1 agent on staff that took a task is that task's worker: stopping it stops the task.
@@ -3802,7 +3912,9 @@ async fn stopping_a_solo_on_a_task_blocks_it() {
     let worker: Behavior = Arc::new(move |turn: FakeTurn| {
         let wait = wait.clone();
         Box::pin(async move {
-            wait.notified().await;
+            if !turn.hold(wait.notified()).await {
+                return;
+            }
             turn.write("hello.txt", "hello\n");
             turn.tool("codly_submit_report", json!({ "status": "done", "summary": "Created it." })).await;
         })
@@ -3828,7 +3940,7 @@ async fn stopping_a_solo_on_a_task_blocks_it() {
     assert!(task.status_reason.as_deref().is_some_and(|r| r.starts_with("stopped by you")), "{:?}", task.status_reason);
     let events = core.events(None, None, 2000).await.unwrap();
     assert!(!events.iter().any(|e| matches!(e.kind, EventKind::Merged { .. })), "nothing merged");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A 1:1 agent on staff that did a task talks to you in its own conversation afterwards, not in
@@ -3856,7 +3968,7 @@ async fn a_solo_keeps_its_own_session_after_a_task() {
     // Its own conversation, from before a restart (while its chat runs, a 1:1 agent takes no task).
     core.send_chat(&thread, "hello").await.unwrap();
     wait_chat(&core, &thread, "hi").await;
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     let core = start(dir.path(), spawner()).await;
@@ -3869,7 +3981,7 @@ async fn a_solo_keeps_its_own_session_after_a_task() {
     let SessionMode::New { session_id: Some(own) } = &runs[0] else { panic!("{runs:?}") };
     assert!(matches!(&runs[1], SessionMode::New { .. }), "the task ran in a session of its own: {runs:?}");
     assert!(runs.len() == 3 && matches!(&runs[2], SessionMode::Resume { session_id } if session_id == own), "back in its own conversation: {runs:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A core set up as the app does (a 60 s hiring window) whose Lead plans one task for a new
@@ -3940,7 +4052,7 @@ async fn a_new_consultant_is_hired_at_once_by_default() {
     let events = core.events(None, None, 2000).await.unwrap();
     let waited = |e: &EventRow| matches!(&e.kind, EventKind::TaskChanged { task } if task.status_reason.as_deref().is_some_and(|r| r.contains("hiring")));
     assert!(!events.iter().any(waited), "the task never waited for a hire");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Switching the office rules off while a job offer is up closes it at once on the Lead's pick:
@@ -3956,7 +4068,7 @@ async fn switching_the_office_rules_off_closes_an_open_job_offer() {
     assert_eq!(hired.name, offer.applicants[0].name, "the Lead's pick");
     let closed = job_offers(&core).await.into_iter().next().unwrap();
     assert_eq!((closed.id, closed.hired, closed.by_you), (offer.id, Some(0), false));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// With the office rules on, a new consultant is hired through a job offer: it stays up until
@@ -3997,12 +4109,12 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     assert_eq!(ghost.worktree, None, "its task's worktree went with the task");
     // You merge the plan with plain git, not from the app.
     let integ = snap.plans[0].integration_branch.clone().unwrap();
-    let out = std::process::Command::new("git").args(["merge", "--no-ff", "-m", "by hand", &integ]).current_dir(&repo).output().unwrap();
+    let out = std::process::Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).args(["merge", "--no-ff", "-m", "by hand", &integ]).current_dir(&repo).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     // …and delete its branch, after removing its worktree: only the tasks' commits remain.
     let wt = snap.plans[0].integration_worktree.clone().unwrap();
     for args in [vec!["worktree", "remove", "--force", wt.as_str()], vec!["branch", "-D", integ.as_str()]] {
-        let out = std::process::Command::new("git").args(&args).current_dir(&repo).output().unwrap();
+        let out = std::process::Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).args(&args).current_dir(&repo).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
     let err = core.plan_diff(&snap.plans[0].id).await.unwrap_err().to_string();
@@ -4045,7 +4157,7 @@ async fn a_job_offer_hires_the_applicant_you_pick() {
     let shop = core.sell(None, "a").unwrap();
     assert_eq!(shop.wallet.spent, 25 + 340 * (n - 1) as i64);
     assert!(core.sell(None, "a").is_err());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// By default (`Settings::game_rules` off) the office game is only for show: a task you queue
@@ -4124,7 +4236,7 @@ async fn home_and_tired_change_no_work_by_default() {
     .await;
     assert_eq!(s, "plan: ok | message: ok | ana home: null | bo: null");
     assert_eq!(core.snapshot().await.unwrap().plans.len(), 1, "the plan was accepted");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// With the office rules on, an agent at home (the office's energy) gets no new work from the
@@ -4205,7 +4317,7 @@ async fn an_agent_at_home_gets_no_new_work_from_the_lead_but_from_you() {
     let lead = lead_of(&core.snapshot().await.unwrap(), "lead").unwrap().clone();
     assert!(core.set_agent_home(&lead.id, Some(back)).is_err());
     assert_eq!(core.set_agent_home(&ana.id, None).unwrap().away_until, None);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// With the office rules on, the office says who is tired: the Lead's board shows it and its
@@ -4293,7 +4405,7 @@ async fn the_lead_prefers_rested_members_and_a_queued_task_waits_for_home() {
             if decision_type == "route" && summary.contains("Ana") && summary.ends_with("called in from home: nobody else was free"))),
         "the route decision says why"
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4329,7 +4441,7 @@ async fn two_offices_work_at_once_and_share_the_worker_slots() {
     core.update_settings(Settings { max_parallel: 2, max_per_provider: 2, ..core.settings() }).await.unwrap();
     wait_for("both offices to work", 10, async || (running_b().await == 1 && running_a() == 1).then_some(())).await;
     assert_ne!(core.snapshot().await.unwrap().workspace.unwrap().id, wa);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4361,7 +4473,7 @@ async fn a_paused_office_starts_nothing_while_the_others_work() {
     // Resumed, it works too.
     core.update_settings(Settings { paused_offices: vec![], ..core.settings() }).await.unwrap();
     wait_for("a to work", 10, async || (running_a() == 1).then_some(())).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4412,7 +4524,7 @@ async fn code_search_follows_the_files_and_says_what_differs_in_a_worktree() {
         (result.citations.iter().any(|c| c.path == "late.rs") && result.warnings.is_empty()).then_some(())
     })
     .await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4481,7 +4593,7 @@ async fn a_task_brief_points_at_the_code_as_the_tasks_worktree_has_it() {
     // not those of the file the worker will open.
     assert!(second.contains("] billing.rs:") && second.contains("differs in your worktree: read the file"), "{second}");
     assert!(second.contains("Note: Cited files that differ in your worktree"), "{second}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4500,7 +4612,7 @@ async fn the_code_map_follows_the_files_without_a_search() {
     // itself (the office's code city, the composer's `@` menu) has the file when it is read.
     std::fs::write(repo.join("late.rs"), "pub fn late_arrival() {}\n").unwrap();
     wait_for("the new file on the code map", 15, async || listed("late.rs").await.then_some(())).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4541,7 +4653,7 @@ async fn a_background_office_keeps_its_code_index() {
 
     let reply = wait_for("the worker's search", 20, async || found.lock().unwrap().clone()).await;
     assert_eq!(reply["ok"], true, "codly_search works in an office that is not the open one: {reply}");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     // A restart opens "b" only: "a" gets its index back when its task goes on.
@@ -4551,5 +4663,5 @@ async fn a_background_office_keeps_its_code_index() {
     core.resume_work().await.unwrap();
     let reply = wait_for("the worker's search after the restart", 20, async || found.lock().unwrap().clone()).await;
     assert_eq!(reply["ok"], true, "and after a restart: {reply}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }

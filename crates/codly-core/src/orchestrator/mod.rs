@@ -261,6 +261,8 @@ struct Inner {
     /// use, and turns waiting for a free Lead slot.
     leads: Mutex<lead::LeadPool>,
     shutting_down: AtomicBool,
+    /// How many runs the last `shutdown` gave up waiting for (`Core::runs_given_up`).
+    runs_given_up: std::sync::atomic::AtomicUsize,
     /// Agent names and task keys by id, for readable knowledge-graph entities.
     labels: Mutex<HashMap<Id, String>>,
     /// Every sign-in of every installed CLI, in your order (`limits` empty: see `quota`).
@@ -469,6 +471,7 @@ impl Core {
             nudges: Mutex::new(HashMap::new()),
             leads: Mutex::new(lead::LeadPool::default()),
             shutting_down: AtomicBool::new(false),
+            runs_given_up: std::sync::atomic::AtomicUsize::new(0),
             labels: Mutex::new(HashMap::new()),
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
@@ -1188,6 +1191,14 @@ impl Core {
     /// Stop every agent (shutdown ladder) and flush the store. Called on app exit.
     pub async fn shutdown(&self) {
         self.inner.shutdown().await
+    }
+
+    /// How many runs the last `shutdown` gave up waiting for: still up at the end of its grace,
+    /// so it killed the agent process groups that were left and marked those runs lost. For
+    /// diagnostics and tests (a fake agent that ignores the stop fails its own test, not the
+    /// tests beside it); 0 before any shutdown.
+    pub fn runs_given_up(&self) -> usize {
+        self.inner.runs_given_up.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

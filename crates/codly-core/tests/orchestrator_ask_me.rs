@@ -6,6 +6,7 @@
 //! restarted) or that has no slot to go on in is kept for the worker's next run of the task.
 //! A worker that takes the task over in a new session reads what you said in its brief.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -20,8 +21,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -90,6 +112,41 @@ struct FakeSpawner {
     turns: Turns,
 }
 
+/// How long a turn still has to end once its run is told to stop: well inside the 4 s that
+/// `Core::shutdown` gives every run.
+const STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// Run a turn to its end, like a CLI: what comes meanwhile waits for that end. A stop gives the
+/// turn `STOP_GRACE` more to end (the run then exits after it), else the run exits in the middle
+/// of it: false. A turn that waits for the test and never looks at its run's commands would
+/// keep the run alive through `Core::shutdown`, whose last resort kills every process group
+/// this test process started, the check commands of the tests beside it too.
+async fn end_turn(
+    mut turn: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    rx: &mut mpsc::UnboundedReceiver<AgentCmd>,
+    waiting: &mut VecDeque<AgentCmd>,
+) -> bool {
+    loop {
+        tokio::select! {
+            _ = &mut turn => return true,
+            cmd = rx.recv() => match cmd {
+                Some(AgentCmd::Shutdown) => break,
+                Some(cmd) => waiting.push_back(cmd),
+                // Nobody is left to tell it anything: the turn runs to its end.
+                None => {
+                    turn.await;
+                    return true;
+                }
+            },
+        }
+    }
+    let ended = tokio::time::timeout(STOP_GRACE, turn).await.is_ok();
+    if ended {
+        waiting.push_back(AgentCmd::Shutdown);
+    }
+    ended
+}
+
 impl Spawner for FakeSpawner {
     fn spawn(&self, spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> SpawnFuture {
         let behavior = if spec.role == Role::Lead { self.lead.clone() } else { self.worker.clone() };
@@ -118,13 +175,25 @@ impl Spawner for FakeSpawner {
             });
             let spec2 = spec.clone();
             tokio::spawn(async move {
-                while let Some(cmd) = rx.recv().await {
+                // What came while a turn ran: read when the turn is over, in order.
+                let mut waiting = VecDeque::new();
+                loop {
+                    let cmd = match waiting.pop_front() {
+                        Some(cmd) => cmd,
+                        None => match rx.recv().await {
+                            Some(cmd) => cmd,
+                            None => break,
+                        },
+                    };
                     match cmd {
                         AgentCmd::Prompt(text) => {
                             turns.lock().unwrap().push((spec2.agent_id.clone(), text.clone()));
                             send(EventKind::TurnStarted { input: Some(text.clone()) });
                             send(EventKind::StatusChanged { status: AgentStatus::Thinking });
-                            behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone() }).await;
+                            if !end_turn(behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone() }), &mut rx, &mut waiting).await {
+                                send(EventKind::Exited { code: Some(0) });
+                                break;
+                            }
                             send(EventKind::TurnCompleted { status: TurnStatus::Completed, result_text: None, duration_ms: Some(5) });
                             send(EventKind::StatusChanged { status: AgentStatus::Idle });
                         }
@@ -177,7 +246,7 @@ async fn start(root: &Path, spawner: FakeSpawner) -> Arc<Core> {
 
 async fn start_with(root: &Path, spawner: FakeSpawner, clis: Vec<CliInfo>) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(clis), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(clis), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -283,7 +352,7 @@ async fn answering_a_blocking_card_resumes_the_worker_and_the_plan_finishes() {
     assert_eq!(fyi.status, BlockerStatus::Open);
     assert_eq!(core.dismiss_blocker(&fyi.id).await.unwrap().status, BlockerStatus::Dismissed);
     assert_eq!(turns_of(&turns, task.assignee.as_deref()).len(), resumed.len());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -295,7 +364,7 @@ async fn skipping_a_blocking_card_tells_the_worker_to_use_its_best_judgment() {
     plan_done(&core).await;
     let resumed = turns_of(&turns, task.assignee.as_deref());
     assert!(resumed.iter().any(|t| t.contains("skipped your question") && t.contains("best judgment")), "{resumed:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -337,7 +406,7 @@ async fn retrying_a_task_that_waits_for_your_answer_restarts_it() {
     plan_done(&core).await;
     let seen = turns_of(&turns, Some(&worker_id));
     assert!(seen.iter().any(|t| t.contains("[User] Answer to your question \"Which greeting?\": casual please")), "{seen:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -398,7 +467,7 @@ async fn a_task_that_waits_for_your_answer_holds_no_worker_slot() {
     let seen = turns_of(&turns, t1.assignee.as_deref());
     assert!(seen.len() == 2 && seen[1].starts_with(ANSWER), "the brief, then the answer: {seen:?}");
     assert_eq!(task_by_key(&core, "t1").await.unwrap().assignee, t1.assignee, "the same worker went on");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -409,7 +478,7 @@ async fn your_answer_survives_a_restart_and_reaches_the_restarted_worker() {
     let worker = task.assignee.clone();
     let before = turns_of(&turns, worker.as_deref()).len();
     // You quit Codly with the question open, and answer it the next day.
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     let again = || FakeSpawner { lead: planning_lead(), worker: asking_worker("Formal or casual hello?"), turns: turns.clone() };
     let repo = dir.path().join("repo");
@@ -422,7 +491,7 @@ async fn your_answer_survives_a_restart_and_reaches_the_restarted_worker() {
     let answered = task_of(&core).await;
     assert_eq!(answered.status, TaskStatus::Ready, "{:?}", answered.status_reason);
     assert_eq!(answered.goal, task.goal, "the answer is not written into the task's goal");
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
 
     // The answer was kept in the store: the worker that starts now reads it first, in its session.
@@ -435,7 +504,7 @@ async fn your_answer_survives_a_restart_and_reaches_the_restarted_worker() {
     plan_done(&core).await;
     let seen = turns_of(&turns, worker.as_deref());
     assert!(seen.len() == before + 1 && seen[before].starts_with(ANSWER), "{seen:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -476,7 +545,7 @@ async fn your_answer_reaches_the_worker_that_takes_the_task_over_in_a_new_sessio
 
     // You quit Codly with the question open and answer it the next day: the worker that asked
     // is restarted and reads your answer. Nothing waits for the task's next run after that.
-    core.shutdown().await;
+    shut_down(&core).await;
     drop(core);
     let core = start_with(dir.path(), spawner(), clis()).await;
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
@@ -490,7 +559,7 @@ async fn your_answer_reaches_the_worker_that_takes_the_task_over_in_a_new_sessio
     assert!(brief.contains("[Codly] Task t1:"), "a new session starts from the brief: {brief}");
     assert!(brief.contains("- Answer to your question \"Which greeting?\": casual please"), "your answer is not in it: {brief}");
     assert!(brief.contains("hit its usage limit"), "{brief}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -514,7 +583,7 @@ async fn an_office_counts_what_waits_for_you() {
     wait_for("the plan to await your go", 30, async || awaits().await.then_some(())).await;
     core.open_workspace(&first.repo_path).await.unwrap();
     assert_eq!(needs(&second.id), Some(1));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A Lead that asks you a blocking question about the request, then takes your answer.
@@ -553,5 +622,5 @@ async fn answering_a_leads_question_reaches_its_office() {
         turns_of(&turns, Some(&card.agent_id)).iter().any(|t| t.contains("Answer to your question \"Which greeting?\": casual please")).then_some(())
     })
     .await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
