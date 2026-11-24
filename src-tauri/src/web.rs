@@ -182,7 +182,7 @@ fn gate(token: &str, uri: &hyper::Uri, headers: &hyper::HeaderMap) -> Option<Res
     let path = uri.path();
     let cookie = format!("codly_token={token}");
     // The printed link: trade the token for a cookie and drop it from the address bar.
-    if uri.query().is_some_and(|q| q.split('&').any(|kv| kv == format!("token={token}"))) {
+    if uri.query().is_some_and(|q| q.split('&').any(|kv| kv.strip_prefix("token=").is_some_and(|t| same_token(t, token)))) {
         return Some(
             Response::builder()
                 .status(StatusCode::SEE_OTHER)
@@ -192,7 +192,12 @@ fn gate(token: &str, uri: &hyper::Uri, headers: &hyper::HeaderMap) -> Option<Res
                 .unwrap(),
         );
     }
-    let authed = headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).any(|c| c.trim() == cookie);
+    let authed = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .any(|c| c.trim().strip_prefix("codly_token=").is_some_and(|t| same_token(t, token)));
     if !authed {
         return Some(text(StatusCode::UNAUTHORIZED, "Open the link `codly serve` printed: it carries the token."));
     }
@@ -200,6 +205,13 @@ fn gate(token: &str, uri: &hyper::Uri, headers: &hyper::HeaderMap) -> Option<Res
         return Some(text(StatusCode::FORBIDDEN, "cross-site request refused"));
     }
     None
+}
+
+/// Is `given` the page's token? Every byte is compared, wherever the first difference is, so
+/// the time of the answer does not depend on how much of the token matched.
+fn same_token(given: &str, token: &str) -> bool {
+    let differ = given.bytes().zip(token.bytes()).fold(0u8, |d, (a, b)| d | (a ^ b));
+    given.len() == token.len() && std::hint::black_box(differ) == 0
 }
 
 async fn route(app: AppHandle, token: &str, req: Request<Incoming>) -> Res {
@@ -375,27 +387,59 @@ async fn command(app: &AppHandle, cmd: String, req: Request<Incoming>) -> Res {
 /// (the `ui_subscribe` contract: the UI drops rows with id <= snapshot.as_of).
 async fn events(app: &AppHandle) -> Res {
     let state = app.state::<AppState>();
-    // ponytail: unbounded, a tab that stops reading grows it; bound it if remote tabs matter.
-    let (tx, rx) = mpsc::unbounded_channel();
-    let sink = tx.clone();
-    state.bus.add_web(Box::new(move |b| sink.send(sse("batch", &serde_json::to_string(b).unwrap_or_default())).is_ok()));
-    let _ = match state.core().await {
+    let (tab, rx) = TabQueue::new();
+    let tab = std::sync::Arc::new(tab);
+    let sink = tab.clone();
+    // A tab let go is out of the bus: the page takes a new snapshot when its stream ends.
+    state.bus.add_web(Box::new(move |b| sink.send(sse("batch", &serde_json::to_string(b).unwrap_or_default()))));
+    match state.core().await {
         Ok(core) => match core.snapshot().await {
-            Ok(s) => tx.send(sse("snapshot", &serde_json::to_string(&s).unwrap_or_default())),
-            Err(e) => tx.send(sse("failed", &serde_json::to_string(&format!("{e:#}")).unwrap_or_default())),
+            Ok(s) => tab.send(sse("snapshot", &serde_json::to_string(&s).unwrap_or_default())),
+            Err(e) => tab.send(sse("failed", &serde_json::to_string(&format!("{e:#}")).unwrap_or_default())),
         },
-        Err(e) => tx.send(sse("failed", &serde_json::to_string(&e).unwrap_or_default())),
+        Err(e) => tab.send(sse("failed", &serde_json::to_string(&e).unwrap_or_default())),
     };
     stream(rx)
 }
 
-/// One terminal's bytes (base64), scrollback first; ends when the terminal closes.
+/// One terminal's bytes (base64), scrollback first; ends when the terminal closes, or when the
+/// tab stopped reading them (`TabQueue`): the page then attaches again, and the scrollback
+/// brings its screen back.
 fn pty(app: &AppHandle, id: &str) -> Res {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tab, rx) = TabQueue::new();
     let b64 = base64::engine::general_purpose::STANDARD;
-    match app.state::<AppState>().pty.attach(id, Box::new(move |bytes| drop(tx.send(sse("data", &b64.encode(bytes)))))) {
+    let sink = move |bytes: Vec<u8>| {
+        tab.send(sse("data", &b64.encode(bytes)));
+    };
+    match app.state::<AppState>().pty.attach(id, Box::new(sink)) {
         Ok(()) => stream(rx),
         Err(e) => text(StatusCode::NOT_FOUND, &format!("{e:#}")),
+    }
+}
+
+/// How many messages may wait for one browser tab's stream.
+const TAB_QUEUE: usize = 8192;
+
+/// The messages that wait for one tab's stream, at most `TAB_QUEUE`. A tab that is that far
+/// behind (it stopped reading: asleep, or on a network that stalls) is let go: its stream ends
+/// after what waits, which the page reads as an error, and the page takes a new snapshot (or
+/// attaches its terminal again). So such a tab cannot fill the memory of Codly.
+struct TabQueue(std::sync::Mutex<Option<mpsc::Sender<Bytes>>>);
+
+impl TabQueue {
+    fn new() -> (TabQueue, mpsc::Receiver<Bytes>) {
+        let (tx, rx) = mpsc::channel(TAB_QUEUE);
+        (TabQueue(std::sync::Mutex::new(Some(tx))), rx)
+    }
+
+    /// Queue `message`. False: the tab is gone or was let go, now or before.
+    fn send(&self, message: Bytes) -> bool {
+        let mut tx = self.0.lock().unwrap();
+        let sent = tx.as_ref().is_some_and(|tx| tx.try_send(message).is_ok());
+        if !sent {
+            *tx = None;
+        }
+        sent
     }
 }
 
@@ -468,7 +512,7 @@ fn sse(event: &str, data: &str) -> Bytes {
     Bytes::from(format!("event: {event}\ndata: {data}\n\n"))
 }
 
-struct Sse(mpsc::UnboundedReceiver<Bytes>);
+struct Sse(mpsc::Receiver<Bytes>);
 
 impl Body for Sse {
     type Data = Bytes;
@@ -478,7 +522,7 @@ impl Body for Sse {
     }
 }
 
-fn stream(rx: mpsc::UnboundedReceiver<Bytes>) -> Res {
+fn stream(rx: mpsc::Receiver<Bytes>) -> Res {
     Response::builder()
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
@@ -598,7 +642,7 @@ mod tests {
         assert_eq!(get(&page, header::CACHE_CONTROL), None, "the UI's files may be cached");
         // The API, its event streams and the token trade are never stored.
         assert_eq!(get(&headers(text(StatusCode::OK, "{}"), "/api/cmd/list_repos"), header::CACHE_CONTROL).as_deref(), Some("no-store"));
-        let (_tx, rx) = mpsc::unbounded_channel();
+        let (_tab, rx) = TabQueue::new();
         assert_eq!(get(&headers(stream(rx), "/api/events"), header::CACHE_CONTROL).as_deref(), Some("no-store"));
         let trade = Response::builder().status(StatusCode::SEE_OTHER).header(header::SET_COOKIE, "codly_token=t").body(full(Bytes::new())).unwrap();
         assert_eq!(get(&headers(trade, "/"), header::CACHE_CONTROL).as_deref(), Some("no-store"));
@@ -728,5 +772,47 @@ mod tests {
         let next = token(&data).unwrap();
         assert!(next.len() == 48 && next != first, "{next}");
         assert_eq!(token(&data).unwrap(), next);
+    }
+
+    #[test]
+    fn only_the_whole_token_opens_the_door() {
+        assert!(same_token(TOKEN, TOKEN));
+        assert!(!same_token(&TOKEN[..47], TOKEN), "one character short");
+        assert!(!same_token(&format!("{TOKEN}0"), TOKEN), "one character more");
+        assert!(!same_token(&format!("1{}", &TOKEN[1..]), TOKEN), "the first character differs");
+        assert!(!same_token(&format!("{}0", &TOKEN[..47]), TOKEN), "the last character differs");
+        assert!(!same_token("", TOKEN));
+        // The cookie is read the same way as the link (`the_printed_link_trades_its_token_for_a_cookie`).
+        let cookie = |c: &str| status("/api/cmd/list_repos", &[("cookie", c), ("sec-fetch-site", "same-origin")]);
+        assert_eq!(cookie(&format!("a=b; codly_token={TOKEN}")), None);
+        assert_eq!(cookie(&format!("codly_token={}", &TOKEN[..47])), Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(cookie(&format!("codly_token={TOKEN}0")), Some(StatusCode::UNAUTHORIZED));
+    }
+
+    /// A tab that stops reading is let go when `TAB_QUEUE` messages wait for it: its stream
+    /// gives what waits, then ends (the page then takes a new snapshot), and nothing more is
+    /// queued for it.
+    #[test]
+    fn a_tab_that_stops_reading_is_let_go() {
+        let (tab, mut rx) = TabQueue::new();
+        for i in 0..TAB_QUEUE {
+            assert!(tab.send(Bytes::from(i.to_string())), "message {i} waits for the tab");
+        }
+        assert!(!tab.send(Bytes::from_static(b"one too many")), "the tab is let go");
+        assert!(!tab.send(Bytes::from_static(b"later")), "and stays let go");
+        for i in 0..TAB_QUEUE {
+            assert_eq!(rx.try_recv().unwrap(), Bytes::from(i.to_string()));
+        }
+        assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected), "the stream ends");
+
+        // A tab that reads keeps its stream.
+        let (tab, mut rx) = TabQueue::new();
+        for i in 0..TAB_QUEUE * 2 {
+            assert!(tab.send(Bytes::from(i.to_string())));
+            assert_eq!(rx.try_recv().unwrap(), Bytes::from(i.to_string()));
+        }
+        // A tab that closed is out of the bus at the next message.
+        drop(rx);
+        assert!(!tab.send(Bytes::from_static(b"gone")));
     }
 }

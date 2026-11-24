@@ -709,7 +709,7 @@ async fn a_second_turn_at_the_runs_own_limit_says_the_same_and_moves_nothing() {
         })
         .collect();
     assert_eq!(told, Vec::<String>::new(), "no thread is told to send a message");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Claude Code too: a `result` that has no cost of the turn's own leaves the adapter the

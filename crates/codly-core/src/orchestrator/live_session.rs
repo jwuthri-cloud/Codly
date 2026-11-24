@@ -52,8 +52,8 @@ const RECONNECT_ANSWER_LIMIT: Duration = Duration::from_secs(60);
 const CODLY_SERVER: &str = "codly";
 
 /// Per agent: where each of its MCP servers stood in the last `McpServer` row on record, by
-/// the server's name (its state and the CLI's reason). Kept while Codly runs: after a
-/// restart the first run of an agent records its servers once more.
+/// the server's name (its state and the CLI's reason). Kept while Codly runs, until the agent
+/// is let go: after a restart the first run of an agent records its servers once more.
 pub(super) type McpRecorded = HashMap<Id, HashMap<String, (McpServerStatus, Option<String>)>>;
 
 /// What runs beside a live run's own calls, as its events last said it: the last `McpServer`
@@ -83,6 +83,15 @@ impl SessionRows {
 }
 
 impl Inner {
+    /// An agent was let go (archived): what Codly kept about it in memory goes with it, its name
+    /// for the knowledge graph, the files it announced and where its MCP servers stood. An agent
+    /// brought back builds them again, as after a restart.
+    pub(super) fn forget_agent_in_memory(&self, agent_id: &str) {
+        lock(&self.labels).remove(agent_id);
+        lock(&self.artifacts_seen).remove(&Some(agent_id.to_string()));
+        lock(&self.mcp_recorded).remove(agent_id);
+    }
+
     /// Does this event only say again where the agent's last row on record has that MCP
     /// server (the same state, the same reason)? Then the ingest pipeline shows it and does
     /// not store it.
@@ -301,5 +310,43 @@ mod tests {
             "you turned linear off for Claude Code in the folder Ada works in (this run and every later one there, until you turn it on)"
         );
         assert_eq!(switch_record("linear", true, "Ada"), "you turned linear on for Claude Code in the folder Ada works in");
+    }
+
+    /// What Codly keeps in memory about an agent goes when the agent is let go: after ten
+    /// agents came and went, and an event named each after it was let go, nothing is left.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_is_kept_about_an_agent_goes_when_it_is_let_go() {
+        use crate::model::{Provider, Role, Workspace};
+        use crate::orchestrator::{Core, CoreConfig, StartOptions};
+        let dir = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: dir.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        let ws = Workspace {
+            id: "ws".into(),
+            repo_path: dir.path().join("repo").to_string_lossy().into_owned(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: 0,
+        };
+        inner.store.upsert_workspace(&ws).unwrap();
+        for i in 0..10 {
+            let a = inner.create_agent(&ws.id, &format!("Ada {i}"), Provider::Claude, Role::Worker, 0, None).unwrap();
+            // What its work left in memory: a server's row, its name, a file it announced.
+            inner.session_row_seen(&a.id, &EventRow { agent_id: Some(a.id.clone()), ..row(1, server("docs", McpServerStatus::Connected)) });
+            inner.emit(Some(&ws.id), crate::orchestrator::row(Some(&a.id), None, None, EventKind::Exited { code: Some(0) })).unwrap();
+            assert_eq!(lock(&inner.labels).get(&a.id), Some(&a.name), "its name is read for the event");
+            lock(&inner.artifacts_seen).entry(Some(a.id.clone())).or_default().insert("/tmp/shot.png:10".into());
+            inner.update_agent(&a.id, |a| a.archived = true).unwrap();
+            // An event after the agent was let go names it again.
+            inner.emit(Some(&ws.id), crate::orchestrator::row(Some(&a.id), None, None, EventKind::Exited { code: Some(0) })).unwrap();
+        }
+        assert!(lock(&inner.mcp_recorded).is_empty());
+        assert!(lock(&inner.labels).is_empty());
+        assert!(lock(&inner.artifacts_seen).is_empty());
+        core.shutdown().await;
     }
 }

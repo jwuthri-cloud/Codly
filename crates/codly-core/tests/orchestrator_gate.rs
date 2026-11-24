@@ -1249,5 +1249,5 @@ async fn a_check_past_the_count_that_reads_codly_data_waits_for_you_in_full_acce
     let held = core.recheck_task(&t.id, vec![]).await.unwrap();
     assert_eq!(held.len(), 1, "{held:?}");
     assert!(held[0].command == check && held[0].risks.iter().any(|r| r == "Codly data"), "{held:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
