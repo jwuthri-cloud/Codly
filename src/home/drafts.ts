@@ -17,6 +17,8 @@ export interface Att {
 export type Draft = { text: string; files: Att[] };
 
 const drafts = new Map<string, Draft>();
+/** The slots of closed requests: their thread name is never given again, so nothing is kept for them. */
+const forgotten = new Set<string>();
 let seq = 0;
 
 /** Where the kept copies live in the browser's storage. */
@@ -76,24 +78,33 @@ function writeKept(key: string, text: string, files: Att[]): void {
 
 /** More than `DRAFT_MOST` drafts kept: the oldest go. */
 function dropOldest(): void {
-  const kept: { key: string; at: number }[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key?.startsWith(DRAFT_KEY)) continue;
-    let at = 0;
-    try {
-      at = Number((JSON.parse(localStorage.getItem(key) ?? '{}') as Partial<Kept>).at) || 0;
-    } catch {
-      // Unreadable: it goes first.
-    }
-    kept.push({ key, at });
-  }
+  const kept = keptKeys(DRAFT_KEY).map((key) => ({ key, at: keptAt(key) }));
   kept.sort((a, b) => a.at - b.at);
   for (const k of kept.slice(0, Math.max(0, kept.length - DRAFT_MOST))) localStorage.removeItem(k.key);
 }
 
+/** The storage's keys that start with `prefix`. */
+function keptKeys(prefix: string): string[] {
+  const keys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(prefix)) keys.push(key);
+  }
+  return keys;
+}
+
+/** When the draft under `key` was last kept; 0 when it cannot be read (it goes first). */
+function keptAt(key: string): number {
+  try {
+    return Number((JSON.parse(localStorage.getItem(key) ?? '{}') as Partial<Kept>).at) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** The draft of `slot`: the one of this session, else the copy kept from an earlier one. */
 export function loadDraft(slot: string): Draft {
+  if (forgotten.has(slot)) return { text: '', files: [] };
   const here = drafts.get(slot);
   if (here) return here;
   const key = keyOf(slot);
@@ -135,8 +146,35 @@ export function withoutSeed(draft: string, seed: string): string | null {
  * an upload still on its way lands in it; the storage keeps only the files already saved.
  */
 export function saveDraft(slot: string, text: string, files: Att[]): void {
+  if (forgotten.has(slot)) return;
   if (text || files.length) drafts.set(slot, { text, files });
   else drafts.delete(slot);
   const key = keyOf(slot);
   if (key) writeKept(key, text, files);
+}
+
+/**
+ * A request was closed: its draft goes, also the copy kept across a restart, and nothing saves
+ * one for it again. Its composer may still be on screen and save what its field holds as it
+ * leaves that thread: that save is ignored.
+ */
+export function forgetDraft(slot: string): void {
+  saveDraft(slot, '', []);
+  forgotten.add(slot);
+}
+
+/** The threads of an office (`office`) that have a draft kept from an earlier session, with when
+ *  it was last kept. Empty when the storage cannot be read. */
+export function keptThreads(office: string): { thread: string; at: number }[] {
+  const prefix = `${DRAFT_KEY}${office}.`;
+  let keys: string[];
+  try {
+    keys = keptKeys(prefix);
+  } catch {
+    return [];
+  }
+  return keys.flatMap((key) => {
+    const kept = readKept(key);
+    return kept && (kept.text || kept.files.length) ? [{ thread: key.slice(prefix.length), at: keptAt(key) }] : [];
+  });
 }

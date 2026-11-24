@@ -6,6 +6,7 @@
 
 import type { Provider } from '../gen/Provider';
 import { store } from './store.svelte';
+import { keptThreads } from '../../home/drafts';
 
 /** Home + four rooms (REDESIGN §2). */
 export type Room = 'home' | 'plan' | 'changes' | 'knowledge' | 'terminal';
@@ -386,7 +387,16 @@ class Ui {
     const was = this.left.get(office);
     this.left.delete(office);
     this.draftRequests = was?.drafts ?? [];
+    if (!was) this.restoreKeptDrafts(office);
     return was?.request ?? this.lastRequest(office);
+  }
+
+  /** The first time an office shows after a restart: the new requests whose composer kept text
+   *  or files (drafts.ts) are tabs again, so what you wrote in them is not lost. */
+  restoreKeptDrafts(office: string) {
+    const have = new Set(this.draftRequests.map((d) => d.thread));
+    const back = keptThreads(office).filter((k) => k.thread.startsWith('lead:') && !have.has(k.thread));
+    if (back.length) this.draftRequests = [...this.draftRequests, ...back.map((k) => ({ thread: k.thread, ts: k.at, kept: true }))];
   }
 
   openDiff(target: DiffTarget) {

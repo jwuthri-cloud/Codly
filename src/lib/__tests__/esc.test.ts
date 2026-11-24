@@ -259,7 +259,7 @@ describe('Esc Esc over a draft', () => {
 });
 
 describe('⌫ on an empty line of a 1:1 chat', () => {
-  const key = { empty: true, repeat: false, modifier: false, sinceChange: BACKSPACE_REST };
+  const key = { empty: true, repeat: false, modifier: false, sinceChange: BACKSPACE_REST, sinceKey: BACKSPACE_REST };
 
   it('goes back to the request only on a field that was empty and rested', () => {
     expect(backspaceLeaves(key)).toBe(true);
@@ -268,6 +268,29 @@ describe('⌫ on an empty line of a 1:1 chat', () => {
     // The presses right after it, of a hand still clearing the draft.
     expect(backspaceLeaves({ ...key, sinceChange: BACKSPACE_REST - 1 })).toBe(false);
     expect(backspaceLeaves({ ...key, sinceChange: 0 })).toBe(false);
+    // Taps that run on past the end of the draft: each one comes soon after the one before.
+    expect(backspaceLeaves({ ...key, sinceChange: 5000, sinceKey: BACKSPACE_REST - 1 })).toBe(false);
+  });
+
+  it('25 taps at a hand’s pace clear a 19-letter draft and stay in the chat', () => {
+    // A press every 150 ms; the field empties with the 19th.
+    let length = 19;
+    let changedAt = 0;
+    let keyAt = -10_000;
+    const left: number[] = [];
+    for (let n = 1; n <= 25; n++) {
+      const now = n * 150;
+      if (backspaceLeaves({ empty: !length, repeat: false, modifier: false, sinceChange: now - changedAt, sinceKey: now - keyAt })) left.push(n);
+      keyAt = now;
+      if (length) {
+        length--;
+        changedAt = now;
+      }
+    }
+    expect(left).toEqual([]);
+    // A pause, then one more press: now it goes back to the request.
+    const now = 25 * 150 + BACKSPACE_REST;
+    expect(backspaceLeaves({ empty: true, repeat: false, modifier: false, sinceChange: now - changedAt, sinceKey: now - keyAt })).toBe(true);
   });
 
   it('a held key or a modifier never leaves', () => {

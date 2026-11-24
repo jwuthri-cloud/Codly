@@ -11,17 +11,19 @@
 <script module lang="ts">
   import { ui } from '../lib/state/ui.svelte';
 
+  type Seed = { text: string; message: string; item: string | null };
   /** The text the next find bar starts with, and the message it was found in (`findInConversation`). */
-  let seed: { text: string; message: string } | null = null;
+  let seed: Seed | null = null;
 
-  /** Open the find bar on `text`, in the conversation on screen, at message `message`. It goes
-   *  there as soon as a match is on screen: the conversation may still be loading. */
-  export function findInConversation(text: string, message: string) {
-    seed = { text, message };
+  /** Open the find bar on `text`, in the conversation on screen, at message `message` (`item`:
+   *  the agent's message the row shows, `ChatMessage.item_id`). It goes there as soon as a match
+   *  is on screen: the conversation may still be loading. */
+  export function findInConversation(text: string, message: string, item: string | null) {
+    seed = { text, message, item };
     ui.openFind();
   }
 
-  function takeSeed(): { text: string; message: string } | null {
+  function takeSeed(): Seed | null {
     const s = seed;
     seed = null;
     return s;
@@ -33,7 +35,7 @@
   import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
   import { findMatches, stepMatch, type Piece } from './find';
-  import { afterSearch, messageRow, type Seek } from './findSeek';
+  import { afterSearch, messageRows, pickRow, type Seek } from './findSeek';
   import { LAYOUT_REST_MS } from './threadScroll';
   import { SAID_FROM } from '../overlays/palette';
 
@@ -63,7 +65,7 @@
   let query = $state(first?.text ?? '');
   /** The text came from the palette: go to the picked message's match as soon as one is on
    *  screen, also when the conversation shows only after the search (a closed request loads). */
-  let seeking: Seek | null = first && { query: first.text, key: messageRow(first.message, store.chatKeys) };
+  let seeking: Seek | null = first && { query: first.text, keys: messageRows(first.message, first.item, store.chatKeys) };
   /** The conversation settles its own scroll after it shows: the match is brought back into view once it has. */
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
   let input: HTMLInputElement | undefined = $state();
@@ -163,7 +165,8 @@
     }
     total = ranges.length;
     if (!total) more = false;
-    const row = seeking?.key && root ? root.querySelector(`[data-key="${CSS.escape(seeking.key)}"]`) : null;
+    const at = seeking && root ? pickRow(seeking.keys, [...root.querySelectorAll<HTMLElement>('[data-key]')].map((e) => e.dataset.key ?? '')) : null;
+    const row = at && root ? root.querySelector(`[data-key="${CSS.escape(at)}"]`) : null;
     const sought = afterSearch(seeking, query, total, row ? ranges.findIndex((r) => row.contains(r.startContainer)) : -1);
     seeking = sought.seek;
     if (sought.go !== null && root) {
@@ -198,13 +201,24 @@
     ui.composerFocus++;
   }
 
+  /** A new search once the page shows what changed. Asked twice before it runs (a new text and
+   *  a new seek at once), it runs once: a second one would leave the match it went to. */
+  let searchDue = false;
+  let gone = false;
+  function searchSoon() {
+    if (searchDue) return;
+    searchDue = true;
+    tick().then(() => {
+      searchDue = false;
+      if (!gone) search(true);
+    });
+  }
+
   // A new text to find, or another conversation on screen: search, and go to a match.
   $effect(() => {
     void query;
     void thread;
-    let live = true;
-    tick().then(() => live && search(true));
-    return () => (live = false);
+    searchSoon();
   });
 
   // The page changes (a message streams in, earlier history loads, a row opens): search again,
@@ -239,7 +253,10 @@
     const s = takeSeed();
     if (s !== null) {
       query = s.text;
-      seeking = { query: s.text, key: messageRow(s.message, store.chatKeys) };
+      seeking = { query: s.text, keys: messageRows(s.message, s.item, store.chatKeys) };
+      // Also when the text and the conversation are the ones on screen (another hit of the same
+      // search): nothing else searches then, and the seek must not wait for the page to change.
+      searchSoon();
     }
     tick().then(() => {
       input?.focus();
@@ -248,6 +265,7 @@
   });
 
   onDestroy(() => {
+    gone = true;
     clearTimeout(settleTimer);
     ranges = [];
     paint();

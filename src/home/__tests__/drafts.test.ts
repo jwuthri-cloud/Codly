@@ -106,7 +106,37 @@ describe('a draft across a restart', () => {
     const slot = d.draftSlot('o', 'lead');
     expect(d.loadDraft(slot)).toEqual({ text: '', files: [] });
     d.saveDraft(slot, 'still here', []);
-    expect(d.loadDraft(slot).text).toBe('still here');
+    expect(d.loadDraft(slot).text).toBe('still here');    expect(d.keptThreads('o')).toEqual([]);
+  });
+
+  it('a closed request’s draft goes, and its composer leaving that thread does not keep it again', async () => {
+    const d = await restart();
+    const slot = d.draftSlot('o', 'lead:shut');
+    d.saveDraft(slot, 'never sent', []);
+    d.forgetDraft(slot);
+    // The composer on screen moves to the next tab after the close: it saves what its field held.
+    d.saveDraft(slot, 'never sent', []);
+    expect(storage.items.size).toBe(0);
+    expect(d.loadDraft(slot)).toEqual({ text: '', files: [] });
+    // Other threads keep their drafts as before.
+    d.saveDraft(d.draftSlot('o', 'lead:open'), 'still mine', []);
+    expect([...storage.items.keys()]).toEqual(['codly.draft.o.lead:open']);
+  });
+
+  it('names the threads of an office that have a kept draft', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5000);
+    const d = await restart();
+    d.saveDraft(d.draftSlot('o', 'lead:a1'), 'a new request', []);
+    d.saveDraft(d.draftSlot('o', 'agent:ada'), 'to ada', []);
+    d.saveDraft(d.draftSlot('o2', 'lead:b1'), 'another office', []);
+    storage.setItem('codly.draft.o.lead:bad', '{not json');
+    const after = await restart();
+    expect(after.keptThreads('o')).toEqual([
+      { thread: 'lead:a1', at: 5000 },
+      { thread: 'agent:ada', at: 5000 },
+    ]);
+    expect(after.keptThreads('none')).toEqual([]);
   });
 
   it('with no office open, nothing is kept across a restart', async () => {

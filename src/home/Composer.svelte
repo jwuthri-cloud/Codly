@@ -420,6 +420,8 @@
 
   /** When the field last changed (typed, emptied, or another draft loaded). */
   let changedAt = 0;
+  /** When a key last went down in the field. */
+  let keyAt = -Infinity;
   $effect(() => {
     void text;
     changedAt = Date.now();
@@ -506,6 +508,10 @@
   }
 
   function key(e: KeyboardEvent) {
+    // A key press in the field is activity too: ⌫ taps that run on past the end of a draft stay here (`backspaceLeaves`).
+    const pressedAt = Date.now();
+    const sinceKey = pressedAt - keyAt;
+    keyAt = pressedAt;
     if (e.isComposing) return; // IME: Enter confirms the composition, it doesn't send
     if (mention && options.length) {
       if (e.key === 'ArrowDown') { e.preventDefault(); mi = (mi + 1) % options.length; tick().then(showActive); return; }
@@ -552,7 +558,7 @@
     // ⌫ alone: with a modifier it is another key (⌘⌫ denies), and it never leaves the conversation.
     // The press that emptied the field, and those right after it, stay here (`backspaceLeaves`).
     const modifier = e.metaKey || e.ctrlKey || e.altKey || e.shiftKey;
-    if (e.key === 'Backspace' && oneToOne && backspaceLeaves({ empty: !text, repeat: e.repeat, modifier, sinceChange: Date.now() - changedAt })) {
+    if (e.key === 'Backspace' && oneToOne && backspaceLeaves({ empty: !text, repeat: e.repeat, modifier, sinceChange: pressedAt - changedAt, sinceKey })) {
       e.preventDefault();
       ui.openRequest(ui.request);
       return;

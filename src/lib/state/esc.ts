@@ -135,15 +135,16 @@ export function denyKeyInField(field: { composer: boolean; empty: boolean }): bo
   return field.composer && field.empty;
 }
 
-/** How long the composer's field must stay as it is before ⌫ on it may leave the chat. */
+/** How long the composer's field must stay as it is, and its keys at rest, before ⌫ on it may leave the chat. */
 export const BACKSPACE_REST = 600;
 
 /**
  * ⌫ in a 1:1 chat's composer goes back to the request only when the field was already empty
  * when the key went down, on a press that is not a held key's repeat, with no modifier (⌘⌫
- * denies), and `sinceChange` ms after the field last changed: the presses that cleared a draft
- * never leave the chat by running one press too far.
+ * denies), `sinceChange` ms after the field last changed and `sinceKey` ms after the press of a
+ * key in it before this one: the presses that cleared a draft, and the taps that run on past its
+ * end at a hand's pace, never leave the chat.
  */
-export function backspaceLeaves(k: { empty: boolean; repeat: boolean; modifier: boolean; sinceChange: number }): boolean {
-  return k.empty && !k.repeat && !k.modifier && k.sinceChange >= BACKSPACE_REST;
+export function backspaceLeaves(k: { empty: boolean; repeat: boolean; modifier: boolean; sinceChange: number; sinceKey: number }): boolean {
+  return k.empty && !k.repeat && !k.modifier && k.sinceChange >= BACKSPACE_REST && k.sinceKey >= BACKSPACE_REST;
 }

@@ -292,7 +292,7 @@
   /** Open the conversation a message was said in, with the find bar on `q` at that message. */
   function openSaid(m: ChatMessage, q: string) {
     ui.openThread(m.thread);
-    findInConversation(q, m.id);
+    findInConversation(q, m.id, m.item_id ?? null);
   }
   // A message found for an earlier query shows only while it still holds what you typed.
   const saidRows = $derived.by((): Scored[] => {
