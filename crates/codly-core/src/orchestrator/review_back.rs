@@ -23,7 +23,7 @@ use serde_json::json;
 
 use super::merge_conflict::{self, NOT_COMMITTED, REVIEW, next_key};
 use super::pull_request::{PrSource, PrState};
-use super::Inner;
+use super::{Inner, prompts};
 use crate::git::name_list;
 use crate::model::*;
 
@@ -32,15 +32,36 @@ use crate::model::*;
 const NEW_REQUEST: &str = "ask for the changes in a new request";
 
 fn review_goal(comments: &str) -> String {
+    // Your comments first: the board's card shows the start of a task's brief.
     format!(
-        "The plan is finished, and the user reviewed its work. This worktree holds the plan's finished work, on the plan's \
-         own branch. Make the changes the user asks for below, here, and keep the rest of the plan's work as it is. Then \
-         make sure the project still builds and the verify commands pass.\n\
+        "{comments}\n\n\
+         The plan is finished, and the user reviewed its work: those are the user's comments. This worktree holds the plan's \
+         finished work, on the plan's own branch. Make the changes the user asks for above, here, and keep the rest of the \
+         plan's work as it is. Then make sure the project still builds and the verify commands pass.\n\
          Your write scope is the files the plan changed. If a change needs another file, make that change and name the file \
          in scope_exceptions in your report. If you do not make a change the user asked for, say why in your report.\n\
          Do not run git commands that change the repository (commit, merge, checkout, reset, stash): Codly commits your work \
-         when you report. {NOT_COMMITTED}\n\n{comments}"
+         when you report. {NOT_COMMITTED}"
     )
+}
+
+/// The title of a task with comments of another shape than Send back's.
+const TITLE: &str = "Changes you asked for in review";
+
+/// The task's title: the file of your first comment and its first words, as Send back writes
+/// them (src/lib/util/review.ts `reviewMessage`): "Review b.txt: Say it twice". Of three such
+/// tasks on a board, each says what it is for.
+fn review_title(comments: &str) -> String {
+    let mut lines = comments.lines().skip_while(|l| !l.starts_with("1. `"));
+    let Some(file) = lines.next().and_then(|head| head["1. `".len()..].split('`').next()) else { return TITLE.into() };
+    // "b.txt:17" names a line of the file.
+    let file = file.rsplit_once(':').filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).map_or(file, |(f, _)| f);
+    // Under the file: the quoted line ("> ..."), then your words, up to the next comment.
+    let words = lines.map(str::trim).take_while(|l| !l.is_empty()).find(|l| !l.starts_with('>'));
+    match words {
+        Some(words) if !file.is_empty() => prompts::clip(&format!("Review {file}: {words}"), 80),
+        _ => TITLE.into(),
+    }
 }
 
 /// The task that makes the changes you asked for in review, in the plan's own worktree.
@@ -53,7 +74,7 @@ fn review_task(plan: &Plan, key: String, comments: &str, scope: Vec<String>, ver
         id: new_id(),
         plan_id: Some(plan.id.clone()),
         key,
-        title: "Changes you asked for in review".into(),
+        title: review_title(comments),
         goal: review_goal(comments),
         acceptance: vec!["Each review comment is done, or the report says why not".into(), "The plan's verify commands pass".into()],
         write_scope: scope,
@@ -179,13 +200,9 @@ impl Inner {
         self.add_in_place(ws_id, &plan, &task, &before, untracked)?;
         let who = writer.as_ref().map(|(agent, wrote)| (agent.name.as_str(), wrote.key.as_str()));
         if let Err(e) = self.say_sent_back(ws_id, &plan, &task, who, comments, files) {
-            // It never started: it does not wait in a finished plan. The record that would put
-            // the branch back finds nothing to undo at the plan's next pass.
-            if let Err(undo) = self.update_task(&task.id, |t| {
-                t.status = TaskStatus::Cancelled;
-                t.status_reason = Some("Codly could not start it".into());
-                Ok(())
-            }) {
+            // It never started: it does not wait in a finished plan, and the record of where the
+            // plan stood goes with it, so that no later pass takes anything back for it.
+            if let Err(undo) = self.cancel_in_place(ws_id, &plan, &task.id) {
                 tracing::warn!("task {} of plan {} could not be cancelled after its start failed: {undo:#}", task.key, plan.id);
             }
             return Err(e);
@@ -237,7 +254,7 @@ impl Inner {
         let mut best: Option<(usize, &Task)> = None;
         for t in tasks.iter().filter(|t| t.status == TaskStatus::Done && merge_conflict::in_place(t, plan).is_none()) {
             let (Some(base), Some(head)) = self.store.task_commits(&t.id)? else { continue };
-            let changed = match self.git.changed_paths(repo, &[base.as_str(), head.as_str()]).await {
+            let changed = match self.own_files(repo, &base, &head).await {
                 Ok(changed) => changed,
                 Err(e) => {
                     tracing::warn!("what task {} changed cannot be read, so it is not asked to make the review's changes: {e:#}", t.key);
@@ -256,6 +273,21 @@ impl Inner {
         }
         Ok(Some((agent, wrote.clone())))
     }
+
+    /// The files a task's own commits changed, from `base` to `head`. Not those of a merge: a
+    /// task that had a conflict round has the plan's branch merged into its own (gate.rs), and
+    /// that merge brings in the files the other tasks wrote.
+    async fn own_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>> {
+        let range = format!("{base}..{head}");
+        let out = self.git.read(repo, &["log", "--first-parent", "--no-merges", "--no-renames", "--name-only", "--format=", "-z", &range, "--"]).await?;
+        let mut files: Vec<String> = vec![];
+        for name in out.split('\0').map(|s| s.trim_matches('\n')).filter(|s| !s.is_empty()) {
+            if !files.iter().any(|f| f == name) {
+                files.push(name.to_string());
+            }
+        }
+        Ok(files)
+    }
 }
 
 #[cfg(test)]
@@ -273,13 +305,27 @@ mod tests {
         let comments = "Review comments (1):\n\n1. `b.txt` (the whole file)\n   Say it twice.";
         let wt = Path::new("/wt/integration");
         let t = review_task(&plan, "review".into(), comments, vec!["b.txt".into()], vec!["npm test".into()], Some("a2".into()), "codly/p/integration", wt);
-        assert_eq!((t.title.as_str(), t.plan_id.as_deref(), t.assignee.as_deref()), ("Changes you asked for in review", Some("p1"), Some("a2")));
+        assert_eq!((t.title.as_str(), t.plan_id.as_deref(), t.assignee.as_deref()), ("Review b.txt: Say it twice.", Some("p1"), Some("a2")));
         assert_eq!((t.branch.as_deref(), t.worktree.as_deref(), t.fresh_session), (Some("codly/p/integration"), Some("/wt/integration"), true));
         assert_eq!((&t.write_scope, &t.verify, t.status), (&vec!["b.txt".to_string()], &vec!["npm test".to_string()], TaskStatus::Pending));
-        assert!(t.goal.starts_with("The plan is finished, and the user reviewed its work.") && t.goal.ends_with(comments), "{}", t.goal);
+        // Your comments first: the board's card shows them.
+        assert!(t.goal.starts_with(&format!("{comments}\n\nThe plan is finished, and the user reviewed its work")), "{}", t.goal);
         assert_eq!(t.acceptance[0], "Each review comment is done, or the report says why not");
         // It works on the plan's own branch, like a resolution, and a second one gets a key of its own.
         assert!(merge_conflict::in_place(&t, &plan).is_some());
         assert_eq!(next_key(std::slice::from_ref(&t), REVIEW), "review-2");
+    }
+
+    #[test]
+    fn the_title_is_the_file_and_the_words_of_your_first_comment() {
+        let two = "Review comments (2):\n\n1. `src/theme.ts:17`\n   > const KEY = 'theme';\n   Use a namespaced key\n   like acme.theme\n\n2. `b.txt` (the whole file)\n   Say it twice.";
+        assert_eq!(review_title(two), "Review src/theme.ts: Use a namespaced key");
+        let removed = "Review comments (1):\n\n1. `a.txt:3` (a line the change removes)\n   > old line\n   Keep this line";
+        assert_eq!(review_title(removed), "Review a.txt: Keep this line");
+        let long = format!("Review comments (1):\n\n1. `b.txt` (the whole file)\n   {}", "word ".repeat(30));
+        assert_eq!(review_title(&long).chars().count(), 80);
+        // Comments in another shape: the general title.
+        assert_eq!(review_title("Please make the button blue"), TITLE);
+        assert_eq!(review_title("Review comments (1):\n\n1. `b.txt` (the whole file)\n\n2. `c.txt`"), TITLE);
     }
 }

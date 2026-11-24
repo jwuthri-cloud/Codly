@@ -30,8 +30,9 @@
   import type { Agent } from '../../lib/gen/Agent';
   import type { LastTurn } from '../../lib/gen/LastTurn';
   import type { Task } from '../../lib/gen/Task';
-  import { discardReview, mergePlan, reviewDraft, sendBack, waitingRequest } from '../../lib/state/actions';
+  import { discardReview, mergePlan, planPrState, reviewDraft, sendBack, waitingRequest } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
+  import { loadPullRequest, prKey, prUi } from '../../lib/state/pullRequest.svelte';
   import { planOwners, review, reviewKey, taskOwners } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
   import { ui, type DiffTarget } from '../../lib/state/ui.svelte';
@@ -39,7 +40,7 @@
   import { ago, plural } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { oneAtATime } from '../../lib/util/oneAtATime';
-  import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, commentKeys, diffGroup, discardWords, editorPlace, finishedWorkGoes, heavy, HEAVY_LABEL, IN_FOLDER_WORDS, inProjectFolder, inTurn, offDiff, parseDiffKeeping, sendBackBarWords, splitByTask, splitWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
+  import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, commentKeys, diffGroup, discardWords, editorPlace, finishedWorkGoes, heavy, HEAVY_LABEL, IN_FOLDER_WORDS, inProjectFolder, inTurn, offDiff, parseDiffKeeping, sendBackBarWords, splitByTask, splitWords, turnReadKey, writerOnTeam, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -252,7 +253,16 @@
     const id = target?.kind === 'plan' ? target.id : targetTask?.plan_id;
     return (id && store.planMap.get(id)) || null;
   });
-  const goes = $derived(finishedWorkGoes(targetPlan, store.tasks));
+  const goes = $derived(finishedWorkGoes(targetPlan, store.tasks, planPrState(targetPlan)));
+  // A finished plan's pull request, from Codly's own record (no network): with one open or
+  // merged, the bar says before the press that Send back opens a new request.
+  $effect(() => {
+    if (targetPlan?.status !== 'done') return;
+    const source = { kind: 'plan' as const, id: targetPlan.id };
+    if (!(prKey(source) in prUi.opened)) void loadPullRequest(source);
+  });
+  /** The agent that wrote the commented files is still on the team: the new task is for it. */
+  const toWriter = $derived(writerOnTeam(comments, ownerTasks, targetPlan, (id) => !!store.agentMap.get(id) && !store.agentMap.get(id)!.archived));
   /** On the diff of a plan that still runs: where Send back takes the comments of each task at work, and where the rest go (see `sendBack`). */
   const split = $derived.by(() => {
     if (target?.kind !== 'plan') return null;
@@ -436,7 +446,7 @@
               <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {comments.length === 1 ? 'It is' : 'They are'} on {target.kind === 'agent' ? 'all its changes' : 'the whole task’s diff'}.</p>
               <button class="btn sm" onclick={() => (turnOnly = false)}>{wholeLabel}</button>
             {:else}
-            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : targetAgent ? agentBarWords(comments.length, targetAgent.name) : split ? `Send back gives ${split}.` : sendBackBarWords(comments.length, toWorker ? workerName : null, goes, waiting ? review.inHand(notesKey) : null)}</p>
+            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : targetAgent ? agentBarWords(comments.length, targetAgent.name) : split ? `Send back gives ${split}.` : sendBackBarWords(comments.length, toWorker ? workerName : null, goes, waiting ? review.inHand(notesKey) : null, toWriter)}</p>
             {#if discarding}
               <button class="btn sm danger" onclick={() => discardReview(notesKey)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
               <button class="btn sm ghost" use:safeChoice={{ keep: () => (discarding = null), back: () => discardBtn }} onclick={() => (discarding = null)}>Keep</button>

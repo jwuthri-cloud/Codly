@@ -1,15 +1,17 @@
 // The browser demo's answer to `send_back_plan`. Like the core (orchestrator/review_back.rs):
 // your review comments on a finished plan become one more task of the plan, on the plan's own
 // branch and in its worktree, for the agent that wrote most of the files they are on. That
-// agent works on them for a few seconds (when it is busy, the task waits for it), the task goes
-// through a short gate with the plan's checks, and the plan is done again. A task that does not
-// finish leaves the plan as it was. Refused in the core's words.
+// agent works on them for a few seconds (when it is busy, the task waits for it; when it is
+// offline or let go, the first free worker takes it), the task goes through a short gate with
+// the plan's checks, and the plan is done again. A task that does not finish leaves the plan as
+// it was. Refused in the core's words.
 import type { Agent } from '../gen/Agent';
 import type { Task } from '../gen/Task';
 import { Cancelled, sha, uid, type Sim } from './sim';
 
 /** How a refusal ends when the comments belong in a new request (review_back.rs `NEW_REQUEST`). */
-const NEW_REQUEST = 'ask for the changes in a new request';
+export const NEW_REQUEST = 'ask for the changes in a new request';
+/** The title of a task with comments of another shape than Send back's (review_back.rs `TITLE`). */
 const TITLE = 'Changes you asked for in review';
 
 /** "review", then "review-2"… (merge_conflict.rs `next_key`). */
@@ -17,6 +19,33 @@ function nextKey(tasks: Task[]): string {
   let key = 'review';
   for (let n = 2; tasks.some((t) => t.key === key); n++) key = `review-${n}`;
   return key;
+}
+
+/** Like the core's `review_title`: the file of your first comment and its first words, as Send
+ *  back writes them (util/review.ts `reviewMessage`): "Review b.txt: Say it twice". */
+export function reviewTitle(comments: string): string {
+  const lines = comments.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('1. `'));
+  if (at < 0) return TITLE;
+  const named = lines[at].slice('1. `'.length).split('`')[0];
+  // "b.txt:17" names a line of the file.
+  const file = named.replace(/:\d+$/, '');
+  // Under the file: the quoted line ("> …"), then your words, up to the next comment.
+  const under = lines.slice(at + 1).map((l) => l.trim());
+  const end = under.findIndex((l) => !l);
+  const words = (end < 0 ? under : under.slice(0, end)).find((l) => !l.startsWith('>'));
+  if (!file || !words) return TITLE;
+  const title = `Review ${file}: ${words}`;
+  return [...title].length > 80 ? `${[...title].slice(0, 79).join('')}…` : title;
+}
+
+/** What `send_back_task` says for a done task, in the core's words (orchestrator/workspace.rs). */
+export function doneTaskRefusal(sim: Sim, t: Task): string {
+  const plan = t.plan_id ? sim.plans.get(t.plan_id) : undefined;
+  const open = plan && !plan.merged_sha && !plan.kept ? plan.status : null;
+  if (open === 'done') return `${t.key} is done; send your comments on the plan and they become one more task of it`;
+  if (open === 'running' || open === 'integrating') return `${t.key} is done; send your comments on the plan when it is finished, and they become one more task of it`;
+  return `${t.key} is done and its work is merged; ${NEW_REQUEST}`;
 }
 
 /** The files of a task's commits, as Codly recorded them. */
@@ -57,8 +86,9 @@ export function sendBackPlanDemo(sim: Sim, planId: string, comments: string, fil
   const who = agent && !agent.archived ? agent : null;
   const now = sim.now();
   const task = sim.putTask({
-    id: uid('t-'), plan_id: planId, key: nextKey(tasks), title: TITLE,
-    goal: `The plan is finished, and the user reviewed its work. This worktree holds the plan’s finished work, on the plan’s own branch. Make the changes the user asks for below, here, and keep the rest of the plan’s work as it is. Then make sure the verify commands pass.\n\n${text}`,
+    id: uid('t-'), plan_id: planId, key: nextKey(tasks), title: reviewTitle(text),
+    // Your comments first, as the core writes it: the board's card shows the start of the brief.
+    goal: `${text}\n\nThe plan is finished, and the user reviewed its work: those are the user’s comments. This worktree holds the plan’s finished work, on the plan’s own branch. Make the changes the user asks for above, here, and keep the rest of the plan’s work as it is. Then make sure the verify commands pass.`,
     acceptance: ['Each review comment is done, or the report says why not', 'The plan’s verify commands pass'],
     write_scope: [...new Set([...done.flatMap((t) => committedFiles(sim, t.id)), ...files])],
     verify: [...new Set(done.flatMap((t) => t.verify))], depends_on: [], status: 'ready',
@@ -76,6 +106,15 @@ export function sendBackPlanDemo(sim: Sim, planId: string, comments: string, fil
   return task;
 }
 
+/** The agent that takes the task now: its own agent when that one is free, else (when it is
+ *  offline or let go, or there is none) the first free worker. Null: it waits. */
+function takerOf(sim: Sim, task: Task): Agent | null {
+  const wanted = task.assignee ? sim.agents.get(task.assignee) : undefined;
+  const available = !!wanted && !wanted.archived && wanted.status !== 'offline';
+  const pick = available ? wanted : [...sim.agents.values()].find((a) => free(sim, a));
+  return free(sim, pick) ? pick : null;
+}
+
 /** The task's worker makes the changes; then the plan is done again, the task finished or not. */
 async function work(sim: Sim, planId: string, taskId: string, files: string[]) {
   const live = () => sim.tasks.get(taskId)!;
@@ -83,12 +122,8 @@ async function work(sim: Sim, planId: string, taskId: string, files: string[]) {
   let worker: Agent | null = null;
   while (live().status === 'ready') {
     await sim.sleep(900);
-    const wanted = live().assignee;
-    const pick = wanted ? sim.agents.get(wanted) : [...sim.agents.values()].find((a) => free(sim, a));
-    if (free(sim, pick)) {
-      worker = pick;
-      break;
-    }
+    worker = takerOf(sim, live());
+    if (worker) break;
   }
   const plan = () => sim.plans.get(planId)!;
   if (worker) {
@@ -97,7 +132,8 @@ async function work(sim: Sim, planId: string, taskId: string, files: string[]) {
     const task = live();
     act.set({ task_id: taskId, worktree: task.worktree });
     sim.patchTask(taskId, { status: 'running', assignee: act.id, attempt: 1, status_reason: null });
-    sim.decision('route', 'rule', `${task.key} → ${act.a.name}: it wrote these files, and it works in the plan’s own worktree`, { plan_id: planId, task: task.key, agent: act.a.name }, { agent: act.id, task: taskId });
+    const why = task.assignee === act.id ? 'it wrote these files' : 'it is free';
+    sim.decision('route', 'rule', `${task.key} → ${act.a.name}: ${why}, and it works in the plan’s own worktree`, { plan_id: planId, task: task.key, agent: act.a.name }, { agent: act.id, task: taskId });
     const names = files.map((f) => `\`${f}\``).join(', ');
     try {
       await act.sleep(600);

@@ -6,6 +6,7 @@
 import type { Agent } from '../gen/Agent';
 import type { AgentStatus } from '../gen/AgentStatus';
 import type { Plan } from '../gen/Plan';
+import type { PrState } from '../gen/PrState';
 import type { Task } from '../gen/Task';
 import type { TaskStatus } from '../gen/TaskStatus';
 import { parseDiff, type DiffFile, type DiffHunk, type DiffLine } from './diff';
@@ -137,17 +138,20 @@ export function followUpRequest(task: Task | null, plan: Plan | null, list: Revi
  *   done, and you press Send back again then (nothing is sent by itself);
  * - `request`: no plan, or one that is merged, kept on its branch, failed or cancelled, or one
  *   that runs but does not move on without you (each task left is blocked or failed): a new
- *   request.
+ *   request;
+ * - `pull request`: the plan is finished and has a pull request, open or merged (`pr`: its state
+ *   as Codly last read it; null when none is on record or it is not read yet): a new request too,
+ *   as the core says (`send_back_plan` refuses such a plan).
  * `tasks`: the tasks of the board (those of `plan` are read).
  */
-export type FinishedGoes = 'plan' | 'wait' | 'request';
+export type FinishedGoes = 'plan' | 'wait' | 'request' | 'pull request';
 
 /** The task statuses of a plan that still moves on by itself. */
 const MOVING: readonly TaskStatus[] = ['pending', 'ready', 'running', 'verifying', 'reviewing', 'changes_requested', 'merging'];
 
-export function finishedWorkGoes(plan: Plan | null, tasks: readonly Task[]): FinishedGoes {
+export function finishedWorkGoes(plan: Plan | null, tasks: readonly Task[], pr: PrState | null): FinishedGoes {
   if (!plan || plan.merged_sha || plan.kept) return 'request';
-  if (plan.status === 'done') return 'plan';
+  if (plan.status === 'done') return pr === 'open' || pr === 'merged' ? 'pull request' : 'plan';
   if (plan.status === 'integrating') return 'wait';
   if (plan.status !== 'running') return 'request';
   const own = tasks.filter((t) => t.plan_id === plan.id);
@@ -160,14 +164,36 @@ export function finishedWorkGoes(plan: Plan | null, tasks: readonly Task[]): Fin
  * the agent of a task that is not done (it gets them itself). Else `goes` says where the
  * comments on finished work go. `inRequest` as for `reviewBarWords`: on a finished plan, a
  * request holds them when the core sent them there before (the plan has a pull request), and
- * Send back takes them there again.
+ * Send back takes them there again. `writerOnTeam`: the agent that wrote the commented files is
+ * still on the team (`writerOnTeam`), so the new task is for it; else an agent of the team takes it.
  */
-export function sendBackBarWords(total: number, worker: string | null, goes: FinishedGoes, inRequest: number | null): string {
+export function sendBackBarWords(total: number, worker: string | null, goes: FinishedGoes, inRequest: number | null, writerOnTeam: boolean): string {
   const them = total === 1 ? 'it' : 'them';
+  const forWhom = writerOnTeam ? 'the agent that wrote these files' : 'an agent of the team';
   if (worker || goes === 'request') return reviewBarWords(total, worker, inRequest);
-  if (goes === 'wait') return `This plan is still running, and nothing is sent yet: when it is done, press Send back and it makes ${them} one more task of it, for the agent that wrote these files.`;
+  if (goes === 'wait') return `This plan is still running, and nothing is sent yet: when it is done, press Send back and it makes ${them} one more task of it, for ${forWhom}.`;
   if (inRequest != null) return reviewBarWords(total, null, inRequest);
-  return `Send back makes ${them} one more task of this plan, for the agent that wrote these files.`;
+  if (goes === 'pull request') return 'Send back opens a new request: this plan has a pull request.';
+  return `Send back makes ${them} one more task of this plan, for ${forWhom}.`;
+}
+
+/**
+ * Is the agent that the core gives a plan's review comments to (review_back.rs `wrote_most`)
+ * still on the team? Of the plan's finished tasks that wrote a commented file (`owners`: which
+ * task wrote each file of the diff), the one with most of the commented files, the first one on
+ * a tie; a task on the plan's own branch (an earlier review, a resolution) does not count.
+ * `onTeam`: that task's agent is still on the team (in the window's agent map, not let go).
+ */
+export function writerOnTeam(list: readonly ReviewComment[], owners: ReadonlyMap<string, Task>, plan: Plan | null, onTeam: (agentId: string) => boolean): boolean {
+  const count = new Map<Task, number>();
+  for (const path of new Set(list.map((c) => c.path))) {
+    const t = owners.get(path);
+    const inPlace = !!plan?.integration_branch && t?.branch === plan.integration_branch;
+    if (t && t.status === 'done' && !inPlace) count.set(t, (count.get(t) ?? 0) + 1);
+  }
+  let best: { task: Task; n: number } | null = null;
+  for (const [task, n] of count) if (!best || n > best.n) best = { task, n };
+  return !!best?.task.assignee && onTeam(best.task.assignee);
 }
 
 /**
@@ -416,8 +442,13 @@ export function splitByTask(list: readonly ReviewComment[], owners: ReadonlyMap<
 export type SplitPart = { n: number; who: string; key: string };
 
 /** Where the `rest` of a split Send back go (`finishedWorkGoes`), after the press and before it. */
+const TO_REQUEST: { sent: [string, string]; before: [string, string] } = {
+  sent: ['is in a new request', 'are in a new request'],
+  before: ['goes to a new request', 'go to a new request'],
+};
 const REST_WORDS: Record<FinishedGoes, { sent: [string, string]; before: [string, string] }> = {
-  request: { sent: ['is in a new request', 'are in a new request'], before: ['goes to a new request', 'go to a new request'] },
+  request: TO_REQUEST,
+  'pull request': TO_REQUEST,
   wait: {
     sent: ['stays here: send it back when the plan is done', 'stay here: send them back when the plan is done'],
     before: ['stays here until the plan is done', 'stay here until the plan is done'],

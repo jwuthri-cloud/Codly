@@ -1048,7 +1048,7 @@ impl Inner {
         // by hand, not your own commits that the merge brought in. Nothing by hand: no review.
         let resolution = self.resolution_diff(task, Path::new(&ws.repo_path), base_ref).await?;
         if resolution.as_deref().is_some_and(|diff| diff.trim().is_empty()) {
-            let summary = format!("{}: no review, nothing was changed by hand in the merge with your branch", task.key);
+            let summary = merge_conflict::nothing_to_review(task);
             self.decide(Some(ws_id), Some(&task.id), "review", summary, json!({ "plan_id": task.plan_id }))?;
             return self.merge_task(&task.id, 0).await;
         }

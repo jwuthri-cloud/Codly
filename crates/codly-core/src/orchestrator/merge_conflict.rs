@@ -240,8 +240,17 @@ fn fixes_checks(task: &Task) -> bool {
 }
 
 /// Does this task make the changes the user asked for in review (`review_back.rs`)?
-fn answers_review(task: &Task) -> bool {
+pub(super) fn answers_review(task: &Task) -> bool {
     task.key.starts_with(REVIEW)
+}
+
+/// Why the gate does not review a task on its plan's own branch whose diff is empty: no merge
+/// was made for the changes you asked for in review, so that task changed nothing at all.
+pub(super) fn nothing_to_review(task: &Task) -> String {
+    match answers_review(task) {
+        true => format!("{}: no review, the task changed nothing", task.key),
+        false => format!("{}: no review, nothing was changed by hand in the merge with your branch", task.key),
+    }
 }
 
 /// What the reviewer of a task that worked on its plan's own branch reads after the brief: the
@@ -731,6 +740,36 @@ impl Inner {
         self.emit(ws_id, row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() }))?;
         // What the task changes is measured from the plan's branch as it was.
         self.store.set_task_commits(&task.id, Some(before), None)
+    }
+
+    /// A task that `add_in_place` added and that could not start: it is cancelled, and the
+    /// record of where the plan stood goes with it, in one store write. A record left behind
+    /// would make a later `settle_resolution` take back the work of a task that never ran: the
+    /// new files that came into the plan's worktree since. A task that started is left as it is.
+    pub(super) fn cancel_in_place(&self, ws_id: Option<&str>, plan: &Plan, task_id: &str) -> Result<()> {
+        use rusqlite::OptionalExtension;
+        let key = resolution_key(&plan.id);
+        let ev = self.store.tx(|tx| {
+            let json: String = tx.query_row("SELECT json FROM task WHERE id = ?1", [task_id], |r| r.get(0))?;
+            let mut t: Task = serde_json::from_str(&json)?;
+            if !matches!(t.status, TaskStatus::Pending | TaskStatus::Ready) {
+                bail!("task {} is {} already", t.key, crate::store::enum_str(&t.status));
+            }
+            t.status = TaskStatus::Cancelled;
+            t.status_reason = Some("Codly could not start it".into());
+            t.updated_at = now_ms();
+            let saved: Option<String> = tx.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get(0)).optional()?;
+            if let Some(saved) = saved
+                && serde_json::from_str::<Resolution>(&saved)?.task == t.id
+            {
+                tx.execute("DELETE FROM kv WHERE key = ?1", [&key])?;
+            }
+            let mut ev = row(t.assignee.as_deref(), Some(&t.id), None, EventKind::TaskChanged { task: t.clone() });
+            ev.id = crate::store::insert_event(tx, ws_id, &ev)?;
+            Ok(ev)
+        })?;
+        self.publish(ws_id, &ev);
+        Ok(())
     }
 
     /// The new paths that were in the plan's worktree before `task` started on the plan's own
@@ -1450,6 +1489,16 @@ mod tests {
 
         assert_eq!(cancelled_refusal(false), "this plan was cancelled, so no agent works on it any more; resolve the conflict yourself");
         assert_eq!(cancelled_refusal(true), "this plan was cancelled, so no agent works on it any more; fix the checks yourself");
+    }
+
+    #[test]
+    fn a_review_task_with_nothing_to_review_is_not_called_a_merge() {
+        let plan = plan();
+        let (branch, wt) = ("codly/sign-in/integration", Path::new("/data/worktrees/web/sign-in/integration"));
+        let mut review = resolve_task(&plan, "review-2".into(), "main", &[], vec![], branch, wt);
+        assert_eq!(nothing_to_review(&review), "review-2: no review, the task changed nothing");
+        review.key = "resolve".into();
+        assert_eq!(nothing_to_review(&review), "resolve: no review, nothing was changed by hand in the merge with your branch");
     }
 
     #[test]
