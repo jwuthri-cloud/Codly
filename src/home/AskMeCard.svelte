@@ -79,7 +79,7 @@
 
   {#if open}
     {#if blocking}
-      <textarea class="input" rows="2" placeholder="Your answer…" bind:value={text} onkeydown={key} disabled={busy} spellcheck="true"></textarea>
+      <textarea class="input" rows="2" placeholder="Your answer…" aria-label="Your answer" bind:value={text} onkeydown={key} disabled={busy} spellcheck="true"></textarea>
       <footer>
         <button class="btn primary" disabled={busy || !text.trim()} onclick={send}>Send answer<span class="k">⌘↵</span></button>
         <button class="btn ghost" disabled={busy} onclick={dismiss} data-tip="The agent carries on by its best judgment">Skip</button>
@@ -87,7 +87,7 @@
     {:else}
       <footer>
         <button class="btn" disabled={busy} onclick={dismiss}>Got it</button>
-        <input class="input reply" placeholder="Or reply to {agent?.name ?? 'the agent'}…" bind:value={text} disabled={busy}
+        <input class="input reply" placeholder="Or reply to {agent?.name ?? 'the agent'}…" aria-label="Reply to {agent?.name ?? 'the agent'}" bind:value={text} disabled={busy}
           onkeydown={(e) => e.key === 'Enter' && (e.preventDefault(), send())} />
         {#if text.trim()}<button class="btn" disabled={busy} onclick={send}>Send</button>{/if}
       </footer>

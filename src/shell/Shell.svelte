@@ -21,6 +21,7 @@
   import Sheet from '../sheet/Sheet.svelte';
   import OfficeLayer from './OfficeLayer.svelte';
   import Rail from './Rail.svelte';
+  import SkipToConversation from './SkipToConversation.svelte';
   import TopBar from './TopBar.svelte';
 
   const tauri = isTauriApp();
@@ -64,6 +65,7 @@
 </script>
 
 <div class="shell mode-{ui.mode} room-{ui.room}" class:focus={ui.focus} class:sheet={ui.sheetOpen} class:askme={askMe} class:resume={resumeWork.offer != null} class:tauri style:--rail-w="{ui.railW}px" style:--resume-room="{RESUME_BAR_ROOM}px">
+  <SkipToConversation />
   <div class="world-wrap" class:hidden={ui.mode === 'work' || ui.mode === 'map'}><OfficeLayer /></div>
   {#if ui.mode === 'map'}
     <!-- The neighbourhood (⌘3): its own three.js scene, loaded on first use. -->

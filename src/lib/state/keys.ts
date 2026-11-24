@@ -408,7 +408,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
   },
   {
     group: 'Go to',
-    items: ROOMS.map((r) => [`G ${r.key}`, r.label] as [string, string]),
+    items: [...ROOMS.map((r) => [`G ${r.key}`, r.label] as [string, string]), ['G S', 'Settings']],
   },
   {
     group: 'Conversation & approvals',
@@ -428,7 +428,8 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['⌘⌫', 'Deny'],
       ['⇧⌘⌫', 'Deny with a note'],
       ['1 … 9', 'Pick an option of the question that waits'],
-      ['J K', 'Next · previous'],
+      ['J K', 'Next · previous (also ↓ ↑)'],
+      ['↵', 'Open the selected row (a list)'],
       ['[ ]', 'Previous · next file (Changes)'],
     ],
   },

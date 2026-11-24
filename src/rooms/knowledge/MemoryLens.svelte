@@ -106,8 +106,8 @@
   <div class="scroll">
     {#if adding}
       <form class="add" onsubmit={(e) => { e.preventDefault(); add(); }}>
-        <input class="input add-title" bind:value={title} placeholder="Headline (optional) — e.g. “Use pnpm”" maxlength="120" />
-        <textarea bind:this={addEl} bind:value={text} rows="3" class="input" placeholder="Something every agent should know — e.g. “Use pnpm, not npm.”"
+        <input class="input add-title" bind:value={title} placeholder="Headline (optional) — e.g. “Use pnpm”" aria-label="Headline" maxlength="120" />
+        <textarea bind:this={addEl} bind:value={text} rows="3" class="input" placeholder="Something every agent should know — e.g. “Use pnpm, not npm.”" aria-label="What every agent should know"
           onkeydown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); add(); } else if (e.key === 'Escape') { e.stopPropagation(); adding = false; } }}></textarea>
         <div class="add-row">
           <select class="input" bind:value={scope} aria-label="Who reads it"><option value="project">Shared · this workspace</option><option value="global">Global · every project</option></select>

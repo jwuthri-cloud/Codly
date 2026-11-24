@@ -5,6 +5,8 @@
   reward is for something that happened (`missing` in quest.ts is the one rule): a level whose
   reward is not true yet (no agent ready, no OpenRouter key) moves on, gives nothing and says
   what is missing.
+  As every dialog (`use:modal`): the focus moves in, Tab stays inside, and the focus goes back
+  when it closes. Esc closes it only once you have been through it (`ui.onboarded`).
 -->
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
@@ -13,6 +15,7 @@
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ui } from '../lib/state/ui.svelte';
+  import { modal } from '../lib/util/modal';
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
   import { blip } from './sound';
@@ -78,17 +81,16 @@
     blip('done', sound);
     close();
   }
-  function onkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && ui.onboarded) close();
+  /** Esc: the first time through there is nothing under it to go back to. */
+  function onEscape() {
+    if (ui.onboarded) close();
   }
   async function again() {
     await redetect();
   }
 </script>
 
-<svelte:window onkeydown={onkey} />
-
-<div class="onb" role="dialog" aria-modal="true" aria-label="Welcome to Codly">
+<div class="onb" role="dialog" aria-modal="true" aria-label="Welcome to Codly" use:modal={onEscape}>
   <div class="sky" aria-hidden="true"></div>
   <div class="drag" data-tauri-drag-region class:tauri={isTauriApp()}></div>
 
@@ -145,7 +147,7 @@
 </div>
 
 <style>
-  .onb { position: fixed; inset: 0; z-index: calc(var(--z-ui) + 20); display: flex; flex-direction: column; background: var(--night); overflow: hidden; }
+  .onb { position: fixed; inset: 0; z-index: calc(var(--z-ui) + 20); display: flex; flex-direction: column; background: var(--night); overflow: hidden; outline: none; }
   .sky { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(120% 80% at 50% 125%, var(--night-glow), transparent 70%), radial-gradient(60% 40% at 80% 0%, color-mix(in srgb, var(--aurora-b) 14%, transparent), transparent 70%); }
   .drag { position: relative; height: 28px; flex-shrink: 0; }
   .top { position: relative; width: min(1040px, calc(100vw - 48px)); margin: 0 auto; display: flex; align-items: center; gap: 24px; padding: 6px 0 4px; }

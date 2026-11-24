@@ -22,7 +22,7 @@ import { HELD, REQUEST, REQUEST_B, REQUEST_B_THREAD } from '../demo/story';
 import { REPO } from '../demo/sim';
 import { MockTransport } from '../mock';
 import { intakeUi } from '../state/intake.svelte';
-import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
+import { ofLiveRun, startedWithoutFolderConfig, withMcpServer, type McpServer } from '../state/session';
 import { rustStr } from './support/source';
 
 /** The demo, as the page with this query string starts it. */
@@ -528,6 +528,27 @@ describe('the demo transport', () => {
     const plain = open('?ws=1');
     await vi.advanceTimersByTimeAsync(5000);
     expect((await snapshot(plain)).events.some((e) => e.kind.type === 'notice')).toBe(false);
+  });
+
+  // The app opens the repo first and asks after (TrustDialog): the Lead's run has started before
+  // your answer, without the repo's configuration, as in the core. Before, the demo said so only
+  // for a run that started after "Open without…", so the Lead's sheet had no line.
+  it('`?trust=ask`: the Lead that starts before you answer says in its sheet that it runs without the repo’s configuration', async () => {
+    const t = open('?trust=ask');
+    await call(t, 'open_workspace', { repoPath: REPO });
+    expect((await call<{ state: string }>(t, 'workspace_trust', { set: null })).state).toBe('ask');
+    let s = await snapshot(t);
+    let lead = s.agents.find((a) => a.role === 'lead');
+    for (let i = 0; i < 10 && !(lead && startedWithoutFolderConfig(s.events, lead.id, lead.run_id)); i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      s = await snapshot(t);
+      lead = s.agents.find((a) => a.role === 'lead');
+    }
+    expect(startedWithoutFolderConfig(s.events, lead!.id, lead!.run_id)).toBe(true);
+    // "Open without…" keeps the run as it started: its line stays.
+    expect((await call<{ state: string }>(t, 'workspace_trust', { set: { trust: null } })).state).toBe('without');
+    s = await snapshot(t);
+    expect(startedWithoutFolderConfig(s.events, lead!.id, s.agents.find((a) => a.id === lead!.id)!.run_id)).toBe(true);
   });
 
   // The last test of this file: the demo's neighbourhood is one for the page, and an office that closed stays closed.

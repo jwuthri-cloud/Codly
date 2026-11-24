@@ -57,7 +57,7 @@
     {/each}
   </div>
   <div class="reply">
-    <textarea class="input" rows="2" placeholder="Reply to {agent.name}…" bind:value={draft} onkeydown={onKey}></textarea>
+    <textarea class="input" rows="2" placeholder="Reply to {agent.name}…" aria-label="Reply to {agent.name}" bind:value={draft} onkeydown={onKey}></textarea>
     <button class="btn sm" disabled={!draft.trim()} onclick={send} aria-label="Send"><Icon name="send" size={13} />Send</button>
   </div>
 </div>

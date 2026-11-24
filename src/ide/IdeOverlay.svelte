@@ -2,6 +2,8 @@
   The workspace IDE: a full-window overlay over one agent's worktree. Left rail = Explorer,
   Search, Source; main = tabs (Home, files, diffs). Esc closes it (tabs and unsaved edits are
   kept until you open another agent's IDE). Sits just under the toasts so errors stay visible.
+  As every dialog (`use:modal`): the focus moves in when it opens, Tab stays inside, and the
+  focus goes back to where it was when it closes.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -9,6 +11,7 @@
   import Kbd from '../components/Kbd.svelte';
   import { isTauriApp } from '../lib/api';
   import { store } from '../lib/state/store.svelte';
+  import { modal } from '../lib/util/modal';
   import { basename } from '../lib/util/sanitize';
   import DiffTab from './DiffTab.svelte';
   import Editor from './Editor.svelte';
@@ -24,7 +27,6 @@
     { id: 'source', label: 'Source', icon: 'branch' },
   ];
   const name = $derived((ide.agentId ? store.agentMap.get(ide.agentId)?.name : null) ?? ide.info?.agent_name ?? 'Agent');
-  let root: HTMLDivElement | undefined = $state();
 
   // Capture phase: the overlay owns Esc and ⌘S while it is open, before the app's own keys see them.
   onMount(() => {
@@ -41,7 +43,6 @@
       }
     };
     window.addEventListener('keydown', onKey, true);
-    root?.focus();
     return () => window.removeEventListener('keydown', onKey, true);
   });
 
@@ -55,7 +56,7 @@
 </script>
 
 {#if ide.visible}
-  <div class="ide" class:tauri={isTauriApp()} role="dialog" aria-modal="true" aria-label="{name}’s workspace" tabindex="-1" bind:this={root}>
+  <div class="ide" class:tauri={isTauriApp()} role="dialog" aria-modal="true" aria-label="{name}’s workspace" tabindex="-1" use:modal={() => ide.close()}>
     <header data-tauri-drag-region>
       <Icon name="code" size={15} />
       <span class="title serif">{name}’s workspace</span>

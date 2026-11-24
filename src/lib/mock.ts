@@ -204,8 +204,9 @@ function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
   });
   const trouble = states.mergeConflict ? 'conflict' : states.mergeChecks ? 'checks' : null;
   const workspaceTrust = new WorkspaceTrustDemo(states.trustAsk);
-  // Like the core: a Claude run leaves out the repo's own configuration while you have not trusted it, unless "Use my own CLI setup" is off.
-  sim.withoutFolderConfig = () => sim.settings.use_my_claude_setup && workspaceTrust.trust(null).state === 'without';
+  // Like the core (runs.rs `without_folder_config`): a Claude run leaves out the repo's own configuration while you have not trusted it, also while you
+  // have not been asked yet (`?trust=ask`: the Lead starts before your answer), unless "Use my own CLI setup" is off.
+  sim.withoutFolderConfig = () => sim.settings.use_my_claude_setup && workspaceTrust.trust(null).state !== 'trusted';
   return {
     sim, story, checks,
     ctl: new MockControls(sim), breaker: new MockBreaker(sim), askMe: new MockAskMe(sim, !billing),

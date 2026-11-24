@@ -109,15 +109,14 @@ export const MCP_HINT: Record<McpServerStatus, string> = {
   connected: 'The agent can use this server’s tools.',
   connecting: 'Claude Code is still connecting to this server.',
   failed: 'The agent works without this server’s tools. Reconnect tries again.',
-  needs_sign_in: 'The agent works without this server’s tools until you sign in to it in Claude Code’s own MCP settings. Then press Reconnect.',
+  needs_sign_in: 'The agent works without this server’s tools until you sign in to it with /mcp in Claude Code. Then press Reconnect.',
   disabled: 'This server is switched off for Claude Code in this folder: the agent works without its tools. Turn on starts it again.',
 };
 
 /** How to sign in to a server that needs it, under its row. Codly cannot do it for you: the
- *  sign-in is Claude Code's own (no recording in docs/research names the command for it, so
- *  the line names the place, not a command). */
+ *  sign-in is Claude Code's own, in its `/mcp` menu, in the folder the agent works in. */
 export const signInSteps = (name: string): string =>
-  `Open Claude Code in a terminal and sign in to ${name} in Claude Code’s own MCP settings. Then press Reconnect here. If this server uses an API key, check the key in its settings instead.`;
+  `Open Claude Code in a terminal in this folder, type /mcp, choose ${name} and sign in. Then press Reconnect here.`;
 
 /** A server Codly can ask Claude Code to connect again. */
 export const canReconnect = (s: McpServer) => s.status === 'failed' || s.status === 'needs_sign_in';
@@ -324,15 +323,20 @@ export const backgroundKind = (w: BackgroundWork): string | null => (w.kind === 
 export const canStop = (w: BackgroundWork) => w.status === 'running' && (w.kind === 'command' || w.kind === 'helper');
 
 /**
- * What "Stop" does to a helper, on its button (`agent`: the name of the helper's agent;
- * `turnRuns`: a turn of the agent runs now). A command just ends: no hint. With no turn running,
- * Claude Code tells the agent in a turn of its own (part3.md, section 1). While a turn runs, the
- * agent is told within that turn and no turn follows (part5.md, section 11,
- * `r7-stop-helper-mid-turn-*`, n=2: the stop came during a tool call of the turn). Not
- * recorded: a stop during the turn's last model request.
+ * What "Stop" does, on its button (`agent`: the name of the agent; `turnRuns`: a turn of the
+ * agent runs now). A command just ends, and no turn follows, with or without a turn running
+ * (part2.md, scenario 6; part6.md, section 5, `r8-stop-command-*`, n=5). A helper: with no
+ * turn running, Claude Code tells the agent in a turn of its own (part3.md, section 1). While a
+ * turn runs, the agent is told within that turn when the stop comes during one of its tool
+ * calls (part5.md, section 11, n=2), and in a turn of its own right after it when the stop
+ * comes during its last model request (part6.md, section 5, `r8-stop-helper-last-request-*`,
+ * n=2). Which of the two it will be is not known at the press. Another kind of task: no hint.
  */
-export const stopHint = (w: BackgroundWork, agent: string, turnRuns: boolean): string | null =>
-  w.kind !== 'helper' ? null : turnRuns ? `Stops this helper. ${agent} is told in the turn that runs.` : `Stops this helper. ${agent} is told and goes on with a turn of its own.`;
+export const stopHint = (w: BackgroundWork, agent: string, turnRuns: boolean): string | null => {
+  if (w.kind === 'command') return 'Stops this command. No turn follows.';
+  if (w.kind !== 'helper') return null;
+  return turnRuns ? `Stops this helper. ${agent} is told in the turn that runs, or in a turn of its own right after it.` : `Stops this helper. ${agent} is told and goes on with a turn of its own.`;
+};
 
 /**
  * What "Stop" does to a helper its agent still waits for (not in the background list): its

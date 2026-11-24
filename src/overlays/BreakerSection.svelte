@@ -132,7 +132,7 @@
           <span class="desc">The same, in dollars, as the CLIs report cost: an estimate at list price for Claude Code, also on a subscription. Codex and Gemini report no cost, so only the token budget counts them.
             {#if status}<b>{usd(status.used.cost_usd)}</b> used.{/if}</span>
           <MoreAbout id="breaker-cost">
-            <span class="desc">A Claude Code agent also gets what is left of this budget as its own limit when it starts, so one long turn stops at it. Several agents at once can together pass it until their turns end.</span>
+            <span class="desc">A Claude Code agent also gets what is left of this budget as its own limit when it starts, so one long turn stops at it. A request that is on its way is finished first, so a turn can end a little above it. Several agents at once can together pass it until their turns end.</span>
           </MoreAbout>
         </div>
         <input class="field" type="number" min="0" step="1" value={cfg.cost_budget_usd || ''} placeholder="Off" disabled={!cfg.enabled} aria-label="Cost budget in dollars" onchange={(e) => save({ cost_budget_usd: dollars(e) })} />

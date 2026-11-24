@@ -2,7 +2,9 @@
 // outside (roof on, its windows lit while the open repo's crew works), and a DOM sign above each
 // plot. Same camera feel as the office (CameraRig: drag pans, right-drag or Shift orbits, wheel
 // or pinch zooms, W/A/S/D glides, Q/E quarter turns, 0 frames everything), the same lighting for
-// the hour (palette.themeAt), and the same render-on-demand loop.
+// the hour (palette.themeAt), and the same render-on-demand loop. With Reduce Motion (the
+// system setting, `ui.reducedMotion`) the walkers stand: no bob, and no frame of their own; each
+// shows where its walk is when a frame is drawn for another reason, and is home when it ends.
 
 import {
   Color,
@@ -22,6 +24,7 @@ import {
 } from 'three';
 import type { Lot } from '../lib/gen/Lot';
 import type { LotSlot } from '../lib/gen/LotSlot';
+import { ui } from '../lib/state/ui.svelte';
 import { CameraRig } from '../office/camera';
 import { Builder } from '../office/gfx/builder';
 import { color, lin, MAT, mix, themeAt, type OfficeTheme, type RGB } from '../office/palette';
@@ -30,6 +33,9 @@ import { exteriorOf, STOREY, type Box } from './exterior';
 import { homeLine, HomeGfx, homeOf, momentOf, pathOf, streetPath, type Away, type Path } from './home';
 import { buildingOrigin, extent, lightsOf, plotAt, plotsOf, signOf, slotKind, type Plot } from './map';
 import { townOf, TownGfx } from './town';
+
+/** A walker's bob at `now` (ms), from its id: none with Reduce Motion (`still`), where it stands. */
+export const walkerBob = (now: number, id: string, still: boolean): number => (still ? 0 : (now / 1000) * 7 + (id.length % 3));
 
 export interface SceneOptions {
   /** A plot was clicked (null: the ground), at this screen point. */
@@ -488,6 +494,7 @@ export class NeighbourhoodScene {
    *  and when the next change is (a walk starting or ending, a tag's minute ticking over). */
   private updateHomes(now: number): { walking: boolean; next: number } {
     const town = this.town?.town;
+    const still = ui.reducedMotion;
     const night = this.theme.name === 'dark';
     const walkers: { at: { x: number; z: number; heading: number }; color: number; bob: number }[] = [];
     const home = new Map<number, Resident[]>();
@@ -497,7 +504,7 @@ export class NeighbourhoodScene {
       const walking = m != null && m.phase !== 'home';
       if (m) next = Math.min(next, m.next);
       if (m?.phase === 'home') home.set(r.house, [...(home.get(r.house) ?? []), r]);
-      if (walking) walkers.push({ at: m.at, color: r.away.color, bob: (now / 1000) * 7 + (r.away.id.length % 3) });
+      if (walking) walkers.push({ at: m.at, color: r.away.color, bob: walkerBob(now, r.away.id, still) });
       const text = walking ? `${r.away.name} · ${m.phase === 'out' ? 'going home' : 'on the way back'}` : '';
       if (text !== r.tagKey) {
         r.tagKey = text;
@@ -545,7 +552,8 @@ export class NeighbourhoodScene {
         next = Math.min(next, now + (left % 60_000 || 60_000));
       }
     }
-    return { walking: walkers.length > 0, next };
+    // (standing walkers need no frames: the next one comes at the next change)
+    return { walking: !still && walkers.length > 0, next };
   }
 
   // ───────────── frames ─────────────
