@@ -35,8 +35,11 @@ DOC_NAME = os.environ.get("DOC_NAME", "the document next to the fixtures")
 OWN_MCP = ("exits-at-once", "no-such-command", "needs-login", "ping-project",
            "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user", "ping-live", "ping-http", "ping-local",
            "plugin:ping-plugin:ping-plugged", "plugin_ping-plugin_ping-plugged")
-# Plugins the scenarios themselves install (in a throw-away HOME). Every other plugin is this machine's and is removed.
+# Plugins the scenarios themselves install (in a throw-away HOME). Every other plugin is this machine's and is removed,
+# also from a driver note that copied a list of plugins out of `init` (own_plugins_in_notes).
 OWN_PLUGINS = ("ping-plugin",)
+# Slash commands and skills the scenarios themselves write (part 7). Every other one is this machine's and is removed.
+OWN_COMMANDS = ("codly-hello", "codly-proj", "codly-skill", "codly-proj-skill")
 
 
 def cli_version():
@@ -105,12 +108,27 @@ def prescan(v, ids, key=None, sent=False):
 
 
 def keep_commands(cmds):
-    out = []
+    """The first two of the built-in commands in KEEP_COMMANDS, and every command of the scenario's own."""
+    out, own = [], []
     for c in cmds:
         name = c.get("name") if isinstance(c, dict) else c
         if name in KEEP_COMMANDS:
             out.append(c)
-    return out[:2]
+        elif name in OWN_COMMANDS:
+            own.append(c)
+    return out[:2] + own
+
+
+def own_plugins_in_notes(v, key=None):
+    """A driver note: every list under a key named `plugins` or `*_plugins` keeps only the scenario's own plugins (a
+    plain name or an object with a `name`)."""
+    if isinstance(v, dict):
+        return {k: own_plugins_in_notes(x, k) for k, x in v.items()}
+    if isinstance(v, list):
+        if key is not None and (key == "plugins" or key.endswith("_plugins")):
+            return [p for p in v if (p.get("name") if isinstance(p, dict) else p) in OWN_PLUGINS]
+        return [own_plugins_in_notes(x) for x in v]
+    return v
 
 
 def redact_usage(u):
@@ -149,7 +167,7 @@ def transform(v, ids, sig, key=None):
     d = dict(v)
     if d.get("type") == "system" and d.get("subtype") == "init":
         d["slash_commands"] = keep_commands(d.get("slash_commands", []))
-        d["skills"] = []
+        d["skills"] = [x for x in d.get("skills", []) if (x.get("name") if isinstance(x, dict) else x) in OWN_COMMANDS]
         d["plugins"] = [p for p in d.get("plugins", []) if isinstance(p, dict) and p.get("name") in OWN_PLUGINS]
         d["agents"] = [a for a in d.get("agents", []) if a == "general-purpose"]
         if "terminal_slash_commands" in d:
@@ -294,7 +312,7 @@ def sanitize(path):
                              "models and usage reports are shortened. See %s." % (VERSION, RECORDED.get(path, TODAY), DOC_NAME),
                     "_argv": ["claude"] + m["argv"][1:], "_cwd": m["cwd"]}
         elif d == "meta":
-            line = {"_meta": m, "_t": t}
+            line = {"_meta": own_plugins_in_notes(m), "_t": t}
         elif d == "send":
             line = {"_sent": transform(m, ids, sig), "_t": t}
         elif d == "stderr":

@@ -1,6 +1,14 @@
-"""Rules of sanitize.py that a fixture would otherwise leak. Run: python3 -m unittest test_sanitize (in this folder)."""
+"""Rules of sanitize.py that a fixture would otherwise leak, and the process pattern of r5_lib.Procs (a script kills
+what it matches). Run: python3 -m unittest test_sanitize (in this folder)."""
+import json
+import os
+import re
+import shutil
+import tempfile
 import unittest
+from unittest import mock
 
+import r5_lib
 import sanitize
 
 
@@ -67,6 +75,60 @@ class Sanitize(unittest.TestCase):
                               '"h/.claude/sessions/<pid>.<hash>.key","h/.claude/sessions/<pid>.json",'
                               '"h/Library/Caches/claude-cli-nodejs/-tmp-work-x/mcp-logs-ping-live/<time>.jsonl","x/started.txt"]}')
         self.assertEqual(sanitize.scrub(note, sanitize.Ids(), None), out)
+
+    def test_a_note_keeps_only_the_scenarios_plugins(self):
+        # A note that copied init's plugin list (r8_e1 `init_plugins`) would name the user's own plugins in a logged-in run.
+        note = {"init_plugins": ["ping-plugin", "my-own-plugin"], "after": {"plugins": [{"name": "my-own-plugin", "path": "/x"},
+                                                                                        {"name": "ping-plugin"}]},
+                "plugin_commands": [{"command": "claude plugin install ping-plugin@codly-test-market --scope user"}], "result": "ok"}
+        self.assertEqual(sanitize.own_plugins_in_notes(note), {
+            "init_plugins": ["ping-plugin"], "after": {"plugins": [{"name": "ping-plugin"}]},
+            "plugin_commands": [{"command": "claude plugin install ping-plugin@codly-test-market --scope user"}], "result": "ok"})
+
+    def test_a_note_line_of_a_recording_goes_through_the_plugin_rule(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        raw = os.path.join(d, "x.ndjson")
+        with open(raw, "w") as f:
+            f.write(json.dumps({"t": 0, "dir": "meta", "msg": {"argv": ["claude", "-p"], "cwd": "/w"}}) + "\n")
+            f.write(json.dumps({"t": 1, "dir": "meta", "msg": {"init_plugins": ["my-own-plugin", "ping-plugin"]}}) + "\n")
+        self.addCleanup(setattr, sanitize, "VERSION", sanitize.VERSION)
+        sanitize.VERSION = "0.0.0"
+        with mock.patch.dict(os.environ, {"FIXTURES_DIR": d}):
+            dest, _ = sanitize.sanitize(raw)
+        with open(dest) as f:
+            text = f.read()
+        self.assertNotIn("my-own-plugin", text)
+        self.assertIn('"init_plugins":["ping-plugin"]', text)
+
+    def test_init_keeps_the_scenarios_own_commands_and_skills(self):
+        init = {"type": "system", "subtype": "init", "slash_commands": ["clear", "compact", "context", "codly-proj", "my-command", "codly-hello"],
+                "skills": ["codly-skill", "my-skill", "codly-proj-skill"]}
+        out = clean(init)
+        self.assertEqual(out["slash_commands"], ["clear", "compact", "codly-proj", "codly-hello"])
+        self.assertEqual(out["skills"], ["codly-skill", "codly-proj-skill"])
+
+
+class ProcsPattern(unittest.TestCase):
+    """r5_lib.Procs takes a literal text and matches it as whole words; kill_left() ends what it matches."""
+
+    def matches(self, text, command_line):
+        return re.search(r5_lib.Procs(text).pattern, command_line) is not None
+
+    def test_whole_words_only(self):
+        self.assertTrue(self.matches("sleep 41", "sleep 41"))
+        self.assertTrue(self.matches("sleep 41", "/bin/zsh -c echo a; sleep 41; echo b"))
+        for other in ("sleep 410", "sleep 41.5", "usleep 41", "sleep 4", "sleep_41"):
+            self.assertFalse(self.matches("sleep 41", other), other)
+
+    def test_a_dot_is_literal(self):
+        self.assertTrue(self.matches("sleep 19.5", "echo a; sleep 19.5; echo b"))
+        self.assertFalse(self.matches("sleep 19.5", "sleep 19x5"))
+        self.assertFalse(self.matches("sleep 19.5", "sleep 19.55"))
+
+    def test_the_pattern_does_not_match_its_own_pgrep_line(self):
+        p = r5_lib.Procs("sleep 41").pattern
+        self.assertFalse(re.search(p, "pgrep -f " + p))
 
 
 if __name__ == "__main__":

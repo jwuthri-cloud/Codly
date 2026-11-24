@@ -1,12 +1,13 @@
 # Drivers for the Claude Code stream-json recordings
 
-These scripts made the fixtures in `docs/research/fixtures/claude-2.1.311/` and the five documents
+These scripts made the fixtures in `docs/research/fixtures/claude-2.1.311/` and the seven documents
 `docs/research/cli-claude-stream-json-2.1.311.md` (part 1, scripts `s*.py`),
 `docs/research/cli-claude-stream-json-2.1.311-part2.md` (part 2, scripts `r4_*.py`),
 `docs/research/cli-claude-stream-json-2.1.311-part3.md` (part 3, scripts `r5_*.py`),
 `docs/research/cli-claude-stream-json-2.1.311-part4.md` (part 4, scripts `r6_*.py`),
-`docs/research/cli-claude-stream-json-2.1.311-part5.md` (part 5, scripts `r7_*.py`) and
-`docs/research/cli-claude-stream-json-2.1.311-part6.md` (part 6, scripts `r8_*.py`).
+`docs/research/cli-claude-stream-json-2.1.311-part5.md` (part 5, scripts `r7_*.py`),
+`docs/research/cli-claude-stream-json-2.1.311-part6.md` (part 6, scripts `r8_*.py`) and
+`docs/research/cli-claude-stream-json-2.1.311-part7.md` (part 7, scripts `r9_*.py`).
 Python 3.11 or newer, standard library only. They start the real `claude` CLI with your own login: read
 "Before you run" first.
 
@@ -133,6 +134,33 @@ Part 6 (`r8_*.py`), what is new:
   looks for that `sleep` only in `command-mid-turn`, and that recording is not kept.
 - `r8_f6_after_budget.py` tries budgets until one stops the turn as the scenario needs (at most 5 tries per label).
 
+Part 7 (`r9_*.py`), what is new:
+
+- Cost at list price: about 0.03 USD for the committed recordings (the sum of each turn's own requests; `cost.py`
+  prints about 0.07, because a resumed or forked session carries its earlier cost); about 0.12 by `cost.py`'s count
+  with the runs that were recorded again.
+- Throw-away HOME, no login, no cost: `r9_e1_plugin_from_repo.py` (all variants; it never reads or writes a file of
+  yours: the question decides a safety rule) and `r9_c5_own_commands.py home-*`. `r9_e1` writes the HOME's user
+  settings file, runs `claude plugin marketplace add` / `install` / `disable` with that HOME, and writes
+  `.claude/settings.json` and `.claude/settings.local.json` into the WORK FOLDER. Its plugin has two hooks that append
+  a line to `hook-ran.txt` in the work folder.
+- `r9_c5_own_commands.py login` runs with your real login and `--strict-mcp-config --setting-sources project`: only
+  the work folder's own command and skill are a source; `disableAllHooks` is in `--settings`.
+- `r9_d6_no_network.py proxy` sets `HTTPS_PROXY`/`HTTP_PROXY` (both spellings) to a port on 127.0.0.1 that the script
+  holds bound and not listening, then makes it a CONNECT proxy that only copies bytes (it notes host names, never
+  content). `dns` sets `ANTHROPIC_BASE_URL=https://api.no-such-host.invalid` for its first process. A turn there waits
+  3 to 5 minutes for the CLI's retries.
+- `r9_f7_terminal_session.py` runs the INTERACTIVE `claude` in a pseudo-terminal in its work folder. The first start in
+  a folder asks whether you trust it: the script picks "Yes, I trust this folder", which the CLI saves for that work
+  folder in your `~/.claude.json` (as for any folder you trust). The screen is never written to a recording; the
+  script notes the names and line types of the folder's sessions under `~/.claude/projects/`.
+- Sessions resumed and forked: `r9_f2_rewind_tools.py` and `r9_f3_fork_tools.py` resume their own sessions; they and
+  `r9_f4_file_rewind_more.py` read the session's transcript for counts and line types (`r9_lib.transcript_types`).
+  `r9_f4` sets `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` (file snapshots under your `~/.claude/`, as in part 6).
+- `r9_b8_http_silent.py` takes about 5.5 minutes (a tool that is silent for 330 s).
+- Processes: `r9_f2` (`sleep 19.5`) and `r9_f3` (`sleep 263`) start `sleep`s through the CLI and kill what is left of
+  them, found by their whole command text, as before.
+
 ## Layout
 
 `CAPTURE_DIR` (default: the folder that holds this folder) gets three sub-folders:
@@ -161,6 +189,7 @@ python3 make_notes_part3.py out.md            # part 3 document from the r5-* fi
 python3 make_notes_part4.py out.md            # part 4 document from the r6-* fixtures (the same)
 python3 make_notes_part5.py out.md            # part 5 document from the r7-* fixtures (the same)
 python3 make_notes_part6.py out.md            # part 6 document from the r8-* fixtures (the same)
+FIXTURES_DIR=../../fixtures/claude-2.1.311 python3 make_notes_part7.py out.md   # part 7 (it also reads r6-, r7-, r8- fixtures)
 python3 sanitize.py --refresh <fixture>...    # apply a newer file-name rule to fixtures whose raw files are gone
 python3 cost.py                               # list-price cost of everything in raw/
 ```
@@ -192,8 +221,8 @@ cd "$CAPTURE_DIR/fixtures"
 | file | what it is |
 |---|---|
 | `drv.py` | the driver: starts the CLI, logs both directions, answers `can_use_tool`, sends control requests |
-| `sanitize.py` | raw -> fixture: paths, host name, ids, account fields, machine lists and hooks, big images, foreign MCP servers and plugins, file names made from a pid, a hash or the clock (`--refresh` applies that last rule to existing fixtures) |
-| `test_sanitize.py` | tests of the sanitizer rules that keep the machine out of a fixture (`python3 -m unittest test_sanitize`) |
+| `sanitize.py` | raw -> fixture: paths, host name, ids, account fields, machine lists and hooks, big images, foreign MCP servers and plugins (also in a driver note's plugin list), slash commands and skills that are not the scenario's, file names made from a pid, a hash or the clock (`--refresh` applies that last rule to existing fixtures) |
+| `test_sanitize.py` | tests of the sanitizer rules that keep the machine out of a fixture, and of the pattern `r5_lib.Procs` kills by (`python3 -m unittest test_sanitize`) |
 | `tl.py`, `tlq.py` | timeline viewers for a raw recording |
 | `cost.py` | sum of `total_cost_usd` over the recordings |
 | `notes_lib.py`, `make_notes_part2.py` | build the part 2 document; every quoted line is copied from a fixture |
@@ -209,6 +238,8 @@ cd "$CAPTURE_DIR/fixtures"
 | `make_notes_part5.py` | builds the part 5 document, with the same checks; it also lists the notes of parts 4 and 5 that were written late (and fails on a late one of part 5) |
 | `r8_lib.py` | helpers of the `r8_*.py` scripts: the scenario's plugin and its local marketplace, the uuids and words of a turn, counts from a session's transcript |
 | `make_notes_part6.py` | builds the part 6 document, with the same checks; it fails on a late note of part 6 |
+| `r9_lib.py` | helpers of the `r9_*.py` scripts: a plugin with a server and two hooks, the plugin's files in a throw-away HOME, a session's transcript as line types and uuids, a port that refuses connections and then proxies, the interactive `claude` in a pseudo-terminal |
+| `make_notes_part7.py` | builds the part 7 document, with the same checks; it fails on a late note of part 7, and reads the fixtures of parts 4 to 6 for section 1's last sentence |
 
 Part 1 scenarios (`s*.py` -> fixtures without prefix): `s00_smoke`, `s01_mid_turn` (plain, uuid, uuid-now,
 uuid-next, uuid-later), `s02_control`, `s03_image`, `s04_subagent`, `s05_background`, `s06_limits`,
@@ -308,6 +339,19 @@ Part 6 scenarios (`r8_*.py` -> fixtures `r8-*`; the number in a script's name is
 | `r8_a11_shutdown_all.py` | a label (1, 2) | `r8-shutdown-all-*` | 11 |
 | `r8_c12_effort_mid_turn.py` | null, high; then a label | `r8-effort-mid-turn-*` | 12 |
 
+Part 7 scenarios (`r9_*.py` -> fixtures `r9-*`; the number in a script's name is the section of part 7):
+
+| script | variants | fixtures | part 7 section |
+|---|---|---|---|
+| `r9_e1_plugin_from_repo.py` | repo-both, repo-local, user-declared, off-repo-local, on, off; each `-user` or `-user-local`; then a label: two processes each | `r9-plugin-from-repo-<variant>-<label>-a`, `-b` | 1 |
+| `r9_f2_rewind_tools.py` | a label (1, 2): two sessions, nine processes | `r9-rewind-tools-<label>-a` … `-f`, `r9-rewind-drops-<label>-a` … `-c` | 2 |
+| `r9_f3_fork_tools.py` | a label (1, 2): two sessions, six processes | `r9-fork-tools-<label>-a` … `-d`, `r9-fork-live-<label>-a`, `-b` | 3 |
+| `r9_f4_file_rewind_more.py` | a label (1, 2) | `r9-file-rewind-more-*` | 4 |
+| `r9_c5_own_commands.py` | home-all, home-user, login; then a label | `r9-own-commands-*` | 5 |
+| `r9_d6_no_network.py` | proxy, dns; then a label | `r9-no-network-proxy-<label>`, `r9-no-network-dns-<label>-a`, `-b` | 6 |
+| `r9_f7_terminal_session.py` | a label (1, 2): three processes | `r9-terminal-<label>-a` … `-c` | 7 |
+| `r9_b8_http_silent.py` | a label (1) | `r9-http-silent-1` | 8 |
+
 Notes for whoever records again:
 - The `tool_use` line of a Bash call can come seconds before the call's process exists (the first shell start of a
   session is slow, more so on a busy machine). A scenario that stops a RUNNING command must wait for the process
@@ -335,3 +379,9 @@ Notes for whoever records again:
   (the cache makes turn costs move): run it again.
 - `r5_c13_commands_that_ask.py` sets up its work repo once (a bare repo inside it, a first push). Delete
   `$CAPTURE_DIR/work/r5-commands-*` before you record it again, or the commit and the push have nothing to do.
+- A script that records a label again reuses that label's work folder: files a run does not reset keep what the last
+  run left (the first part 7 tries of `r9_f4` left `README.md` edited; the script now writes every file it checks), and
+  the folder's session files under `~/.claude/projects/` keep the earlier sessions (counts of session files then differ
+  between labels).
+- A fork of a session whose first process still runs (`r9_f3`, `r9-fork-live`) first answers an empty `result` (no
+  model request) for a notification it makes itself: wait for the next `result` for the answer to the message.
