@@ -7,7 +7,7 @@ import type { Approval } from '../gen/Approval';
 import type { Plan } from '../gen/Plan';
 import type { CardKey, KeyAct } from '../util/approvalCard';
 import { resolveApprovals, runPlan } from '../state/actions';
-import { installKeys, noteAnswer, registerCardView, registerPlanKey, registerQuestionKeys } from '../state/keys';
+import { installKeys, lastAnswerAt, noteAnswer, registerCardView, registerPlanKey, registerQuestionKeys } from '../state/keys';
 import { store } from '../state/store.svelte';
 import { ui } from '../state/ui.svelte';
 
@@ -149,6 +149,18 @@ describe('a question card: a digit and the send key ask the card whose keys they
     act = 'answer';
     press('Enter', true);
     expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('⌘↵ with nothing to send rests nothing: the card notes an answer only when one goes', () => {
+    store.approvals = [question];
+    // The card's send does nothing: no option picked, no words typed.
+    const send = vi.fn();
+    unregister.push(registerQuestionKeys('q1', { options: () => 2, pick: vi.fn(), send, act: () => 'answer' }));
+    card('q1', 'answer');
+    const before = lastAnswerAt();
+    press('Enter', true);
+    expect(send).toHaveBeenCalledOnce();
+    expect(lastAnswerAt()).toBe(before);
   });
 });
 

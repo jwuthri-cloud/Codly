@@ -127,6 +127,23 @@ export function rowsView(base: KeysView, rows: SeenPart[], view: Box, body: Box)
 }
 
 /**
+ * Why a key did nothing, for the line the card shows: what the card asks (`asks`) may lie in its
+ * own body, and a part the body scrolls out of its visible box (`body`) is out of view, not
+ * covered (a press there reaches the card's title or buttons, drawn over the clipped text). It
+ * only turns 'covered' into 'out', so what the key does stays the same (`keyAct`: no act).
+ */
+export function whyView(view: KeysView, asks: Box | null, body: Box | null): KeysView {
+  if (view !== 'covered' || !asks || !body) return view;
+  return asks.top >= body.top - 1 && asks.bottom <= body.bottom + 1 ? view : 'out';
+}
+
+/**
+ * Whether a card (`card`) fits the view of its scroller, so it is brought into view whole (its
+ * padding and the lines under its buttons too); else only from its title to its buttons.
+ */
+export const fitsView = (card: Box, view: Box): boolean => card.bottom - card.top <= view.bottom - view.top + 1;
+
+/**
  * How far a box that shows `view` scrolls (px, down is positive) to bring `span` into it, with
  * `margin` px to spare where there is room: 0 when it is in view already, so a second press
  * does not move it again. A span taller than the view shows its top.

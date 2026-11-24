@@ -54,12 +54,12 @@
   import { yourAnswers, yourChoice } from '../../lib/state/answers';
   import { changedPlan, PERMISSION_MODES, setPermissionMode } from '../../lib/state/control.svelte';
   import { keyTargetApproval, lastAnswerAt, noteAnswer, registerCardView, registerQuestionKeys } from '../../lib/state/keys';
-  import { boxNow, bringIntoView, questionsOf, readCard, scrollerOf, seen, viewOf, type QuestionRows } from './cardParts';
+  import { boxNow, boxOf, bringIntoView, questionsOf, readCard, scrollerOf, seen, viewOf, type QuestionRows } from './cardParts';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
   import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, safetyPlace, type FooterButton } from '../../lib/util/approvalFooter';
-  import { answerMissing, answerTakesFocus, clickRests, envelopeAsksText, foldsReason, holdStep, keyAct, keycapActs, NO_HOLD, rowsView, settled, type Box, type CardKey, type KeyAct, type KeyFocus, type KeysView } from '../../lib/util/approvalCard';
+  import { answerMissing, answerTakesFocus, clickRests, envelopeAsksText, fitsView, foldsReason, holdStep, keyAct, keycapActs, NO_HOLD, rowsView, settled, whyView, type Box, type CardKey, type KeyAct, type KeyFocus, type KeysView } from '../../lib/util/approvalCard';
   import { idVar } from '../../lib/util/labels';
   import { firstQuestion, settledLine, settledParts, wordsOf } from '../../lib/util/outcome';
   import { permissionsAsked } from '../../lib/util/permissionsAsked';
@@ -383,7 +383,9 @@
   let swallowed = $state<string | null>(null);
   let swallowedTimer: ReturnType<typeof setTimeout> | undefined;
   function tellWhy(act: KeyAct, view: KeysView, key: CardKey) {
-    const line = act === 'wait' ? 'Wait a moment'
+    // With no answer yet the send key has nothing to send, as its button says (it is disabled).
+    const line = key === 'send' && unanswered ? null
+      : act === 'wait' ? 'Wait a moment'
       : view === 'covered' ? 'Something covers this request'
       : view !== 'too-big' ? 'Scroll to see the whole request'
       : key === 'send' ? 'Use the button: your answers do not fit in view together'
@@ -415,12 +417,16 @@
     let rows: QuestionRows[] = [];
     let seenBox: Box | null = null;
     let bodyBox: Box | null = null;
+    /** What the card asks, when its body holds it (a question's text): the body may clip it. */
+    let asksBox: Box | null = null;
     const look = (now: number): KeysView => {
       const body = bodyEl?.isConnected ? bodyEl : null;
       const read = sc && card.isConnected ? readCard(card, sc, body, BODY_MIN) : { view: 'out' as const, boxes: [] };
       rows = body ? questionsOf(body) : [];
       seenBox = sc ? viewOf(sc) : null;
       bodyBox = body ? boxNow(body) : null;
+      const asks = body?.querySelector<HTMLElement>('[data-asks]');
+      asksBox = asks ? boxOf(asks) : null;
       const moved = [...read.boxes, ...rows.flatMap((q) => [q.text, ...q.options].map(boxNow))];
       hold = holdStep(hold, now, read.view === 'ok', moved);
       return (view = read.view);
@@ -436,7 +442,8 @@
     };
     const actFor = (key: CardKey, now: number): { act: KeyAct; view: KeysView; els: HTMLElement[] } => {
       const els = needs(key);
-      const v = seenBox && bodyBox ? rowsView(view, els.map(seen), seenBox, bodyBox) : view;
+      const base = whyView(view, asksBox, bodyBox);
+      const v = seenBox && bodyBox ? rowsView(base, els.map(seen), seenBox, bodyBox) : base;
       return { act: keyAct(v, settled(hold, now, from)), view: v, els };
     };
     let frame = 0;
@@ -509,13 +516,16 @@
     return 'field';
   }
 
-  /** Brings what the keys need of the card into view: from its title to its buttons, inside the
-   *  view of its scroller (not under its fades). In view already, it does not move. */
+  /** Brings the card into view, inside the view of its scroller (not under its fades): whole
+   *  when it fits (`fitsView`), else what the keys need of it, from its title to its buttons.
+   *  In view already, it does not move. */
   function showParts(smooth: boolean) {
     const card = el;
     const head = card?.querySelector<HTMLElement>(':scope > header');
     const foot = card?.querySelector<HTMLElement>('[data-answers]');
-    if (card?.isConnected && head && foot) bringIntoView([head, foot], smooth);
+    const sc = card ? scrollerOf(card) : null;
+    if (!card?.isConnected || !head || !foot || !sc) return;
+    bringIntoView(fitsView(boxNow(card), viewOf(sc)) ? [card] : [head, foot], smooth);
   }
   // When it becomes the oldest request on screen, the thread shows it whole; and again when
   // the "Always allow" choices come (a moment after the card) while you see its top.

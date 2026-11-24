@@ -222,7 +222,7 @@ export function installKeys(): () => void {
         const q = questionKeysOf(ap.id);
         if (q && !e.altKey && !e.shiftKey) {
           e.preventDefault();
-          noteAnswer();
+          // The card notes the answer when one goes: with nothing to send, nothing rests.
           q.send();
         }
         return;

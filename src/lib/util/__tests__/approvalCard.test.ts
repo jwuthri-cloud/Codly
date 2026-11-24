@@ -24,7 +24,7 @@ import {
   type Hold,
   type SeenPart,
 } from '../approvalCard';
-import { clickRests, rowsView, scrollToShow } from '../approvalCard';
+import { clickRests, fitsView, rowsView, scrollToShow, whyView } from '../approvalCard';
 
 const box = (top: number, bottom: number, left = 217, right = 873): Box => ({ top, bottom, left, right });
 /** The thread's visible box at 1024x640, less its padding: [162, 494] less 28 px at each end. */
@@ -472,5 +472,33 @@ describe('in a 1:1 chat the composer has the focus (the review’s minor 9)', ()
   it('a digit is typed into it, so the card shows no digit keycap', () => {
     for (const focus of ['composer-empty', 'composer-blank', 'composer-text'] as const) expect(keycapActs('3', focus)).toBe(false);
     expect(keycapActs('3', 'page')).toBe(true);
+  });
+});
+
+describe('why a key did nothing, as the card says it (`whyView`)', () => {
+  const body = box(234, 434);
+  it('a question’s text clipped by the card’s body is out of view, not covered: the press only scrolls the body', () => {
+    // Below the body's bottom (the footer lies over it), and above its top (the title lies over it).
+    expect(whyView('covered', box(440, 464), body)).toBe('out');
+    expect(whyView('covered', box(220, 244), body)).toBe('out');
+    expect(keyAct(whyView('covered', box(440, 464), body), true)).toBe('reveal');
+  });
+
+  it('inside the body, or not in a body, a cover stays a cover; no other view changes', () => {
+    expect(whyView('covered', box(250, 274), body)).toBe('covered');
+    expect(whyView('covered', null, body)).toBe('covered');
+    expect(whyView('covered', box(440, 464), null)).toBe('covered');
+    for (const v of ['ok', 'out', 'too-big'] as const) expect(whyView(v, box(440, 464), body)).toBe(v);
+  });
+});
+
+describe('a card brought into view: whole when it fits (`fitsView`)', () => {
+  it('a card as tall as the view, or less, shows whole: its padding and the line under its buttons too', () => {
+    expect(fitsView(box(300, 576), thread)).toBe(true);
+    expect(fitsView(box(300, 400), thread)).toBe(true);
+  });
+
+  it('taller than the view (the rule choices open at 1024x640): only from its title to its buttons', () => {
+    expect(fitsView(box(100, 600), thread)).toBe(false);
   });
 });

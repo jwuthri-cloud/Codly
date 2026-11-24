@@ -17,7 +17,9 @@ export function watchRunPlan(button: HTMLElement, planId: string, onCap: (shows:
     hold = holdStep(hold, now, read.view === 'ok', read.box ? [read.box] : []);
     return keyAct(read.view, settled(hold, now, from));
   };
+  // The keycap starts hidden, whatever the watch before this one last said.
   let shows = false;
+  onCap(false);
   let frame = 0;
   const each = () => {
     const now = performance.now();
