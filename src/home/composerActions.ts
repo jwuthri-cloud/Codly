@@ -164,11 +164,13 @@ export function slashCommands(c: SlashContext, on: SlashDo): SlashCommand[] {
   const mine = agentCommands(c, on);
   /** The agent's control of that name, in its place in the menu. */
   const control = (...names: string[]) => names.flatMap((n) => mine.filter((r) => r.name === n));
+  /** The 1:1 agent of this chat: one that can start a new conversation. */
+  const solo = c.oneToOne && c.agent?.role === 'solo' ? c.agent : null;
 
   const list: SlashCommand[] = [
-    // `/new` is what a Claude Code or Codex user types for an empty context: in a 1:1 chat it
-    // starts a new conversation with the agent (newConversation.ts), in a request a new request.
-    c.oneToOne ? newConversationRow(c) : { name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: on.newRequest },
+    // `/new` is what a Claude Code or Codex user types for an empty context: with a 1:1 agent it
+    // starts a new conversation (newConversation.ts), anywhere else a new request.
+    solo ? newConversationRow({ ...c, agent: solo }) : { name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: on.newRequest },
     { name: 'issue', label: 'From issue…', hint: 'A GitHub link or number', icon: 'link', run: on.fromIssue },
     { name: 'pr', label: 'From pull request…', hint: 'Its reviews and failing checks', icon: 'merge', run: on.fromPullRequest },
     ...control('stop'),
@@ -192,7 +194,7 @@ export function slashCommands(c: SlashContext, on: SlashDo): SlashCommand[] {
   else list.push({ ...diff, off: 'This request has no changes yet' });
 
   list.push(
-    { name: 'clear', label: 'Clear the draft', hint: `The text and the attached files${c.oneToOne ? ' (for a new conversation: /new)' : ''}`, icon: 'trash', run: on.clear },
+    { name: 'clear', label: 'Clear the draft', hint: `The text and the attached files${solo ? ' (for a new conversation: /new)' : ''}`, icon: 'trash', run: on.clear },
     { name: 'closed', label: 'Closed requests', hint: 'Read them again', icon: 'clock', run: on.closed },
     { name: 'settings', label: 'Settings', hint: '⌘,', icon: 'settings', run: on.settings },
     { name: 'shortcuts', label: 'Keyboard shortcuts', hint: '?', icon: 'keyboard', run: on.shortcuts },

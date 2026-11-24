@@ -572,7 +572,7 @@ export class MockTransport implements Transport {
         const ag = sim.agents.get(String(a.agentId));
         if (!ag) throw new Error(`unknown agent ${String(a.agentId)}`);
         if (ag.role !== 'solo') throw new Error('only a 1:1 agent can start a new conversation');
-        if (ag.task_id) throw new Error(`${ag.name} is on a task: start a new conversation when the task is done`);
+        if (ag.task_id) throw new Error(`${ag.name} is on ${sim.tasks.get(ag.task_id)?.key ?? 'a task'}: start a new conversation when the task is done`);
         if (sim.actor(ag.id).inTurn) throw new Error(`${ag.name} is still working: stop its turn first`);
         sim.patchAgent(ag.id, { session_id: null, usage: { ...ag.usage, context_used: null } });
         sim.chat(`agent:${ag.id}`, 'codly', `New conversation. ${ag.name} starts without what was said above. Files and checkpoints are as they are.`);

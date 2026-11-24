@@ -1,8 +1,8 @@
 //! "New conversation" (`/new` in a 1:1 chat), with a fake agent in place of the CLI: the same
 //! agent's next message starts a new session, in the same worktree, with its files and its
 //! checkpoints as they were, and a note about restored files that waited is gone. The thread
-//! and the record say so. Refused for an agent that is not a 1:1 agent, one on a task, one at
-//! work and one in your terminal; a refusal changes nothing.
+//! and the record say so. Refused for an agent that is not a 1:1 agent, one on a task or with a
+//! stopped one, one at work and one in your terminal; a refusal changes nothing.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -362,9 +362,14 @@ async fn refused_for_an_agent_that_is_not_free_and_a_refusal_changes_nothing() {
     let bo = core.hire_agent(Provider::Claude, None, None).await.unwrap();
     let task = core.create_task("Write the greeting", "Create hello.txt containing hello").await.unwrap();
     core.assign_task(&task.id, Some(&bo.id)).await.unwrap();
-    assert_eq!(no(&bo.id).await, format!("{} is on a task: start a new conversation when the task is done", bo.name));
+    let on_task = format!("{} is on {}: start a new conversation when the task is done", bo.name, task.key);
+    assert_eq!(no(&bo.id).await, on_task);
     wait_for("Bo's task to run", async || agent_now(&core, &bo.id).await.task_id.map(|_| ())).await;
-    assert_eq!(no(&bo.id).await, format!("{} is on a task: start a new conversation when the task is done", bo.name));
+    assert_eq!(no(&bo.id).await, on_task);
+    // Stopped by you, the task is still Bo's: it waits for your Retry or your Cancel, not for its end.
+    core.move_task(&task.id, TaskStatus::Blocked).await.unwrap();
+    let stopped = format!("{} still has {} (blocked): retry it or cancel it first", bo.name, task.key);
+    wait_for("Bo to let go of the stopped task", async || (no(&bo.id).await == stopped).then_some(())).await;
 
     // Stopped, Ada can start again.
     core.stop_agent(&ada.id).await.unwrap();

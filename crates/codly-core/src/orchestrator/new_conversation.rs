@@ -16,6 +16,7 @@ use serde_json::json;
 
 use super::{Inner, row};
 use crate::model::*;
+use crate::store;
 
 /// The line by Codly in the agent's 1:1 thread.
 fn new_conversation_line(name: &str) -> String {
@@ -34,12 +35,16 @@ impl Inner {
         // No scheduling pass from the check below until its session is gone: while its idle chat
         // shuts down it looks free, and a pass would hand it a task in the middle of this.
         let _g = self.sched_lock.lock().await;
-        // A task that waits for it (blocked, or failed and retried) goes back to it in that
-        // task's worktree, where a note about restored files may wait for that task.
+        // A task given to it that is not over (waiting for its turn, or stopped and retried
+        // later) goes back to it in that task's worktree, where a note about restored files may
+        // wait for that task. One that stopped waits for you, not for its end.
         let open = |t: &Task| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled);
-        let held = self.store.tasks(&ws.id)?.into_iter().any(|t| t.assignee.as_ref() == Some(&a.id) && open(&t));
-        if a.task_id.is_some() || held {
-            bail!("{} is on a task: start a new conversation when the task is done", a.name);
+        let held = self.store.tasks(&ws.id)?.into_iter().find(|t| a.task_id.as_ref() == Some(&t.id) || (t.assignee.as_ref() == Some(&a.id) && open(t)));
+        if let Some(t) = held.as_ref().filter(|t| a.task_id.is_none() && matches!(t.status, TaskStatus::Failed | TaskStatus::Blocked)) {
+            bail!("{} still has {} ({}): retry it or cancel it first", a.name, t.key, store::enum_str(&t.status));
+        }
+        if a.task_id.is_some() || held.is_some() {
+            bail!("{} is on {}: start a new conversation when the task is done", a.name, held.map_or("a task".into(), |t| t.key));
         }
         self.not_in_terminal(&a)?;
         // Looked at and told to stop in one step: a prompt or a start that got in first keeps
