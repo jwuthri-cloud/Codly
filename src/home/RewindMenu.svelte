@@ -116,7 +116,13 @@
   }
 
   function key(e: KeyboardEvent) {
-    if (e.isComposing || (e.repeat && e.key === 'Enter')) return;
+    if (e.isComposing) return;
+    // A held ↵ (the one that opened the list) must not click the row or "Put back" that now has the focus.
+    if (e.key === 'Enter' && e.repeat) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter'].includes(e.key)) return;
     // ↵ on a button that is not a row (the file count, "Put back", "Cancel") does what a press on it does.
     if (e.key === 'Enter' && e.target !== el && !(e.target as HTMLElement).hasAttribute('data-at')) return;
