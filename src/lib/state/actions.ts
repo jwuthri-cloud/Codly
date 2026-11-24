@@ -26,6 +26,9 @@ import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
 import { finishedWorkGoes, followUpRequest, reviewMessage, sameSpot, splitByTask, splitWords, type ReviewComment, type ReviewDraft, type SplitPart } from '../util/review';
 import { answerText } from '../util/outcome';
+import { safetyPlace } from '../util/approvalFooter';
+import { openSettings } from '../../overlays/settingsLink';
+import { safetyLink } from '../../overlays/settingsPages';
 import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
 import { yourAnswers, yourChoice } from './answers';
@@ -372,12 +375,21 @@ export async function resolveApprovals(approvalIds: string[], choice: ApprovalCh
   return sent.every(Boolean);
 }
 
-/** "Always allow in this repo": save the rule a card offers. The core answers the requests it covers. */
+/** The section of Settings that lists the rules saved from cards. */
+const RULES = 'approval-rules';
+
+/** "Always allow in this repo": save the rule a card offers. The core answers the requests it covers.
+ *  Its toast opens Settings where you remove the rule. */
 export async function saveApprovalRule(approvalId: string, kind: ApprovalRuleKind) {
   const rule = await attempt('save the rule', () => api.addApprovalRule(approvalId, kind));
   if (!rule) return;
   const what = rule.kind === 'prefix' ? `commands that start with ${rule.command}` : rule.command;
-  toast({ kind: 'success', title: 'Codly will not ask about this again', body: `In this repo: ${what}. Remove the rule in Settings → Safety.` });
+  toast({
+    kind: 'success',
+    title: 'Codly will not ask about this again',
+    body: `In this repo: ${what}. Remove the rule in ${safetyPlace(RULES)}.`,
+    action: { label: 'Open Settings', run: () => openSettings(safetyLink(RULES)) },
+  });
 }
 
 // What a command answers belongs to the office it was sent from: after a switch it is dropped

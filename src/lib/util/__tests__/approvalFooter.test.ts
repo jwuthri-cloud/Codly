@@ -6,7 +6,8 @@ import type { ApprovalChoice } from '../../gen/ApprovalChoice';
 import type { Provider } from '../../gen/Provider';
 import { denyKeyAction } from '../../state/keys';
 import { store } from '../../state/store.svelte';
-import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT } from '../approvalFooter';
+import { openAt, safetyLink } from '../../../overlays/settingsPages';
+import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, safetyPlace } from '../approvalFooter';
 
 /** Label, key and what a press does: the answer it sends, or the field it opens. */
 const shown = (plan: boolean, offered: ApprovalChoice[]) => footerButtons(plan, offered).map((b) => [b.label, b.kbd ?? '', b.act === 'choice' ? b.choice : b.act]);
@@ -68,7 +69,7 @@ describe('⌘⌫ on the request the keyboard acts on', () => {
   });
 });
 
-describe('"Approve and accept edits from now on"', () => {
+describe('"Approve and accept edits" (from now on)', () => {
   const edit: Approval['subject'] = { kind: 'file_change', paths: ['src/theme.ts'], diff: null };
   const command: Approval['subject'] = { kind: 'command', command: 'npm install', cwd: null };
   // What Claude Code offers for an edit inside the worktree: its only suggestion is a mode switch, so no "for this session" (claude.rs `grantable`).
@@ -104,22 +105,26 @@ describe('"Approve and accept edits from now on"', () => {
     const b = footerButtons(false, offered, false, { provider: 'claude', name: 'Ada' }, hint);
     expect(b.map((x) => [x.label, x.kbd ?? '', x.act])).toEqual([
       ['Approve once', '⌘↵', 'choice'],
-      ['Approve and accept edits from now on', '', 'accept_edits'],
+      ['Approve and accept edits', '', 'accept_edits'],
       ['Deny', '⌘⌫', 'choice'],
       ['Stop the turn', '', 'choice'],
       ['Deny with a note…', '⇧⌘⌫', 'note'],
     ]);
-    expect(b[1].hint).toBe(hint);
+    // A short label (the five buttons of a file edit fit one row at 1440x900): the whole sentence is in its tooltip.
+    expect(b[1].hint).toBe(`Approve this edit, and accept edits from now on. ${hint}`);
     // No new key, and without the offer the buttons are as before.
-    expect(footerButtons(false, offered, false, { provider: 'claude', name: 'Ada' }).map((x) => x.label)).not.toContain('Approve and accept edits from now on');
+    expect(footerButtons(false, offered, false, { provider: 'claude', name: 'Ada' }).map((x) => x.label)).not.toContain('Approve and accept edits');
   });
 });
 
 describe('the note of a "no", by CLI', () => {
-  it('says where it goes for every CLI but Claude Code', () => {
-    const note = (provider: Provider) => footerButtons(false, ['allow_once', 'deny'], false, { provider, name: 'Kit' }).at(-1)!.label;
-    expect(note('claude')).toBe('Deny with a note…');
-    for (const p of ['codex', 'gemini', 'opencode', 'cursor', 'copilot'] as Provider[]) expect(note(p)).toBe('Deny and tell Kit why…');
+  it('says where it goes for every CLI but Claude Code: a short label, the whole sentence in its tooltip', () => {
+    const note = (provider: Provider) => footerButtons(false, ['allow_once', 'deny'], false, { provider, name: 'Kit' }).at(-1)!;
+    expect(note('claude').label).toBe('Deny with a note…');
+    expect(note('claude').hint).toBeUndefined();
+    // "Deny and tell Kit why…" wrapped to four lines in the sheet's card at 1024x640 (the fifth review, defect 14).
+    for (const p of ['codex', 'gemini', 'opencode', 'cursor', 'copilot'] as Provider[]) expect(note(p).label).toBe('Deny and say why…');
+    expect(note('codex').hint).toBe('Deny, and tell Kit why: Codex takes no note with a deny, so Codly sends yours as your next message.');
     // An agent Codly does not know: as before.
     expect(footerButtons(false, ['allow_once', 'deny']).at(-1)!.label).toBe('Deny with a note…');
   });
@@ -137,5 +142,17 @@ describe('the buttons of a permissions request', () => {
     const b = footerButtons(false, ['allow_once', 'allow_session', 'deny'], true).map((x) => [x.label, x.kbd ?? '']);
     expect(b).toEqual([['Allow for this turn', '⌘↵'], ['Allow for this session', '⌥⌘↵'], ['Deny', '⌘⌫'], ['Deny with a note…', '⇧⌘⌫']]);
     expect(footerButtons(false, ['allow_once'])[0].label).toBe('Approve once');
+  });
+});
+
+describe('where Settings shows what a card speaks of', () => {
+  it('names the page of the Safety tab, which its link opens', () => {
+    expect(safetyPlace('approval-rules')).toBe('Settings → Safety → Approvals');
+    expect(safetyPlace('approval-mode')).toBe('Settings → Safety → Approvals');
+    expect(safetyPlace('sandbox')).toBe('Settings → Safety → Sandbox');
+    expect(safetyPlace('trust')).toBe('Settings → Safety → Trust');
+    expect(safetyPlace('budgets')).toBe('Settings → Safety → Limits');
+    // The link of the same section opens that page, at the section.
+    expect(openAt(safetyLink('approval-rules'))).toEqual({ tab: 'safety', page: 'approvals', section: 'approval-rules' });
   });
 });

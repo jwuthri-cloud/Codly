@@ -159,3 +159,56 @@ export function answerTakesFocus(questions: Pick<AskedQuestion, 'options' | 'own
   if (typingElsewhere) return false;
   return questions.length ? questions.length === 1 && questions[0].options === 0 && questions[0].own : freeField;
 }
+
+/**
+ * Where the focus is while a card shows its keycaps: on no text field ('page'), in the composer
+ * ('composer-empty'; 'composer-blank': only spaces; 'composer-text'), in a text field of the card
+ * itself ('own-field': its answer), or in another text field ('field').
+ */
+export type KeyFocus = 'page' | 'composer-empty' | 'composer-blank' | 'composer-text' | 'own-field' | 'field';
+
+/**
+ * Whether the key of a keycap (`kbd`: '⌘↵', '⌥⌘↵', '⌘⌫', '⇧⌘⌫', or a digit '1'-'9') acts with the
+ * focus at `focus`, so the card shows it: a keycap never shows a key that would do something else.
+ * As state/keys.ts, the composer and the card's answer field take them: ⌘↵ acts but in another
+ * text field and in a composer with a draft (Composer.svelte sends the draft; with only spaces it
+ * leaves the key to the card; in the card's answer field the field sends); ⌥⌘↵ only on the page
+ * and in the composer; the deny keys are text keys in a field with any text, spaces too, and in the
+ * card's field (`denyKeyInField`), and act only on the page and in the empty composer; a digit is a
+ * character in every text field.
+ */
+export function keycapActs(kbd: string, focus: KeyFocus): boolean {
+  if (/^[1-9]$/.test(kbd)) return focus === 'page';
+  if (kbd === '⌘↵') return focus !== 'field' && focus !== 'composer-text';
+  if (kbd === '⌥⌘↵') return focus === 'page' || focus.startsWith('composer-');
+  if (kbd === '⌘⌫' || kbd === '⇧⌘⌫') return focus === 'page' || focus === 'composer-empty';
+  throw new Error(`no approval key ${kbd}`);
+}
+
+/** The fewest lines of its plan a plan card shows (1024x640, a 332 px thread, has room for them). */
+export const PLAN_LINES_MIN = 3;
+
+/** What a plan card's fit needs to know, in px. */
+export type PlanFit = {
+  /** The height the card may take: the part of the thread that shows it, less a small margin. */
+  room: number;
+  /** All of the card but its body (padding, title, the agent's reason whole, risks, buttons,
+   *  gaps). */
+  fixed: number;
+  /** The reason's whole height, and the height of one line of it. */
+  reason: number;
+  reasonLine: number;
+  /** One line of the plan, and the padding of its box. */
+  planLine: number;
+  planPad: number;
+};
+
+/**
+ * Whether a plan card folds the agent's reason to one line (its "more" opens it again), so that
+ * its plan keeps `PLAN_LINES_MIN` lines in view: only when the room the other parts leave is
+ * less than that, and the reason has more than one line to give.
+ */
+export function foldsReason(f: PlanFit): boolean {
+  if (f.reason <= f.reasonLine + 1) return false;
+  return f.room - f.fixed - f.planPad < PLAN_LINES_MIN * f.planLine;
+}

@@ -5,7 +5,10 @@
   keycaps, only while its title, what it asks and its buttons are in view with nothing drawn over
   them, and have been for a moment without moving (`keysView`, `settled`): a key pressed while
   they are not only brings the card into view, and one pressed while it settles does nothing.
-  The keycaps take their room whether they show or not: showing them moves nothing. A card too
+  The keycaps take their room whether they show or not: showing them moves nothing. A keycap
+  shows only while its key acts where the focus is (`keycapActs`): with text in the composer, or
+  in the card's answer field, ⌘⌫ deletes text and Skip or Deny shows no keycap; with a draft in
+  the composer ⌘↵ sends the draft and Approve shows no ⌘↵ keycap. A card too
   big for its scroller never takes the keys, and says so: its buttons answer it.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer: 1-9 pick, ↵ in the
   answer field or ⌘↵ send. A question that comes in its request's envelope (an MCP server's
@@ -16,13 +19,17 @@
   (keycaps under the labels), and the rest scrolls inside it. The "Always allow" choices open
   under the buttons, inside the card (Esc closes them). A question that can only be answered in words takes the focus when it
   becomes the card that waits, unless you are typing somewhere else.
-  On a file edit of a 1:1 Claude agent that asks for edits, "Approve and accept edits from now
-  on" approves it and switches the agent to "Accept edits" (`acceptsEdits`).
+  On a file edit of a 1:1 Claude agent that asks for edits, "Approve and accept edits" approves
+  it and switches the agent to "Accept edits" from now on (`acceptsEdits`).
   A plan (Claude's plan mode asks to leave it with `ExitPlanMode`) renders as the plan itself:
   accept it, accept it with your changes (Claude Code takes your text as the plan), or send it
-  back with a note. It has no plain "no" (`footerButtons`): ⌘⌫ opens the note field too.
-  Once answered, the card is one row: how it ended, and what you said with the answer (your
-  answer to a question, the note of a "no", that you changed the plan), as the core recorded it.
+  back with a note. It has no plain "no" (`footerButtons`): ⌘⌫ opens the note field too. In a
+  small window the agent's reason folds to one line ("more" opens it) before the plan shows
+  fewer than three lines (`foldsReason`).
+  Once answered, the card is one row: how it ended in the words of the agent's History
+  (`settledParts`: "Stopped by you" when your stop ended it, "Plan accepted by you, with your
+  changes", the rule you saved with it, cut first when the row is short), and what you said with
+  the answer (your answer to a question, the note of a "no"), as the core recorded it.
   The plan card and the card for a host that Claude Code's sandbox blocks are for Claude agents
   only: these two tool names are Claude Code's own, and for any other CLI a request with such a
   name shows as every other tool request, by its name and its input.
@@ -47,10 +54,10 @@
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
-  import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, type FooterButton } from '../../lib/util/approvalFooter';
-  import { answerMissing, answerTakesFocus, envelopeAsksText, holdStep, keyAct, NO_HOLD, settled, type KeysView } from '../../lib/util/approvalCard';
+  import { acceptsEdits, footerButtons, noteGoes, PLAN_NOTE_HINT, safetyPlace, type FooterButton } from '../../lib/util/approvalFooter';
+  import { answerMissing, answerTakesFocus, envelopeAsksText, foldsReason, holdStep, keyAct, keycapActs, NO_HOLD, settled, type KeyFocus, type KeysView } from '../../lib/util/approvalCard';
   import { idVar } from '../../lib/util/labels';
-  import { firstQuestion, outcomeBy, settledWord, wordsOf } from '../../lib/util/outcome';
+  import { firstQuestion, settledLine, settledParts, wordsOf } from '../../lib/util/outcome';
   import { permissionsAsked } from '../../lib/util/permissionsAsked';
   import { shownPlan } from '../../lib/util/planRequest';
   import { digitQuestion, isTextField, sendsFromField } from '../../lib/util/questionKeys';
@@ -61,6 +68,7 @@
   import Portrait from '../../components/Portrait.svelte';
   import Provenance from '../../components/Provenance.svelte';
   import Why, { type WhyLine } from '../../components/Why.svelte';
+  import { savedRuleOf } from '../../sheet/historyWords';
   import { PERMISSIONS } from '../LeadControls.svelte';
 
   interface Props {
@@ -84,9 +92,12 @@
   let keysAt = $state<KeysView>('out');
   /** It has been 'ok' and still for the settle time (`settled`). */
   let ready = $state(false);
-  /** You type in a field outside this card and the composer (an Ask-me answer): the keys act there, not here. */
-  let typingElsewhere = $state(false);
-  const isKeyTarget = $derived(candidate && keysAt === 'ok' && ready && !typingElsewhere);
+  /** Where the focus is (`KeyFocus`): in a field outside this card and the composer (an Ask-me
+   *  answer) the keys act there, not here; elsewhere it says which keycaps act (`keycapActs`). */
+  let focusAt = $state<KeyFocus>('page');
+  const isKeyTarget = $derived(candidate && keysAt === 'ok' && ready && focusAt !== 'field');
+  /** The keycap of `kbd` shows: the card takes the keys, and that key acts where the focus is. */
+  const capShows = (kbd: string) => isKeyTarget && keycapActs(kbd, focusAt);
 
   let noteOpen = $state(false);
   let note = $state('');
@@ -306,6 +317,30 @@
     const field = ownBelow || freeField ? answerEl : undefined;
     answerMax = field?.isConnected ? Math.max(ANSWER_MIN, Math.floor(room - fixed + field.offsetHeight)) : null;
     fit = Math.max(220, Math.floor(room), Math.ceil(fixed));
+    reasonFolds = !reasonOpen && planFolds(card, body, room);
+  }
+
+  // ── a plan keeps three lines in a small window: the reason folds first ──
+  let reasonEl: HTMLElement | undefined = $state();
+  /** The reason shows one line and "more" (`foldsReason`). */
+  let reasonFolds = $state(false);
+  /** You opened the folded reason: it stays whole. */
+  let reasonOpen = $state(false);
+  /** Whether a plan card folds its reason in `room`, measured with the reason whole (it is the
+   *  same folded or not: a folded reason keeps its whole height as its scroll height). */
+  function planFolds(card: HTMLElement, body: HTMLElement | null, room: number): boolean {
+    const planBox = body?.querySelector<HTMLElement>('.plan');
+    const reason = reasonEl?.isConnected ? reasonEl : null;
+    if (plan === null || !body || !planBox || !reason) return false;
+    const pb = getComputedStyle(planBox);
+    return foldsReason({
+      room,
+      fixed: card.scrollHeight - body.offsetHeight - reason.offsetHeight + reason.scrollHeight,
+      reason: reason.scrollHeight,
+      reasonLine: parseFloat(getComputedStyle(reason).lineHeight),
+      planLine: parseFloat(pb.lineHeight),
+      planPad: parseFloat(pb.paddingTop) + parseFloat(pb.paddingBottom),
+    });
   }
   $effect(() => {
     if (!el || !pending) return;
@@ -349,8 +384,7 @@
       const now = performance.now();
       keysAt = look(now);
       ready = settled(hold, now, from);
-      const active = document.activeElement;
-      typingElsewhere = isTextField(active) && !card.contains(active) && !active?.closest('[aria-label="Composer"]');
+      focusAt = focusOf(document.activeElement, card);
       frame = requestAnimationFrame(each);
     };
     frame = requestAnimationFrame(each);
@@ -364,6 +398,18 @@
       unregister();
     };
   });
+
+  /** Where the focus `active` is, for the keys of `card`: the composer's text is read as the keys
+   *  read it (state/keys.ts: any text for the deny keys; Composer.svelte: trimmed text for ⌘↵). */
+  function focusOf(active: Element | null, card: HTMLElement): KeyFocus {
+    if (!active || !isTextField(active)) return 'page';
+    if (card.contains(active)) return 'own-field';
+    if (active.closest('[aria-label="Composer"]')) {
+      const value = (active as HTMLInputElement).value;
+      return !value ? 'composer-empty' : value.trim() ? 'composer-text' : 'composer-blank';
+    }
+    return 'field';
+  }
 
   // When it becomes the oldest request on screen, the thread shows it whole; and again when
   // the "Always allow" choices come (a moment after the card) while you see its top.
@@ -501,10 +547,16 @@
   });
 
   // A question is answered or skipped, a plan is accepted (with your changes, when you changed
-  // it) or sent back, every other request is approved or denied. Your words show after it.
+  // it) or sent back, every other request is approved or denied: in the words of the agent's
+  // History (`settledParts`), with the rule you saved with it. Your words show after it.
   const said = $derived(wordsOf(approval, approval.decided_by));
-  const outcome = $derived(settledWord(approval.status, approval, agent?.provider ?? null, !!said?.planChanged));
-  const by = $derived(outcomeBy(approval.decided_by));
+  const savedRule = $derived.by(() => {
+    void store.rev;
+    return savedRuleOf(store.decisions, approval.id);
+  });
+  const settledAs = $derived(settledParts(approval.status, approval.decided_by ?? '', approval, agent?.provider ?? null, savedRule));
+  /** The verdict and the rule whole, for the tooltip of a row that cuts the rule. */
+  const settledWhole = $derived(settledLine(approval.status, approval.decided_by ?? '', approval, null, agent?.provider ?? null, savedRule));
   const answer = $derived(subject.kind === 'question' && approval.status === 'approved' ? (yourAnswers.get(approval.id) ?? null) : null);
   /** Your words on the closed row: your answer to a question, or the note that went with a "no". */
   const quote = $derived(answer ?? said?.note ?? null);
@@ -522,7 +574,12 @@
 {#if !pending}
   <div class="resolved s-{approval.status}" class:has-answer={!!quote}>
     <Icon name={approval.status === 'approved' ? 'check' : 'x'} size={12} stroke={2} />
-    <span class="r-l">{outcome} {by}</span>
+    {#if settledAs.rule}
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (the row cuts the rule you saved first: focus shows the whole line, as hover does) -->
+      <span class="r-l truncate with-rule" tabindex="0" data-tip={settledWhole}>{`${settledAs.verdict}, ${settledAs.rule}`}</span>
+    {:else}
+      <span class="r-l">{settledAs.verdict}</span>
+    {/if}
     {#if agent}<span class="r-who">{agent.name}</span>{/if}
     {#if quote}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex (the row cuts what was asked and your words: focus shows both whole, as hover does) -->
@@ -531,12 +588,12 @@
       <!-- Your words have a line of their own, two at most: as wide as the row. -->
       <span class="r-a" data-tip={asked}>“{oneLine(quote, 600)}”</span>
     {:else}
-      <code class="truncate">{oneLine(what, 120)}{#if allowedFor}<span class="r-for"> · {allowedFor}</span>{/if}</code>
+      <code class="truncate">{oneLine(what, 120)}{#if allowedFor}<span class="r-for">{` · ${allowedFor}`}</span>{/if}</code>
       <time class="num">{clock(approval.created_at)}</time>
     {/if}
   </div>
 {:else}
-  <article class="card" class:key={isKeyTarget} bind:this={el} style:--hue={idVar(agent?.color ?? 0)} style:max-height={fit ? `${fit}px` : null} style:--answer-max={answerMax ? `${answerMax}px` : null} aria-label={headline}>
+  <article class="card" data-waiting-card class:key={isKeyTarget} bind:this={el} style:--hue={idVar(agent?.color ?? 0)} style:max-height={fit ? `${fit}px` : null} style:--answer-max={answerMax ? `${answerMax}px` : null} aria-label={headline}>
     <header data-asks={asksInHeader || undefined}>
       {#if showAgent && agent}<button class="who" onclick={() => ui.selectAgent(agent.id)}><Portrait {agent} size={24} /></button>{/if}
       <h3>{headline}{#if subject.kind === 'question' && questions[0]?.header}<span class="qh">{questions[0].header}</span>{/if}</h3>
@@ -554,7 +611,7 @@
     {#if (approval.reason && approval.reason !== envelope) || approval.risks.length}
       <div class="said">
         {#if approval.reason && approval.reason !== envelope}
-          <p class="reason selectable"><Provenance kind="model" compact /><span>“{oneLine(approval.reason, 280)}”</span></p>
+          <p class="reason selectable"><Provenance kind="model" compact /><span bind:this={reasonEl} class:folded={reasonFolds}>“{oneLine(approval.reason, 280)}”</span>{#if reasonFolds}<button class="more" onclick={() => (reasonOpen = true)}>more</button>{/if}</p>
         {/if}
         {#if approval.risks.length}
           <div class="risks">
@@ -595,7 +652,7 @@
               <label class="opt" class:on={(picks[qi] ?? []).includes(o.label)}>
                 <input type={q.multiSelect ? 'checkbox' : 'radio'} name="q-{approval.id}-{qi}" checked={(picks[qi] ?? []).includes(o.label)} onchange={() => toggle(qi, o.label, !!q.multiSelect)} />
                 <span class="ot"><b>{o.label}</b>{#if o.description}<span class="od">{o.description}</span>{/if}</span>
-                {#if qi === digitAt && oi < 9}<span class="k num" class:off={!isKeyTarget} aria-hidden="true">{oi + 1}</span>{/if}
+                {#if qi === digitAt && oi < 9}<span class="k num" class:off={!capShows(String(oi + 1))} aria-hidden="true">{oi + 1}</span>{/if}
               </label>
             {/each}
             {#if q.own && !ownBelow}
@@ -658,7 +715,7 @@
     {/if}
 
     {#snippet keyed(label: string, kbd: string | undefined)}
-      <span class="bl">{label}</span>{#if kbd}<span class="k" class:off={!isKeyTarget}>{kbd}</span>{/if}
+      <span class="bl">{label}</span>{#if kbd}<span class="k" class:off={!capShows(kbd)}>{kbd}</span>{/if}
     {/snippet}
     {#if subject.kind === 'question'}
       <footer data-answers>
@@ -688,7 +745,7 @@
       {#if rulePrefix || ruleExact}
         <!-- The choices open under the buttons, in the card: they lie on nothing you read or press. -->
         <details class="always" bind:open={rulesOpen} use:escCloses>
-          <summary data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in Settings → Safety.">Always allow in this repo…</summary>
+          <summary data-tip="Codly approves this request and stops asking about it, for every agent in this repo. Remove the rule in {safetyPlace('approval-rules')}.">Always allow in this repo…</summary>
           <div class="layer">
             <p class="a-l">Always allow in this repo, for every agent:</p>
             {#if rulePrefix}<button class="btn sm" disabled={busy} onclick={() => saveRule('prefix')}>Commands that start with <code>{rulePrefix}</code></button>{/if}
@@ -728,6 +785,9 @@
   .bad { display: inline-flex; align-items: center; gap: 4px; color: var(--bad); white-space: nowrap; }
   .reason { display: flex; gap: 8px; align-items: flex-start; font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
   .reason :global(.pv) { margin-top: 1px; }
+  /* A plan card in a small window folds the reason to one line (`foldsReason`): "more" opens it. */
+  .reason .folded { min-width: 0; display: -webkit-box; -webkit-line-clamp: 1; line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+  .more { flex-shrink: 0; color: var(--ink-1); font-weight: var(--w-med); text-decoration: underline; text-underline-offset: 2px; }
   .risks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .risk { height: 22px; padding: 0 9px; border-radius: var(--r-full); font-size: var(--t-sm); line-height: 22px; color: var(--ink-2); background: var(--surface-2); }
   /* One row of buttons, whatever the width: a keycap goes under its label, and a long label takes a second line inside its button. */
@@ -753,7 +813,7 @@
   .diff { margin: 0; max-height: 220px; overflow: auto; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: 11.5px; line-height: 17px; font-family: var(--font-mono); color: var(--ink-2); }
   .net { font-size: var(--t-md); line-height: var(--lh-md); color: var(--ink-2); }
   .net code { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-1); word-break: break-all; }
-  /* The plan scrolls with the body, not in a box of its own: at 1024x640 it shows about eight lines, three steps or more. */
+  /* The plan scrolls with the body, not in a box of its own: at 1024x640 it shows about eight lines, and never fewer than three while the reason can fold (`foldsReason`). */
   .plan { padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-1); }
   .plan-edit { resize: vertical; min-height: 120px; max-height: 360px; padding: 10px 12px; border-radius: var(--r-md); background: var(--code-bg); font-family: var(--font-mono); font-size: 12.5px; line-height: 19px; color: var(--ink-1); }
   .plan-edit:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
@@ -781,6 +841,8 @@
   .s-approved :global(svg) { color: var(--ok); }
   .s-denied :global(svg) { color: var(--bad); }
   .r-l { color: var(--ink-2); white-space: nowrap; }
+  /* With a saved rule the verdict comes first and the rule after it is what the row cuts. */
+  .r-l.with-rule { flex: 0 1 auto; max-width: 60%; }
   .r-who { color: var(--ink-2); font-weight: var(--w-med); }
   .resolved code { flex: 1; font-size: 11.5px; color: var(--ink-3); }
   .r-for { color: var(--ink-2); }

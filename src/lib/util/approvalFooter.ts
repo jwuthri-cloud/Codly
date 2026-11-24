@@ -10,6 +10,7 @@ import type { ApprovalChoice } from '../gen/ApprovalChoice';
 import type { ApprovalMode } from '../gen/ApprovalMode';
 import type { ApprovalSubject } from '../gen/ApprovalSubject';
 import type { Provider } from '../gen/Provider';
+import { pageOf, SAFETY_PAGES, type SafetySection } from '../../overlays/settingsPages';
 import { PROVIDER_LABEL } from './labels';
 import { PERMISSION_SCOPE } from './permissionsAsked';
 
@@ -58,15 +59,21 @@ export function footerButtons(plan: boolean, offered: readonly ApprovalChoice[],
       ...(has('cancel') ? [answer('cancel')] : []),
     ];
   }
-  const edits: FooterButton[] = acceptEdits !== null ? [{ act: 'accept_edits', label: 'Approve and accept edits from now on', cls: '', hint: acceptEdits }] : [];
+  const edits: FooterButton[] = acceptEdits !== null ? [{ act: 'accept_edits', label: ACCEPT_EDITS_LABEL, cls: '', hint: `Approve this edit, and accept edits from now on. ${acceptEdits}` }] : [];
   const choices = ORDER.filter(has).flatMap((c) => [answer(c, (permissions && SCOPED[c]) || undefined), ...(c === 'allow_once' ? edits : [])]);
-  return [...choices, ...(has('deny') ? [{ act: 'note', label: noteLabel(asker), kbd: '⇧⌘⌫', cls: 'ghost' } satisfies FooterButton] : [])];
+  return [...choices, ...(has('deny') ? [noteButton(asker)] : [])];
 }
 
+/** The labels are short, so that the five buttons of a file edit fit one row: the whole sentence is in the tooltip. */
+const ACCEPT_EDITS_LABEL = 'Approve and accept edits';
+
 /** Claude Code takes a note with its "no". Every other CLI takes none: Codly sends your note to
- *  the agent as your next message, and the button and the field say so. */
+ *  the agent as your next message, and the button's tooltip and the field say so. */
 const otherCli = (asker: Asker | null): asker is Asker => !!asker && asker.provider !== 'claude';
-const noteLabel = (asker: Asker | null): string => (otherCli(asker) ? `Deny and tell ${asker.name} why…` : 'Deny with a note…');
+const noteButton = (asker: Asker | null): FooterButton =>
+  otherCli(asker)
+    ? { act: 'note', label: 'Deny and say why…', kbd: '⇧⌘⌫', cls: 'ghost', hint: `Deny, and tell ${asker.name} why: ${PROVIDER_LABEL[asker.provider]} takes no note with a deny, so Codly sends yours as your next message.` }
+    : { act: 'note', label: 'Deny with a note…', kbd: '⇧⌘⌫', cls: 'ghost' };
 
 /** The line under the note field of an agent whose CLI takes no note with a "no"; null for Claude Code and for an agent Codly does not know. */
 export function noteGoes(asker: Asker | null): string | null {
@@ -74,7 +81,7 @@ export function noteGoes(asker: Asker | null): string | null {
 }
 
 /**
- * Whether a request's card offers "Approve and accept edits from now on": a file change of a
+ * Whether a request's card offers "Approve and accept edits" (from now on): a file change of a
  * 1:1 Claude agent in "Ask for edits" that is on no task, and that can be approved once. Only
  * such an agent has a mode to switch (its mode waits while it is on a task). Never for a plan's
  * worker, a Lead, another CLI, or an agent already in another mode. `permission`: the
@@ -92,6 +99,13 @@ export function acceptsEdits(subject: ApprovalSubject, offered: readonly Approva
     !agent.task_id &&
     (agent.permission_mode ?? 'ask') === 'ask'
   );
+}
+
+/** Where Settings shows a section of its Safety tab, by the name of its page: "Settings → Safety → Approvals".
+ *  `safetyLink` of the same section opens it there. */
+export function safetyPlace(section: SafetySection): string {
+  const page = pageOf(section);
+  return `Settings → Safety → ${SAFETY_PAGES.find((p) => p.id === page)!.label}`;
 }
 
 /** The note that goes back with a plan must say something: without one the same plan comes back. */

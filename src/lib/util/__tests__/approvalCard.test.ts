@@ -7,12 +7,15 @@ import {
   answerMissing,
   answerTakesFocus,
   envelopeAsksText,
+  foldsReason,
   holdStep,
   keyAct,
   keyActOf,
+  keycapActs,
   keysView,
   NO_HOLD,
   openInConversation,
+  PLAN_LINES_MIN,
   probePoints,
   restsAfterAnswer,
   settled,
@@ -61,6 +64,17 @@ describe('the card that takes the approval keys (`keysView`)', () => {
     expect(keysView([free(parts[0]), under(parts[1], 0), free(parts[2])], sheet, 318)).toBe('covered');
     // A pill over the centre of the buttons: covered.
     expect(keysView([free(parts[0]), free(parts[1]), under(parts[2], 6)], sheet, 318)).toBe('covered');
+  });
+
+  it('"in view" means readable: not under the thread’s top fade, and not scrolled out of the card’s body', () => {
+    // The thread [162, 494] fades in over its top 28 px: its view starts at 190 (`viewOf` reads its padding).
+    // A command at [176, 219], under the fade: no keys.
+    expect(keysView([free(box(150, 174)), free(box(176, 219)), free(box(380, 418))], thread, 268)).toBe('out');
+    // A question whose legend is scrolled up out of the card's body: the body clips it, and a
+    // press at its points reaches the reason above the body, not the legend: no keys.
+    expect(keysView([free(box(200, 224)), under(box(236, 260), 0, 1, 2, 3, 4, 5, 6), free(box(420, 458))], thread, 258)).toBe('covered');
+    // Both fully in view: keys.
+    expect(keysView([free(box(200, 224)), free(box(290, 314)), free(box(420, 458))], thread, 258)).toBe('ok');
   });
 
   it('a part that could not be tested at any point is not seen', () => {
@@ -286,5 +300,62 @@ describe('what the sheet says of requests open in the conversation', () => {
     expect(openInConversation([false, false])).toBe('2 approvals are open in the conversation.');
     expect(openInConversation([true, true])).toBe('2 questions are open in the conversation.');
     expect(openInConversation([true, false])).toBe('2 requests are open in the conversation.');
+  });
+});
+
+describe('the keycaps a card shows, by where the focus is (`keycapActs`)', () => {
+  const caps = ['⌘↵', '⌥⌘↵', '⌘⌫', '⇧⌘⌫', '1'];
+  const shown = (focus: Parameters<typeof keycapActs>[1]) => caps.filter((k) => keycapActs(k, focus));
+
+  it('on the page every key acts', () => {
+    expect(shown('page')).toEqual(caps);
+  });
+
+  it('in the empty composer the approval keys act, a digit is a character', () => {
+    expect(shown('composer-empty')).toEqual(['⌘↵', '⌥⌘↵', '⌘⌫', '⇧⌘⌫']);
+  });
+
+  it('in a field with text ⌘⌫ deletes text: Deny and Skip show no keycap', () => {
+    // A draft in the composer: ⌘↵ sends the draft (Composer.svelte), only ⌥⌘↵ is left to the card.
+    expect(shown('composer-text')).toEqual(['⌥⌘↵']);
+    // Only spaces: the composer leaves ⌘↵ to the card, but ⌘⌫ still deletes a space.
+    expect(shown('composer-blank')).toEqual(['⌘↵', '⌥⌘↵']);
+    // Any other field (an Ask-me answer): the keys act there, the card shows none.
+    expect(shown('field')).toEqual([]);
+  });
+
+  it('in the card’s own answer field only ⌘↵ acts: the field sends (the review’s nit 4: Skip showed ⌘⌫)', () => {
+    expect(shown('own-field')).toEqual(['⌘↵']);
+  });
+
+  it('a key the card never shows is an error, not a hidden keycap', () => {
+    expect(() => keycapActs('⌘K', 'page')).toThrow();
+  });
+});
+
+describe('a plan card in a small window (`foldsReason`)', () => {
+  // 1024x640: the thread is 332 px, the card may take 332 - 28 (top fade) - 20 (bottom) - 8 = 276 px.
+  // Measured parts (the card's style notes): padding 28, title 24, buttons with keycaps 53, gaps 8.
+  // The plan: lines of 17 px (--lh-sm) in a box with 20 px of padding.
+  const plan = { room: 276, reasonLine: 20, planLine: 17, planPad: 20 };
+
+  it('with no reason the plan keeps about eight lines: nothing to fold', () => {
+    // Title, body and buttons: two gaps.
+    const fixed = 28 + 24 + 53 + 16;
+    expect((plan.room - fixed - plan.planPad) / plan.planLine).toBeGreaterThan(7);
+    expect(foldsReason({ ...plan, fixed, reason: 0 })).toBe(false);
+  });
+
+  it('a three-line reason and the risks (92 px) would leave the plan two lines: the reason folds, and the plan gets four', () => {
+    const fixed = 28 + 24 + 92 + 53 + 24;
+    expect(Math.floor((plan.room - fixed - plan.planPad) / plan.planLine)).toBe(2);
+    expect(foldsReason({ ...plan, fixed, reason: 60 })).toBe(true);
+    // Folded to one line, the reason gives back 40 px.
+    expect(Math.floor((plan.room - (fixed - 40) - plan.planPad) / plan.planLine)).toBeGreaterThanOrEqual(PLAN_LINES_MIN);
+  });
+
+  it('a reason of one line has nothing to give, and a big window has room for all', () => {
+    expect(foldsReason({ ...plan, fixed: 28 + 24 + 20 + 53 + 24, reason: 20 })).toBe(false);
+    expect(foldsReason({ ...plan, room: 584, fixed: 28 + 24 + 92 + 53 + 24, reason: 60 })).toBe(false);
   });
 });
