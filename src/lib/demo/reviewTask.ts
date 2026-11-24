@@ -66,10 +66,11 @@ export function sendBackPlanDemo(sim: Sim, planId: string, comments: string, fil
     status_reason: who ? `Ready: ${who.name} takes it when free` : 'Ready: a free agent picks it up', summary: null, created_at: now, updated_at: now,
   });
   sim.decision('review', 'human', `you sent the plan back with review comments: task ${task.key}${who ? ` for ${who.name}` : ''}`, { plan_id: planId, files, assignee: task.assignee }, { task: task.id });
-  sim.chat(plan.thread, 'user', text);
-  sim.chat(plan.thread, 'codly', who
+  // In Codly's line, as the core writes it: not a message of yours in the request.
+  const said = who
     ? `Your review comments are task ${task.key} of this plan, for ${who.name} (who wrote ${wrote!.key}): it works in the plan’s worktree, in a new conversation. Then the plan’s checks run again and you can merge it.`
-    : `Your review comments are task ${task.key} of this plan: the next free agent takes it and works in the plan’s worktree. Then the plan’s checks run again and you can merge it.`);
+    : `Your review comments are task ${task.key} of this plan: the next free agent takes it and works in the plan’s worktree. Then the plan’s checks run again and you can merge it.`;
+  sim.chat(plan.thread, 'codly', `${said}\n\nWhat you sent:\n\n${text}`);
   sim.patchPlan(planId, { status: 'running' });
   void work(sim, planId, task.id, files);
   return task;

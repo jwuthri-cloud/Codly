@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { Agent } from '../gen/Agent';
 import type { Task } from '../gen/Task';
 import { reviewKey } from '../state/review.svelte';
-import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, diffGroup, fileAnchor, fileOwners, splitByTask, splitOwners, splitWords, type ReviewComment } from '../util/review';
+import { agentBarWords, agentDiffHead, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, diffGroup, fileAnchor, fileOwners, splitByTask, splitOwners, splitWords, type ReviewComment } from '../util/review';
 
 const agent = (o: Partial<Agent>) => ({ id: 's1', name: 'Eli', role: 'solo', worktree: '/wt/eli', archived: false, ...o }) as Agent;
 const task = (o: Partial<Task>) => ({ id: 't1', key: 't1', status: 'running', assignee: 'w1', plan_id: 'p1', ...o }) as Task;
@@ -106,11 +106,20 @@ describe('Send back on a plan that still runs', () => {
       { n: 1, who: 'Bo', key: 't2' },
     ];
     // On a plan that still runs, the rest wait for it to finish.
-    expect(splitWords(parts, 1, true, 'wait')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 1 stays here until the plan is done');
-    expect(splitWords(parts, 2, false, 'wait')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 2 wait until the plan is done');
+    expect(splitWords(parts, 1, true, 'wait')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 1 stays here: send it back when the plan is done');
+    expect(splitWords(parts, 2, false, 'wait')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 2 stay here until the plan is done');
     expect(splitWords([{ n: 1, who: 'Bo', key: 't2' }], 0, true, 'wait')).toBe('1 comment to Bo (t2)');
     // Elsewhere: they go where the finished work goes.
     expect(splitWords(parts, 1, true, 'request')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 1 is in a new request');
     expect(splitWords(parts, 2, false, 'plan')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 2 go to one more task of this plan');
+  });
+});
+
+describe('the Changes room on a 1:1 agent’s diff', () => {
+  it('is named after the agent, and says what its diff is', () => {
+    const eli = { id: 's1', name: 'Eli', worktree: '/wt/eli' } as Agent;
+    expect(agentDiffHead(eli, '/repo')).toEqual({ title: 'Eli', sub: 'What Eli changed in its own worktree' });
+    // It works in your project folder itself: its diff is every uncommitted change there.
+    expect(agentDiffHead({ ...eli, worktree: '/repo' }, '/repo')).toEqual({ title: 'Eli', sub: 'Every uncommitted change in your project folder, your own edits included' });
   });
 });

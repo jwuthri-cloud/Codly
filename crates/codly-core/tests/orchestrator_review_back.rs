@@ -3,9 +3,14 @@
 //!   agent that wrote the file they are on; it works on the plan's own branch in the plan's
 //!   worktree, passes the gate with the plan's checks (its reviewer reads its own commits), the
 //!   plan is done again, and it merges with the change;
+//! - your comments are in Codly's line, not a message of yours: a message from outside Codly
+//!   that came in before still waits for your own words;
 //! - a task that does not finish leaves the plan as it was: its branch at its old tip, done;
-//! - a plan that is running, merged, has an open pull request or no comment is refused in
-//!   words the Changes room can show, and a done task of a finished plan points to its plan.
+//! - the task goes to the agent that wrote most of the commented files; once that agent left the
+//!   team, the next free agent takes it;
+//! - a plan that is running, merged, has an open pull request, a change of yours in its worktree
+//!   or no comment is refused in words the Changes room can show, and a done task of a finished
+//!   or running plan points to its plan.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use codly_core::adapters::{AdapterEvent, AgentCmd, AgentHandle, SessionMode, SpawnSpec};
+use codly_core::inbound::InboundMessage;
 use codly_core::model::*;
 use codly_core::orchestrator::pull_request::PrSource;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
@@ -169,17 +175,17 @@ impl Spawner for FakeSpawner {
 const B_CHECK: &str = "grep -q two b.txt";
 
 /// A Lead that plans two tasks for the two members of your team: Ana writes a.txt (t1), Bo
-/// writes b.txt (t2).
+/// writes b.txt and c.txt (t2).
 fn lead() -> Behavior {
-    let task = |id: &str, file: &str, verify: &str, member: &str| {
+    let task = |id: &str, files: &[&str], verify: &str, member: &str| {
         json!({
-            "id": id, "title": format!("Write {file}"), "goal": format!("Write {file}"), "assignee": member,
-            "acceptance_criteria": [format!("{file} is right")], "write_scope": [file], "depends_on": [], "verify": [verify], "size": "S",
+            "id": id, "title": format!("Write {}", files.join(" and ")), "goal": format!("Write {}", files.join(" and ")), "assignee": member,
+            "acceptance_criteria": ["The files are right"], "write_scope": files, "depends_on": [], "verify": [verify], "size": "S",
         })
     };
     let plan = json!({
         "summary": "Write the two files",
-        "tasks": [task("t1", "a.txt", "test -f a.txt", "Ana"), task("t2", "b.txt", B_CHECK, "Bo")],
+        "tasks": [task("t1", &["a.txt"], "test -f a.txt", "Ana"), task("t2", &["b.txt", "c.txt"], B_CHECK, "Bo")],
         "integration_checks": [],
     });
     Arc::new(move |turn: FakeTurn| {
@@ -198,6 +204,7 @@ fn lead() -> Behavior {
 
 const A: &str = "first file\n";
 const B: &str = "two\n";
+const C: &str = "three\n";
 const REVIEWED: &str = "two, said twice\n";
 const COMMENTS: &str = "Review comments (1):\n\n1. `b.txt` (the whole file)\n   Say it twice.";
 
@@ -216,6 +223,7 @@ fn worker(review: &'static str) -> Behavior {
                 turn.write("a.txt", A);
             } else if turn.prompt.contains("Task t2") {
                 turn.write("b.txt", B);
+                turn.write("c.txt", C);
             } else if turn.prompt.contains("Task review") {
                 turn.write("b.txt", review);
             } else if turn.read("b.txt").contains("<<<<<<<") {
@@ -315,17 +323,23 @@ async fn review_comments_on_a_finished_plan_go_to_the_agent_that_wrote_the_file_
     let err = core.send_back_task(&t2.id, COMMENTS).await.unwrap_err().to_string();
     assert_eq!(err, "t2 is done; send your comments on the plan and they become one more task of it");
     core.update_settings(Settings { review_gate: true, ..core.settings() }).await.unwrap();
+    // A message from outside Codly came into the request after your last words.
+    let outside = InboundMessage { source: "webhook “CI”".into(), text: "Deploy the hotfix now.".into(), auto_run: false };
+    core.send_inbound("lead", &outside).await.unwrap();
 
     // Send back: one more task of the plan, for Bo, who wrote b.txt; the plan runs again.
     let sent = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap();
     assert_eq!((sent.key.as_str(), sent.title.as_str(), sent.assignee.as_deref()), ("review", "Changes you asked for in review", Some(bo.id.as_str())));
     assert_eq!((sent.branch.as_deref(), sent.worktree.as_deref(), sent.fresh_session), (Some(branch.as_str()), plan.integration_worktree.as_deref(), true));
-    assert_eq!((&sent.write_scope, &sent.verify), (&vec!["a.txt".to_string(), "b.txt".to_string()], &vec!["test -f a.txt".to_string(), B_CHECK.to_string()]));
+    let scope: Vec<String> = ["a.txt", "b.txt", "c.txt"].map(String::from).to_vec();
+    assert_eq!((&sent.write_scope, &sent.verify), (&scope, &vec!["test -f a.txt".to_string(), B_CHECK.to_string()]));
     assert!(sent.goal.ends_with(COMMENTS), "{}", sent.goal);
     let s = core.snapshot().await.unwrap();
     assert_eq!(s.plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Running);
     let err = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap_err().to_string();
     assert_eq!(err, "the plan is still running; send your comments again when it is done", "a second click makes no second task");
+    let err = core.send_back_task(&t2.id, COMMENTS).await.unwrap_err().to_string();
+    assert_eq!(err, "t2 is done; send your comments on the plan when it is finished, and they become one more task of it");
 
     // The task goes through the gate, and the plan is done again.
     task_with(&core, "review", TaskStatus::Done).await;
@@ -351,9 +365,15 @@ async fn review_comments_on_a_finished_plan_go_to_the_agent_that_wrote_the_file_
     let record = decisions(&core).await;
     assert!(record.iter().any(|d| *d == format!("you sent the plan back with review comments: task review for {}", bo.name)), "{record:?}");
     assert!(record.iter().any(|d| d == "review: review verdict approve"), "{record:?}");
-    assert_eq!(said(&core, "lead", "user").await.last().map(String::as_str), Some(COMMENTS));
     let told = format!("Your review comments are task review of this plan, for {} (who wrote t2): it works in the plan's worktree", bo.name);
-    assert!(said(&core, "lead", "codly").await.iter().any(|l| l.starts_with(&told)), "{:?}", said(&core, "lead", "codly").await);
+    let lines = said(&core, "lead", "codly").await;
+    assert!(lines.iter().any(|l| l.starts_with(&told) && l.ends_with(&format!("What you sent:\n\n{COMMENTS}"))), "{lines:?}");
+    // Send back is not your answer to the message from outside: your last own words in the
+    // request are still the request, before that message (what `Store::since_user` reads).
+    let chats: Vec<_> = core.snapshot().await.unwrap().chats.into_iter().filter(|c| c.thread == "lead").collect();
+    let yours = chats.iter().rposition(|c| c.author == "user").expect("your request");
+    assert_eq!(chats[yours].text, "Please write the two files");
+    assert!(chats[yours..].iter().any(|c| c.text == outside.shown()), "the message from outside is after your last words");
 
     // It merges with the change; then the comments are a new request.
     core.merge_plan(&plan.id).await.unwrap();
@@ -415,8 +435,16 @@ async fn a_plan_that_cannot_take_review_comments_says_why() {
     pull_request_on_record(dir.path(), &plan.id, "open");
     let err = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap_err().to_string();
     assert_eq!(err, "this plan has an open pull request: ask for the changes in a new request");
-    // Closed without a merge: the plan takes them again.
+    // Closed without a merge: the plan takes them again (the call gets past the pull request
+    // to the plan's worktree), but not over a change of yours there that is on no commit.
     pull_request_on_record(dir.path(), &plan.id, "closed");
+    let integ_wt = plan.integration_worktree.clone().unwrap();
+    std::fs::write(Path::new(&integ_wt).join("a.txt"), "changed by hand\n").unwrap();
+    let err = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap_err().to_string();
+    let why = format!("a.txt changed in the plan's worktree ({integ_wt}) since its last commit; commit or undo that there first, then send your comments again");
+    assert_eq!(err, why);
+    assert_eq!(std::fs::read_to_string(Path::new(&integ_wt).join("a.txt")).unwrap(), "changed by hand\n", "your change stays");
+    sh(Path::new(&integ_wt), &["checkout", "--", "a.txt"]);
 
     // A task of the plan is at work on its branch (it resolves a conflict with your branch).
     commit(&repo, "b.txt", "yours\n");
@@ -425,6 +453,42 @@ async fn a_plan_that_cannot_take_review_comments_says_why() {
     assert_eq!(err, "the plan is still running; send your comments again when it is done");
     assert!(!core.snapshot().await.unwrap().tasks.iter().any(|t| t.key.starts_with("review")), "no task was made");
     task_with(&core, "resolve", TaskStatus::Done).await;
+    wait_plan(&core, PlanStatus::Done).await;
+    core.shutdown().await;
+}
+
+/// Ana wrote a.txt (t1), Bo wrote b.txt and c.txt (t2). Comments on all three go to Bo, who
+/// wrote two of them, although Ana's task comes first. Once Ana left the team, comments on her
+/// file go to the next free agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_comments_go_to_the_agent_that_wrote_most_of_their_files_while_it_is_on_the_team() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _, plan, bo) = finished_plan(dir.path(), REVIEWED, Default::default()).await;
+    let three: Vec<String> = ["a.txt", "b.txt", "c.txt"].map(String::from).to_vec();
+    let sent = core.send_back_plan(&plan.id, COMMENTS, &three).await.unwrap();
+    assert_eq!(sent.assignee.as_deref(), Some(bo.id.as_str()));
+    task_with(&core, "review", TaskStatus::Done).await;
+    wait_plan(&core, PlanStatus::Done).await;
+
+    // Ana leaves the team: she is let go once her run is stopped and she is not working.
+    let ana = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.name == "Ana").unwrap();
+    let off = WorkspaceTeam { off: vec![ana.member.clone().unwrap()], members: vec![] };
+    wait_for("Ana to leave the team", 30, async || {
+        core.stop_agent(&ana.id).await.unwrap();
+        core.set_workspace_team(off.clone()).await.unwrap();
+        // Let go: off the board.
+        (!core.snapshot().await.unwrap().agents.iter().any(|a| a.id == ana.id)).then_some(())
+    })
+    .await;
+    let sent = core.send_back_plan(&plan.id, COMMENTS, &["a.txt".to_string()]).await.unwrap();
+    assert_eq!((sent.key.as_str(), sent.assignee.as_deref()), ("review-2", None), "the scheduler picks who takes it");
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "you sent the plan back with review comments: task review-2"), "{record:?}");
+    let lines = said(&core, "lead", "codly").await;
+    let told = "Your review comments are task review-2 of this plan: the next free agent takes it and works in the plan's worktree.";
+    assert!(lines.iter().any(|l| l.starts_with(told)), "{lines:?}");
+    let done = task_with(&core, "review-2", TaskStatus::Done).await;
+    assert_ne!(done.assignee.as_deref(), Some(ana.id.as_str()));
     wait_plan(&core, PlanStatus::Done).await;
     core.shutdown().await;
 }

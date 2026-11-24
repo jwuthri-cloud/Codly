@@ -50,10 +50,12 @@ describe('Send back on the demo’s finished plan', () => {
     expect(task.goal.endsWith(COMMENTS)).toBe(true);
     expect(sim.plans.get(plan.id)!.status).toBe('running');
     const said = sim.chats.filter((c) => c.thread === plan.thread);
-    expect(said.slice(-2).map((c) => c.author)).toEqual(['user', 'codly']);
-    expect(said[said.length - 2].text).toBe(COMMENTS);
+    // Your comments are in Codly's line: no message of yours is added to the request.
+    expect(said[said.length - 1].author).toBe('codly');
+    expect(said.filter((c) => c.author === 'user').every((c) => c.text !== COMMENTS)).toBe(true);
     const name = sim.agents.get(author.assignee!)!.name;
     expect(said[said.length - 1].text.startsWith(`Your review comments are task review of this plan, for ${name} (who wrote ${author.key})`)).toBe(true);
+    expect(said[said.length - 1].text.endsWith(`What you sent:\n\n${COMMENTS}`)).toBe(true);
     // A second press while it works makes no second task.
     expect(() => sendBackPlanDemo(sim, plan.id, COMMENTS, [file])).toThrow('the plan is still running; send your comments again when it is done');
 

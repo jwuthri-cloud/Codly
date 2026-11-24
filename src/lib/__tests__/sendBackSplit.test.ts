@@ -102,7 +102,7 @@ describe('Send back on the diff of a plan that still runs', () => {
     // The comment on Cy's finished work is not a new request on the plan's branch: it waits for the plan.
     expect(ui.draftRequests).toEqual([]);
     expect(paths(key)).toEqual(['c.md']);
-    expect(shown()).toEqual([['success', 'Comments sent back', '2 comments to Ada (t1), 1 to Bo (t2); 1 stays here until the plan is done']]);
+    expect(shown()).toEqual([['success', 'Comments sent back', '2 comments to Ada (t1), 1 to Bo (t2); 1 stays here: send it back when the plan is done']]);
   });
 
   it('a refused call keeps its comments on the diff, and the toast says why', async () => {
@@ -115,7 +115,7 @@ describe('Send back on the diff of a plan that still runs', () => {
     expect(paths(key).sort()).toEqual(['a.ts', 'a.ts', 'c.md']);
     expect(shown()).toEqual([
       ['error', 'Couldn’t send your comments back to t1', 't1 is merging — your comments stay on the diff.'],
-      ['success', 'Comments sent back', '1 comment to Bo (t2); 1 stays here until the plan is done'],
+      ['success', 'Comments sent back', '1 comment to Bo (t2); 1 stays here: send it back when the plan is done'],
     ]);
   });
 
@@ -158,7 +158,21 @@ describe('Send back on the diff of a plan that still runs', () => {
     expect(plan).not.toHaveBeenCalled();
     expect(ui.draftRequests).toEqual([]);
     expect(paths(key)).toHaveLength(4);
-    expect(shown()).toEqual([['info', 'Your comments stay here for now', 'The plan is still running. When it is done, Send back makes them one more task of it.']]);
+    expect(shown()).toEqual([['info', 'Your comments stay here for now', 'The plan is still running. When it is done, press Send back again and it makes them one more task of it.']]);
+  });
+
+  it('a plan that does not move on without you (its task left is blocked): the blocked task takes its comments, the rest open a new request as before', async () => {
+    setUp();
+    store.tasks = tasks.map((t) => ({ ...t, status: t.id === 't1' ? 'blocked' : 'done' }));
+    const core = vi.spyOn(api, 'sendBackTask').mockImplementation(async (id) => ({ ...store.tasks.find((t) => t.id === id)!, status: 'ready' }));
+    const plan = vi.spyOn(api, 'sendBackPlan');
+    expect(await sendBack(target, all)).toBe(true);
+    expect(core.mock.calls.map(([id]) => id)).toEqual(['t1']);
+    expect(plan).not.toHaveBeenCalled();
+    expect(ui.draftRequests).toHaveLength(1);
+    expect(ui.composerSeed?.text).toContain('Review comments (2):');
+    expect(ui.composerSeed?.text).not.toContain('a.ts');
+    expect(shown()).toEqual([['success', 'Comments sent back', '2 comments to Ada (t1); 2 are in a new request']]);
   });
 
   it('a comment on a done task’s diff of a running plan waits too', async () => {

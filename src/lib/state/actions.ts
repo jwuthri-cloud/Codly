@@ -421,7 +421,8 @@ export function waitingRequest(key: string): string | null {
  * The comments on finished work (a done task, the files no task at work takes) go where
  * `finishedWorkGoes` says: on a finished plan that is not in your branch they become one more task
  * of the plan, through the core (`sendToPlan`); while the plan runs they stay on the diff until it
- * is done; on merged work (or when the core says they belong there: the plan has a pull request)
+ * is done, and you press Send back again then (a plan that does not move on without you, its
+ * tasks left blocked or failed, sends them to a new request instead); on merged work (or when the core says they belong there: the plan has a pull request)
  * a new request opens with them ready to send: they stay on the diff until you send that message,
  * and Send back again goes to the same request (with the comments as they are now). A 1:1 agent's
  * diff sends them as one message of yours in its 1:1 chat. `paths`: the diff's files, in order.
@@ -444,7 +445,7 @@ export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: st
     return true;
   }
   let rest = list;
-  const goes = finishedWorkGoes(plan);
+  const goes = finishedWorkGoes(plan, store.tasks);
   const parts: SplitPart[] = [];
   if (!task && plan) {
     const split = splitByTask(list, planOwners(store.tasks.filter((t) => t.plan_id === plan.id)));
@@ -459,8 +460,12 @@ export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: st
     }
   }
   // The plan still runs: its finished work takes comments once the plan is done (`send_back_plan`).
+  // Nothing sends them by itself then: you press Send back again.
   if (goes === 'wait') {
-    if (!parts.length) toast({ kind: 'info', title: 'Your comments stay here for now', body: `The plan is still running. When it is done, Send back makes ${rest.length === 1 ? 'it' : 'them'} one more task of it.` });
+    if (!parts.length) {
+      const them = rest.length === 1 ? 'it' : 'them';
+      toast({ kind: 'info', title: 'Your comments stay here for now', body: `The plan is still running. When it is done, press Send back again and it makes ${them} one more task of it.` });
+    }
     return parts.length > 0;
   }
   if (goes === 'plan' && plan) {

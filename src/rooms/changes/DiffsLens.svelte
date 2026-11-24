@@ -8,7 +8,8 @@
   the editor, and Send back gives all your comments to the agent that did the work. On a
   finished plan that is not in your branch they become one more task of the plan, for the agent
   that wrote the files; while the plan runs, those on its finished work wait here until it is
-  done; on merged work they go to a new request, and stay here until you send its message
+  done and you press Send back again (nothing goes by itself; a plan that does not move on
+  without you sends them to a new request); on merged work they go to a new request, and stay here until you send its message
   (Discard takes them out of that request too). A comment on a file that left the diff since stays in the bar above Send back,
   where you can read and remove it.
   A task's diff has a second scope, "Last turn": only what the last turn in the task's worktree
@@ -33,12 +34,12 @@
   import { diffstats } from '../../lib/state/diffstats.svelte';
   import { planOwners, review, reviewKey, taskOwners } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
-  import { ui } from '../../lib/state/ui.svelte';
+  import { ui, type DiffTarget } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
   import { ago, plural } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { oneAtATime } from '../../lib/util/oneAtATime';
-  import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, commentKeys, diffGroup, discardWords, editorPlace, finishedWorkGoes, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, sendBackBarWords, splitByTask, splitWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
+  import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, commentKeys, diffGroup, discardWords, editorPlace, finishedWorkGoes, heavy, HEAVY_LABEL, IN_FOLDER_WORDS, inProjectFolder, inTurn, offDiff, parseDiffKeeping, sendBackBarWords, splitByTask, splitWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
@@ -65,6 +66,11 @@
     ui.diffTarget ??
       (first ? { kind: 'plan' as const, id: first.id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : solo[0] ? { kind: 'agent' as const, id: solo[0].id } : null),
   );
+  /** The diff on screen, for the room's title (ChangesRoom): the one you picked or the one shown first. */
+  let { shown = $bindable(null) }: { shown?: DiffTarget } = $props();
+  $effect(() => {
+    shown = target;
+  });
   // The chip you are in: a plan's id, 'loose' (tasks with no plan shown), 'merged' or the 1:1 agents.
   const group = $derived(diffGroup(target, (id) => store.taskMap.get(id)?.plan_id, settled, (pid) => plans.some((p) => p.id === pid)));
   const groupPlan = $derived(plans.find((p) => p.id === group) ?? null);
@@ -246,7 +252,7 @@
     const id = target?.kind === 'plan' ? target.id : targetTask?.plan_id;
     return (id && store.planMap.get(id)) || null;
   });
-  const goes = $derived(finishedWorkGoes(targetPlan));
+  const goes = $derived(finishedWorkGoes(targetPlan, store.tasks));
   /** On the diff of a plan that still runs: where Send back takes the comments of each task at work, and where the rest go (see `sendBack`). */
   const split = $derived.by(() => {
     if (target?.kind !== 'plan') return null;
@@ -261,7 +267,7 @@
   const onlyWait = $derived(!toWorker && !split && !targetAgent && goes === 'wait');
   const sendLabel = $derived(targetAgent ? `Send to ${targetAgent.name}` : 'Send back');
   /** An agent that works in your project folder itself: its diff is every uncommitted change there. */
-  const inFolder = $derived(!!targetAgent?.worktree && targetAgent.worktree === store.workspace?.repo_path);
+  const inFolder = $derived(inProjectFolder(targetAgent, store.workspace?.repo_path));
   let sending = $state(false);
   async function send() {
     if (!target || sending) return;
@@ -356,7 +362,7 @@
         </div>
       {:else if target.kind === 'agent'}
         <div class="lenses turn-pick" role="radiogroup" aria-label="Which changes of the agent">
-          <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip={inFolder ? 'Every uncommitted change in your project folder, your own edits included' : `Its commits, its edits and its new files, since its branch left ${into}`}>All changes</button>
+          <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip={inFolder ? IN_FOLDER_WORDS : `Its commits, its edits and its new files, since its branch left ${into}`}>All changes</button>
           <button role="radio" aria-checked={turnOnly} onclick={() => (turnOnly = true)} data-tip="Only what its last turn changed, committed or not">Last turn</button>
         </div>
       {/if}
@@ -436,7 +442,7 @@
               <button class="btn sm ghost" use:safeChoice={{ keep: () => (discarding = null), back: () => discardBtn }} onclick={() => (discarding = null)}>Keep</button>
             {:else}
               <button class="btn sm ghost" bind:this={discardBtn} onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
-              <button class="btn sm primary" disabled={sending || onlyWait} onclick={send} data-tip={split ?? (onlyWait ? 'The plan is still running: send them back when it is done' : undefined)}><Icon name="send" size={13} />{sendLabel}</button>
+              <button class="btn sm primary" disabled={sending || onlyWait} onclick={send} data-tip={split ?? (onlyWait ? 'The plan is still running: press Send back when it is done' : undefined)}><Icon name="send" size={13} />{sendLabel}</button>
             {/if}
             {/if}
           </div>

@@ -138,6 +138,8 @@ impl Inner {
         // Read again under the lock: of two clicks, only the first makes a task. A resolution
         // that did not finish, and that the plan's last pass could not take back, goes first.
         let plan = self.settle_resolution(&self.plan_to_send_back(plan_id)?).await?;
+        // A finished plan has no task open on its branch, unless Codly stopped between adding
+        // such a task and setting the plan running: a second one would work on the same branch.
         if let Some(open) = self.open_resolution(&plan)? {
             bail!("task {} works on this plan's branch now; send your comments again when it is done", open.key);
         }
@@ -203,9 +205,7 @@ impl Inner {
         };
         let detail = json!({ "plan_id": plan.id, "files": files, "assignee": task.assignee });
         self.decide_by(ws_id, Some(&task.id), "review", "human", summary, detail)?;
-        // What you asked is in the plan's thread, where you can read it again.
-        self.chat(ws_id, &plan.thread, "user", comments, None)?;
-        let text = match who {
+        let said = match who {
             Some((name, wrote)) => format!(
                 "Your review comments are task {} of this plan, for {name} (who wrote {wrote}): it works in the plan's worktree, \
                  in a new conversation. Then the plan's checks run again and you can merge it.",
@@ -217,7 +217,11 @@ impl Inner {
                 task.key
             ),
         };
-        self.chat(ws_id, &plan.thread, "codly", &text, None)?;
+        // What you asked is in the plan's thread, where you can read it again. In Codly's line,
+        // not as a message of yours: your last own words in a request are what lets its Lead go
+        // on after a message from outside Codly (`Store::since_user`), and these say nothing
+        // about such a message.
+        self.chat(ws_id, &plan.thread, "codly", &format!("{said}\n\nWhat you sent:\n\n{comments}"), None)?;
         // It builds on what it built on before: its diff is still the plan's work only.
         self.update_plan(&plan.id, |p| {
             p.status = PlanStatus::Running;

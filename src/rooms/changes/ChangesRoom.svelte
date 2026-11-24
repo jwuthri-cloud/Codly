@@ -2,7 +2,8 @@
 <script lang="ts">
   import { diffstats, statLine } from '../../lib/state/diffstats.svelte';
   import { store } from '../../lib/state/store.svelte';
-  import { ui } from '../../lib/state/ui.svelte';
+  import { ui, type DiffTarget } from '../../lib/state/ui.svelte';
+  import { agentDiffHead } from '../../lib/util/review';
   import Icon from '../../components/Icon.svelte';
   import RoomHead from '../RoomHead.svelte';
   import ArtifactGallery from './ArtifactGallery.svelte';
@@ -12,16 +13,18 @@
   const picked = $derived(ui.diffTarget && (ui.diffTarget.kind === 'plan' ? ui.diffTarget.id : store.taskMap.get(ui.diffTarget.id)?.plan_id));
   const plan = $derived(ui.diffTarget ? ((picked && store.planMap.get(picked)) || null) : (store.planOf(ui.request) ?? store.activePlan));
   const stat = $derived(plan ? (diffstats.plan[plan.id] ?? null) : null);
+  /** The diff DiffsLens shows: the one you picked, or the one it shows first when you picked none. */
+  let shown = $state<DiffTarget>(null);
   // A 1:1 agent's diff: the room is named after the agent.
-  const agent = $derived(ui.diffTarget?.kind === 'agent' ? (store.agentMap.get(ui.diffTarget.id) ?? null) : null);
-  const inFolder = $derived(!!agent?.worktree && agent.worktree === store.workspace?.repo_path);
+  const agent = $derived(shown?.kind === 'agent' ? (store.agentMap.get(shown.id) ?? null) : null);
+  const head = $derived(agent ? agentDiffHead(agent, store.workspace?.repo_path) : null);
 </script>
 
 <div class="changes">
-  <RoomHead eyebrow="Changes" title={ui.changesLens === 'artifacts' ? 'What the agents made' : (agent?.name ?? plan?.summary ?? 'What changed')}>
+  <RoomHead eyebrow="Changes" title={ui.changesLens === 'artifacts' ? 'What the agents made' : (head?.title ?? plan?.summary ?? 'What changed')}>
     {#snippet sub()}
       {#if ui.changesLens === 'diffs'}
-        <span class="num">{agent ? (inFolder ? 'Every uncommitted change in your project folder, your own edits included' : `What ${agent.name} changed in its own worktree`) : stat ? `${statLine(stat)} on the integration branch` : 'Diffs from each task’s worktree and the plan’s integration branch'}</span>
+        <span class="num">{head ? head.sub : stat ? `${statLine(stat)} on the integration branch` : 'Diffs from each task’s worktree and the plan’s integration branch'}</span>
       {:else}
         <span>{store.artifacts.length} {store.artifacts.length === 1 ? 'artifact' : 'artifacts'} · opened safely: scripts stay off unless you allow them</span>
       {/if}
@@ -33,7 +36,7 @@
       </div>
     {/snippet}
   </RoomHead>
-  {#if ui.changesLens === 'diffs'}<DiffsLens />{:else}<ArtifactGallery />{/if}
+  {#if ui.changesLens === 'diffs'}<DiffsLens bind:shown />{:else}<ArtifactGallery />{/if}
 </div>
 
 <style>

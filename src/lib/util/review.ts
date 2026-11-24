@@ -133,16 +133,26 @@ export function followUpRequest(task: Task | null, plan: Plan | null, list: Revi
  * of a plan's diff that no task at work takes):
  * - `plan`: the plan is finished and not in your branch: they become one more task of it, for
  *   the agent that wrote the files (`send_back_plan`);
- * - `wait`: the plan still runs: they stay on the diff until it is done, then go to the plan;
- * - `request`: no plan, or one that is merged, kept on its branch, failed or cancelled: a new
+ * - `wait`: the plan still runs and will finish by itself: they stay on the diff until it is
+ *   done, and you press Send back again then (nothing is sent by itself);
+ * - `request`: no plan, or one that is merged, kept on its branch, failed or cancelled, or one
+ *   that runs but does not move on without you (each task left is blocked or failed): a new
  *   request.
+ * `tasks`: the tasks of the board (those of `plan` are read).
  */
 export type FinishedGoes = 'plan' | 'wait' | 'request';
 
-export function finishedWorkGoes(plan: Plan | null): FinishedGoes {
+/** The task statuses of a plan that still moves on by itself. */
+const MOVING: readonly TaskStatus[] = ['pending', 'ready', 'running', 'verifying', 'reviewing', 'changes_requested', 'merging'];
+
+export function finishedWorkGoes(plan: Plan | null, tasks: readonly Task[]): FinishedGoes {
   if (!plan || plan.merged_sha || plan.kept) return 'request';
   if (plan.status === 'done') return 'plan';
-  return plan.status === 'running' || plan.status === 'integrating' ? 'wait' : 'request';
+  if (plan.status === 'integrating') return 'wait';
+  if (plan.status !== 'running') return 'request';
+  const own = tasks.filter((t) => t.plan_id === plan.id);
+  const stuck = !own.some((t) => MOVING.includes(t.status)) && own.some((t) => t.status === 'blocked' || t.status === 'failed');
+  return stuck ? 'request' : 'wait';
 }
 
 /**
@@ -155,7 +165,7 @@ export function finishedWorkGoes(plan: Plan | null): FinishedGoes {
 export function sendBackBarWords(total: number, worker: string | null, goes: FinishedGoes, inRequest: number | null): string {
   const them = total === 1 ? 'it' : 'them';
   if (worker || goes === 'request') return reviewBarWords(total, worker, inRequest);
-  if (goes === 'wait') return `This plan is still running: when it is done, Send back makes ${them} one more task of it, for the agent that wrote these files.`;
+  if (goes === 'wait') return `This plan is still running, and nothing is sent yet: when it is done, press Send back and it makes ${them} one more task of it, for the agent that wrote these files.`;
   if (inRequest != null) return reviewBarWords(total, null, inRequest);
   return `Send back makes ${them} one more task of this plan, for the agent that wrote these files.`;
 }
@@ -408,20 +418,34 @@ export type SplitPart = { n: number; who: string; key: string };
 /** Where the `rest` of a split Send back go (`finishedWorkGoes`), after the press and before it. */
 const REST_WORDS: Record<FinishedGoes, { sent: [string, string]; before: [string, string] }> = {
   request: { sent: ['is in a new request', 'are in a new request'], before: ['goes to a new request', 'go to a new request'] },
-  wait: { sent: ['stays here until the plan is done', 'stay here until the plan is done'], before: ['waits until the plan is done', 'wait until the plan is done'] },
+  wait: {
+    sent: ['stays here: send it back when the plan is done', 'stay here: send them back when the plan is done'],
+    before: ['stays here until the plan is done', 'stay here until the plan is done'],
+  },
   plan: { sent: ['is one more task of this plan', 'are one more task of this plan'], before: ['goes to one more task of this plan', 'go to one more task of this plan'] },
 };
 
 /**
- * Where a split Send back takes the comments: "2 comments to Ada (t1), 1 to Bo (t2); 1 stays here
- * until the plan is done". `sent`: false says it before the press ("…; 1 waits until the plan is
- * done"). `goes`: where the comments that no task at work takes go.
+ * Where a split Send back takes the comments: "2 comments to Ada (t1), 1 to Bo (t2); 1 stays
+ * here: send it back when the plan is done". `sent`: false says it before the press ("…; 1 stays
+ * here until the plan is done"). `goes`: where the comments that no task at work takes go.
  */
 export function splitWords(parts: readonly SplitPart[], rest: number, sent: boolean, goes: FinishedGoes): string {
   const to = parts.map((p, i) => `${p.n}${i ? '' : p.n === 1 ? ' comment' : ' comments'} to ${p.who} (${p.key})`).join(', ');
   if (!rest) return to;
   const words = REST_WORDS[goes][sent ? 'sent' : 'before'][rest === 1 ? 0 : 1];
   return to ? `${to}; ${rest} ${words}` : `${rest} ${words}`;
+}
+
+/** What an agent's diff is when it works in your project folder itself (`inProjectFolder`). */
+export const IN_FOLDER_WORDS = 'Every uncommitted change in your project folder, your own edits included';
+
+/** Does `agent` work in your project folder itself (`repoPath`), not in a worktree of its own? */
+export const inProjectFolder = (agent: Agent | null, repoPath: string | null | undefined): boolean => !!agent?.worktree && agent.worktree === repoPath;
+
+/** The Changes room's title and the line under it, on a 1:1 agent's diff. */
+export function agentDiffHead(agent: Agent, repoPath: string | null | undefined): { title: string; sub: string } {
+  return { title: agent.name, sub: inProjectFolder(agent, repoPath) ? IN_FOLDER_WORDS : `What ${agent.name} changed in its own worktree` };
 }
 
 /** What the review bar says after "N comments not sent." on a 1:1 agent's diff. */
