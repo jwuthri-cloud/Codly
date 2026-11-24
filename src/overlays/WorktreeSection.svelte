@@ -61,20 +61,22 @@
       {#if s.include.length}
         <p class="desc">.worktreeinclude adds: {#each s.include as line, i (i)}<code class="chip">{line}</code>{/each}</p>
       {/if}
-      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
+      <!-- The name and the first paragraph are the switch's label; "More about this" is not: a press there opens the text. -->
       <div class="row">
         <div class="r-text">
-          <span class="r-title">Run the repo’s setup script</span>
-          <span class="desc">
-            {#if s.problem}
-              Codly does not run this repo’s setup script: {s.problem}.
-            {:else if s.script === null}
-              This repo has no <code>.codly/setup.sh</code>. Add one to install packages or write local settings in each new worktree.
-            {:else}
-              Codly runs a copy of <code>.codly/setup.sh</code> from your checkout once in each new worktree, before the agent starts (10 minute limit).
-              It runs in the worktree’s top folder, with the program its first line names (<code>#!/usr/bin/env bash</code>) or <code>/bin/sh</code>.
-            {/if}
-          </span>
+          <label class="r-label" for="worktree-setup-switch">
+            <span class="r-title">Run the repo’s setup script</span>
+            <span class="desc">
+              {#if s.problem}
+                Codly does not run this repo’s setup script: {s.problem}.
+              {:else if s.script === null}
+                This repo has no <code>.codly/setup.sh</code>. Add one to install packages or write local settings in each new worktree.
+              {:else}
+                Codly runs a copy of <code>.codly/setup.sh</code> from your checkout once in each new worktree, before the agent starts (10 minute limit).
+                It runs in the worktree’s top folder, with the program its first line names (<code>#!/usr/bin/env bash</code>) or <code>/bin/sh</code>.
+              {/if}
+            </span>
+          </label>
           {#if !s.problem && s.script !== null}
             <MoreAbout id="worktree-setup-run">
               <span class="desc">
@@ -84,6 +86,7 @@
           {/if}
         </div>
         <input
+          id="worktree-setup-switch"
           type="checkbox"
           class="switch"
           checked={s.on}
@@ -131,6 +134,8 @@
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
+  /* The name and the first paragraph of the switch's row: a press there flips the switch. */
+  .r-label { display: flex; flex-direction: column; gap: 2px; }
   .chip { margin-left: 6px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--surface-1); }
   .changed { display: flex; flex-direction: column; gap: 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--bad); }
   .choices { display: flex; gap: 8px; }

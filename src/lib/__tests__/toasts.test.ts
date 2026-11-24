@@ -270,3 +270,22 @@ describe('Dismiss all, and the toast that Esc dismisses', () => {
     expect(toasts.waiting?.title).toBe('Push failed');
   });
 });
+
+describe('a toast whose action can no longer be done', () => {
+  afterEach(() => {
+    for (const t of [...toasts.list]) toasts.dismiss(t.id);
+  });
+
+  it('goes, and the others stay', () => {
+    let merged = false;
+    toasts.show({ kind: 'error', title: 'Not merged into main', action: { label: 'Merge anyway', run: () => {}, gone: () => merged } });
+    toasts.show({ kind: 'error', title: 'Push failed', action: { label: 'Retry', run: () => {} } });
+    toasts.show({ kind: 'info', title: 'Saved' });
+    toasts.dropGone();
+    expect(titles()).toEqual(['Not merged into main', 'Push failed', 'Saved']);
+
+    merged = true; // the plan was merged another way
+    toasts.dropGone();
+    expect(titles()).toEqual(['Push failed', 'Saved']);
+  });
+});

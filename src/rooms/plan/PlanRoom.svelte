@@ -10,6 +10,7 @@
   import { ui, type PlanLens } from '../../lib/state/ui.svelte';
   import { clock } from '../../lib/util/format';
   import { GLOSSARY, PLAN_STATUS_LABEL } from '../../lib/util/labels';
+  import { ON_HOLD, onHold } from '../../lib/util/planHold';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import WaitReason from '../../home/cards/WaitReason.svelte';
@@ -50,7 +51,7 @@
   }
 </script>
 
-<RoomHead eyebrow={plan ? `Plan · ${PLAN_STATUS_LABEL[plan.status]}` : 'Plan'} title={plan?.summary ?? 'No plan yet'}>
+<RoomHead eyebrow={plan ? `Plan · ${onHold(plan.status, tasks) ? ON_HOLD : PLAN_STATUS_LABEL[plan.status]}` : 'Plan'} title={plan?.summary ?? 'No plan yet'}>
   {#snippet sub()}
     {#if plan}
       <span class="num">{done} of {tasks.length} done</span>

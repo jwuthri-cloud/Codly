@@ -11,42 +11,62 @@ const overlap = (a: Box, b: Box): boolean => a.left < b.right && b.left < a.righ
 /** Less than this many px of overlap, on either axis, is not covering (see `covers`). */
 const MIN_COVER = 8;
 
+/** The air the stack keeps between a control and itself when it moves off it, in px. */
+export const AIR = 4;
+
 /**
- * Does the stack's `box` cover the control `c`? Only when they share at least `MIN_COVER` px on
- * both axes: a few pixels at an edge leave the control free to press. The controls come with the
- * gap kept around them (`grown`, 4 px), so the stack then lies less than 4 px over the control itself.
+ * Does the stack's `box` cover the control `c`? Only when their boxes share at least `MIN_COVER`
+ * px on both axes: a few pixels at an edge leave the control free to press. The boxes are the
+ * real ones; the air the stack keeps is a rule of its moves (`toastTop`), not of this one.
  */
 export const covers = (c: Box, box: Box): boolean =>
   Math.min(c.right, box.right) - Math.max(c.left, box.left) >= MIN_COVER && Math.min(c.bottom, box.bottom) - Math.max(c.top, box.top) >= MIN_COVER;
 
+/** The tops the stack tries, in order, the first one `top` and the last one where it stays (see `toastTop`). */
+function tries(stack: Box, controls: Box[], top: number, maxMoves: number, maxDistance: number): number[] {
+  const height = stack.bottom - stack.top;
+  const tried = [top];
+  for (let moves = 0; moves < maxMoves; moves++) {
+    const at = tried[tried.length - 1];
+    const box: Box = { left: stack.left, right: stack.right, top: at, bottom: at + height };
+    const inReach = (c: Box) => c.bottom + AIR <= top + maxDistance;
+    const under = controls.filter((c) => covers(c, box));
+    if (!under.some(inReach)) break;
+    // Under every control in reach that it covers or comes nearer to than its air.
+    const near = controls.filter((c) => inReach(c) && overlap(grown(c, AIR), box));
+    tried.push(Math.max(...near.map((c) => c.bottom + AIR)));
+  }
+  return tried;
+}
+
 /**
  * The top edge of the toast stack, in px from the window's top.
  *
- * It starts at `top` (right under the top bar). While a control lies under the stack's box, the
- * stack goes down and looks again: `maxMoves` times at most, and never further than
- * `maxDistance` px under `top`. A move goes to the bottom edge of the lowest control under the
- * box that is within that reach: a control that ends further down (a tall list of rows) does not
- * keep the stack on the row of buttons above it. With no control under it in reach it stays
- * where it is, and with no free place found it stays at the last place it tried.
+ * It starts at `top` (right under the top bar). While a control lies under the stack's box
+ * (`covers`), the stack goes down and looks again: `maxMoves` times at most, and never further
+ * than `maxDistance` px under `top`. A move goes `AIR` px under the lowest control in that reach
+ * that the box covers or comes nearer to than `AIR` px: a control that ends further down (a tall
+ * list of rows) does not keep the stack on the row of buttons above it, and the stack does not
+ * land 2 px from a control beside the one it moved off. With no control under it in reach it
+ * stays where it is, and with no free place found it stays at the last place it tried.
  *
  * `stack` gives the stack's left and right edge and its height (where its top is now does not
  * count). `controls` are the boxes of what a toast must not cover.
  */
 export function toastTop(stack: Box, controls: Box[], top: number, maxMoves: number, maxDistance: number): number {
-  const height = stack.bottom - stack.top;
-  let at = top;
-  for (let moves = 0; ; moves++) {
-    const box: Box = { left: stack.left, right: stack.right, top: at, bottom: at + height };
-    const under = controls.filter((c) => covers(c, box));
-    if (!under.length || moves === maxMoves) return at;
-    const reachable = under.map((c) => c.bottom).filter((bottom) => bottom <= top + maxDistance);
-    if (!reachable.length) return at;
-    at = Math.max(...reachable);
-  }
+  const tried = tries(stack, controls, top, maxMoves, maxDistance);
+  return tried[tried.length - 1];
 }
 
-/** A height the stack can have, and how far under `top` a stack of that height may go (`reachDown`), in px. */
-export type Shape = { height: number; reach: number };
+/** A box the stack must not cover. `card`: a card that waits for your answer (`WAITING_CARD`). */
+export type Control = Box & { card?: boolean };
+
+/**
+ * A height the stack can have, how far under `top` a stack of that height may go (`reachDown`),
+ * and how far it may go to get off a card that waits for your answer (to the window's bottom,
+ * less the room kept there), in px.
+ */
+export type Shape = { height: number; reach: number; cardReach: number };
 
 /**
  * Where the stack goes, and whether it folds.
@@ -60,20 +80,46 @@ export type Shape = { height: number; reach: number };
  * `stay`: the top the stack has now, when it may keep it (`lookFor` said 'keep': a toast went or
  * changed, nothing of the page's layout moved). The whole stack stays there while it is free there
  * and within its reach: the toasts that stay do not move. Null: it looks from the top bar down.
+ *
+ * Nothing of the stack, its line under it included, lies on a card that waits for your answer
+ * (`Control.card`): who asks, and what, is read before a button is pressed. With no free place,
+ * the stack (folded when it can fold) goes to the last place it tried that is off every waiting
+ * card, though it covers another control there; with none, under the cards, as far as the
+ * window lets it go (`Shape.cardReach`), when that place covers no control either (the composer
+ * under a tall card). Only a card that leaves no such room is covered. `controls` must hold what
+ * lies down to `cardReach` under the stack, not only what lies in its usual reach.
  */
-export function stackPlace(sides: { left: number; right: number }, whole: Shape, folded: Shape | null, controls: Box[], top: number, maxMoves: number, stay: number | null = null): { top: number; folded: boolean } {
-  const freeAt = (at: number, shape: Shape) => {
-    const box: Box = { ...sides, top: at, bottom: at + shape.height };
-    return !controls.some((c) => covers(c, box));
-  };
+export function stackPlace(sides: { left: number; right: number }, whole: Shape, folded: Shape | null, controls: Control[], top: number, maxMoves: number, stay: number | null = null): { top: number; folded: boolean } {
+  const boxAt = (at: number, shape: Shape): Box => ({ ...sides, top: at, bottom: at + shape.height });
+  const freeAt = (at: number, shape: Shape, of: Box[] = controls) => !of.some((c) => covers(c, boxAt(at, shape)));
   if (stay !== null && stay >= top && stay - top <= whole.reach && freeAt(stay, whole)) return { top: stay, folded: false };
-  const look = (shape: Shape) => {
-    const at = toastTop({ ...sides, top, bottom: top + shape.height }, controls, top, maxMoves, shape.reach);
-    return { at, free: freeAt(at, shape) };
-  };
+  const look = (shape: Shape) => tries(boxAt(top, shape), controls, top, maxMoves, shape.reach);
   const all = look(whole);
-  if (all.free || !folded) return { top: all.at, folded: false };
-  return { top: look(folded).at, folded: true };
+  const allAt = all[all.length - 1];
+  if (freeAt(allAt, whole)) return { top: allAt, folded: false };
+  const shape = folded ?? whole;
+  const tried = folded ? look(folded) : all;
+  const last = tried[tried.length - 1];
+  if (folded && freeAt(last, folded)) return { top: last, folded: true };
+  const cards = controls.filter((c) => c.card);
+  const offCards = tried.filter((at) => freeAt(at, shape, cards));
+  if (offCards.length) return { top: offCards[offCards.length - 1], folded: !!folded };
+  const below = underCards(boxAt(last, shape), cards, top, shape.cardReach);
+  return { top: below !== null && freeAt(below, shape) ? below : last, folded: !!folded };
+}
+
+/** The top under the waiting `cards` that `box` covers, `AIR` px under them, when it is no
+ *  further than `reach` px under `top`; null when the cards leave no room there. */
+function underCards(box: Box, cards: Box[], top: number, reach: number): number | null {
+  const height = box.bottom - box.top;
+  let at = box.top;
+  for (;;) {
+    const here: Box = { ...box, top: at, bottom: at + height };
+    const under = cards.filter((c) => covers(c, here));
+    if (!under.length) return at;
+    at = Math.max(...under.map((c) => c.bottom + AIR));
+    if (at - top > reach) return null;
+  }
 }
 
 /**
@@ -89,6 +135,45 @@ export const frontToast = <T extends { kind: string }>(newestFirst: T[]): T | un
  */
 export function reachDown(windowHeight: number, part: number, top: number, height: number, edge: number): number {
   return Math.max(0, Math.min(part * windowHeight, windowHeight - edge - top - height));
+}
+
+/**
+ * How the stack fits the window: the height of its list in px, and whether the list scrolls.
+ *
+ * `heights`: the stack's rows as they are drawn, the newest first (each toast, and the place a
+ * dismissed toast keeps: `stackRows`); `front`: the index of the one toast a folded stack shows.
+ * `foot`: the height of the line under the stack ("+2 more", "Dismiss all"), 0 with none; `gap`:
+ * the gap between two rows and over that line. A stack that is higher than the room from `top`
+ * to `bottom` (the window's bottom less the room kept there) ends at `bottom`, and its list scrolls.
+ */
+export function stackFit(fit: { heights: number[]; folded: boolean; front: number; foot: number; gap: number; top: number; bottom: number }): { height: number; scrolls: boolean } {
+  const shown = fit.folded ? [fit.heights[fit.front]] : fit.heights;
+  const rows = shown.reduce((sum, h) => sum + h, 0) + fit.gap * Math.max(0, shown.length - 1);
+  const height = rows + (fit.foot ? fit.gap + fit.foot : 0);
+  const room = Math.max(0, fit.bottom - fit.top);
+  return height > room ? { height: room, scrolls: true } : { height, scrolls: false };
+}
+
+/** The place a toast that was dismissed keeps while you work on the stack: its id and its height in px. */
+export type Gap = { id: number; height: number };
+
+/** A row of the stack, by the id of its toast: the toast, or the empty place of `gap` px that it
+ *  keeps after it was dismissed (`Gap`). */
+export type Row<T> = { id: number; toast: T } | { id: number; gap: number };
+
+/**
+ * What the stack shows, the newest first. `newestFirst`: its toasts; `gaps`: the toasts that were
+ * dismissed while the pointer was on the stack or the focus in it; `held`: that is still so.
+ * While it is held, each dismissed toast keeps an empty place of its own height where it was, so
+ * the toasts under it keep their place under your pointer. Once you leave the stack the places close.
+ */
+export function stackRows<T extends { id: number }>(newestFirst: T[], gaps: Gap[], held: boolean): Row<T>[] {
+  const rows: Row<T>[] = newestFirst.map((toast) => ({ id: toast.id, toast }));
+  if (!held) return rows;
+  const shown = new Set(newestFirst.map((t) => t.id));
+  for (const g of gaps) if (!shown.has(g.id)) rows.push({ id: g.id, gap: g.height });
+  // A newer toast has a higher id: it is nearer the top.
+  return rows.sort((a, b) => b.id - a.id);
 }
 
 /**
@@ -352,14 +437,15 @@ function contentBox(el: Element): Box | null {
  * The boxes of the page's controls that show inside `area` and that a toast must keep off
  * (see `counts`), and those of the cards that wait for your answer (`WAITING_CARD`). A box is the
  * part that shows: not what is scrolled out of its list or lies outside the window. A control
- * much wider than the stack counts by what it shows (see `countedBox`); a waiting card counts whole.
+ * much wider than the stack counts by what it shows (see `countedBox`); a waiting card counts
+ * whole, and is marked as one (`Control.card`).
  */
-export function controlBoxes(stack: HTMLElement, area: Box): Box[] {
+export function controlBoxes(stack: HTMLElement, area: Box): Control[] {
   const above = layers(stack);
   const own = stack.getBoundingClientRect();
   const sides = { left: own.left, right: own.right };
   const cards = new Set(document.querySelectorAll<HTMLElement>(WAITING_CARD));
-  const boxes: Box[] = [];
+  const boxes: Control[] = [];
   for (const el of [...document.querySelectorAll<HTMLElement>(CONTROLS), ...cards]) {
     const box = boxOf(el);
     if (!overlap(box, area)) continue;
@@ -375,8 +461,11 @@ export function controlBoxes(stack: HTMLElement, area: Box): Box[] {
       onTop: reached(el, part, stack, above),
     };
     if (!counts(seen)) continue;
-    const counted = cards.has(el) ? part : countedBox(part, sides, el.matches(FIELDS), () => contentBox(el));
-    if (counted && overlap(counted, area)) boxes.push(counted);
+    if (cards.has(el)) boxes.push({ ...part, card: true });
+    else {
+      const counted = countedBox(part, sides, el.matches(FIELDS), () => contentBox(el));
+      if (counted && overlap(counted, area)) boxes.push(counted);
+    }
   }
   return boxes;
 }

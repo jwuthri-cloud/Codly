@@ -4,7 +4,7 @@
   again when those files change. Two answers: trust the folder, or open it without the repo's
   own CLI configuration. A worktree whose files are not the ones of your folder is asked about
   here too, with its own files. Closing the question answers nothing: agents start without the
-  files, and Settings → Safety has the same choices. The list of what each CLI does without
+  files, and Settings → Safety → Trust has the same choices. The list of what each CLI does without
   trust also says what does not depend on the choice: a Codex agent's own MCP servers.
 -->
 <script lang="ts">
@@ -44,7 +44,7 @@
           <p class="eyebrow">Until you trust this folder</p>
           <ul>{#each withoutTrust(t, codexOwn) as line (line)}<li>{line}</li>{/each}</ul>
         </div>
-        <p class="desc">Your choice is for these files as they are now, and for agents started after it. If the files change, Codly asks again. You can change it in Settings → Safety.</p>
+        <p class="desc">Your choice is for these files as they are now, and for agents started after it. If the files change, Codly asks again. You can change it in Settings → Safety → Trust.</p>
         <div class="actions">
           <button class="btn" disabled={saving || !can.without} onclick={() => choose(null)}>Open without the repo’s own CLI configuration</button>
           <button class="btn primary" disabled={saving || !can.trust} onclick={() => choose(can.trust)}>Trust this folder</button>

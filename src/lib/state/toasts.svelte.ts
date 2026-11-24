@@ -5,7 +5,9 @@
 // count. Approvals are never toast-only: an approval toast is just a pointer into the Inbox.
 
 export type ToastKind = 'progress' | 'success' | 'info' | 'error' | 'attention';
-export type ToastAction = { label: string; run: () => void; kbd?: string };
+/** `gone`: the action can no longer be done (a merge it offers was made, what refused it is no
+ *  more): the toast goes (`dropGone`). It may read reactive state: the stack asks it again when that changes. */
+export type ToastAction = { label: string; run: () => void; kbd?: string; gone?: () => boolean };
 export type Toast = {
   id: number;
   kind: ToastKind;
@@ -82,6 +84,11 @@ class Toasts {
   /** "Dismiss all": every toast you can dismiss goes; a progress toast stays. */
   dismissAll() {
     for (const t of this.dismissible) this.dismiss(t.id);
+  }
+
+  /** Every toast whose action can no longer be done goes: it would offer what is not there any more. */
+  dropGone() {
+    for (const t of this.list) if (t.action?.gone?.()) this.dismiss(t.id);
   }
 
   /** The newest toast that shows and waits for you (Esc dismisses it): an error, or one with no
