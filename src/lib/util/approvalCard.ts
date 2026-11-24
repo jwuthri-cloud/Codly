@@ -80,6 +80,13 @@ export const settled = (h: Hold, now: number, from: number): boolean => h.since 
  * into view: it is out, covered or too big; the key never answers).
  */
 export type KeyAct = 'answer' | 'wait' | 'reveal';
+
+/**
+ * Whether a key press at `now` does nothing because a key sent an answer at `answeredAt` (null:
+ * none yet) less than `SETTLE_MS` ago: the answered card may still show until the core confirms,
+ * and the card that comes next has not been seen yet.
+ */
+export const restsAfterAnswer = (now: number, answeredAt: number | null): boolean => answeredAt !== null && now - answeredAt < SETTLE_MS;
 export function keyAct(view: KeysView, isSettled: boolean): KeyAct {
   if (view !== 'ok') return 'reveal';
   return isSettled ? 'answer' : 'wait';

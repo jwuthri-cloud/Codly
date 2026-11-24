@@ -43,7 +43,7 @@
   import { yourAnswers, yourChoice } from '../../lib/state/answers';
   import { changedPlan, PERMISSION_MODES, setPermissionMode } from '../../lib/state/control.svelte';
   import { keyTargetApproval, registerCardView, registerQuestionKeys } from '../../lib/state/keys';
-  import { readCard, scrollerOf } from './cardParts';
+  import { readCard, scrollerOf, viewOf } from './cardParts';
   import { store } from '../../lib/state/store.svelte';
   import { ui } from '../../lib/state/ui.svelte';
   import { clock, timer } from '../../lib/util/format';
@@ -222,7 +222,7 @@
     };
   });
   let rulesOpen = $state(false);
-  /** Esc in the open choices (on their summary or a choice) closes them, and goes no further: the thread's turn is not stopped. */
+  /** Esc in the open choices (on their summary or a choice) closes them, and goes no further: the thread's turn is not stopped. Opened, they come into view. */
   function escCloses(node: HTMLDetailsElement) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || !rulesOpen) return;
@@ -231,8 +231,16 @@
       rulesOpen = false;
       node.querySelector('summary')?.focus();
     };
+    // Opened, the choices come into view: they lie under the buttons, at the card's foot.
+    const onToggle = () => node.open && node.querySelector('.layer')?.scrollIntoView({ block: 'nearest', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
     node.addEventListener('keydown', onKey);
-    return { destroy: () => node.removeEventListener('keydown', onKey) };
+    node.addEventListener('toggle', onToggle);
+    return {
+      destroy: () => {
+        node.removeEventListener('keydown', onKey);
+        node.removeEventListener('toggle', onToggle);
+      },
+    };
   }
   async function saveRule(kind: ApprovalRuleKind) {
     if (!pending || busy) return;
@@ -267,11 +275,12 @@
   });
 
   // ── the card fits the thread ──
-  // At most as tall as the part of the scroller that shows it, less its padding: brought to the
+  // At most as tall as the part of the scroller that shows it (`viewOf`): brought to the
   // bottom (the thread follows the newest line) or to the centre, it is whole. What must stay in
   // view (title, command, reason, risks, a typed answer, buttons) does not scroll: only the body
   // gives way. Should those alone be taller than the room, the card grows to hold them.
-  const BODY_MIN = 48;
+  /** The body's smallest height: one line (the folder a command runs in, the first line of a diff). */
+  const BODY_MIN = 24;
   let fit = $state<number | null>(null);
   let bodyEl: HTMLElement | undefined = $state();
   /** The body has more than it shows: the wheel scrolls it, and stops there. With nothing to
@@ -289,8 +298,9 @@
   const ANSWER_MIN = 56;
   let answerMax = $state<number | null>(null);
   function measureFit(card: HTMLElement, sc: HTMLElement) {
-    const cs = getComputedStyle(sc);
-    const room = sc.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 8;
+    // The same part as the keys see (`viewOf`): under the sheet's pinned bar is not room.
+    const view = viewOf(sc);
+    const room = view.bottom - view.top - 8;
     const body = bodyEl?.isConnected ? bodyEl : null;
     const fixed = card.scrollHeight - (body?.offsetHeight ?? 0) + Math.min(body?.scrollHeight ?? 0, BODY_MIN);
     const field = ownBelow || freeField ? answerEl : undefined;
@@ -692,7 +702,7 @@
 {/if}
 
 <style>
-  /* At 1024x640 the thread is 332 px high (268 px of room inside its padding). What stays of a command card: title 24 + command 43 (one line) + a two-line reason and the risks 68 + buttons 38 + "Always allow" 18, with paddings 28 and gaps 40, is 259 px; with the smallest body (48 px) the card is 307 px, inside the 332 px it is seen in. */
+  /* At 1024x640 the thread is 332 px high; the keys see 284 px of it (less its top 28 px, where it fades in, and its bottom 20 px). With the agent's sheet open it is 448 px wide, and what stays of a command card from its title to its buttons is: title 24 + command 43 (one line) + a three-line reason and the risks 92 + buttons with their keycaps 53, with gaps 32, 244 px; with the smallest body (one line, 24 px) 268 px, inside the 284 px. */
   .card { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 14px 18px; border-radius: var(--r-lg); background: linear-gradient(180deg, var(--amber-soft), transparent 70%), var(--surface-1); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 30%, transparent); scroll-margin: 80px; }
   /* Never taller than the thread (max-height from the script): the title, the command, the reason, the risks, a typed answer and the buttons stay; the body gives way and scrolls. */
   .card > * { flex-shrink: 0; }

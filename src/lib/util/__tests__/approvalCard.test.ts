@@ -14,6 +14,7 @@ import {
   NO_HOLD,
   openInConversation,
   probePoints,
+  restsAfterAnswer,
   settled,
   SETTLE_MS,
   type Box,
@@ -166,6 +167,13 @@ describe('the settle time before a key answers (`holdStep`, `settled`, `keyAct`)
     // Still from the frame at 320 ms: the key answers from 920 ms on.
     expect(press(run(NO_HOLD, 16, 915, scroll), 919, scroll(919), 0)).toBe('wait');
     expect(press(run(NO_HOLD, 16, 915, scroll), 920, scroll(920), 0)).toBe('answer');
+  });
+
+  it('a press less than 600 ms after a key answered does nothing: the answered card may still show (seen at 108 ms in the browser)', () => {
+    expect(restsAfterAnswer(1108, 1000)).toBe(true);
+    expect(restsAfterAnswer(1599, 1000)).toBe(true);
+    expect(restsAfterAnswer(1600, 1000)).toBe(false);
+    expect(restsAfterAnswer(5, null)).toBe(false);
   });
 
   it('a card that is out, covered or too big is only brought into view', () => {

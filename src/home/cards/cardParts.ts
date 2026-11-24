@@ -15,15 +15,17 @@ export function scrollerOf(node: HTMLElement): HTMLElement | null {
 const px = (v: string) => (v === 'auto' ? 0 : parseFloat(v));
 
 /**
- * The part of the scroller where a card is seen: its box, less its padding or its scroll padding
- * at the top and the bottom (the thread fades out over its padding, the sheet's pinned bar lies
- * over its scroll padding), and inside the window.
+ * The part of the scroller where a card is seen: its box, less at each end its scroll padding
+ * where it has one (the sheet's pinned bar lies over its top 48 px; the thread fades out over
+ * the last 10 px and keeps 20), else its padding (the thread fades in over its top 28 px), and
+ * inside the window.
  */
 export function viewOf(sc: HTMLElement): Box {
   const r = sc.getBoundingClientRect();
   const s = getComputedStyle(sc);
-  const top = Math.max(px(s.paddingTop), px(s.scrollPaddingTop));
-  const bottom = Math.max(px(s.paddingBottom), px(s.scrollPaddingBottom));
+  const inset = (scrollPadding: string, padding: string) => (scrollPadding === 'auto' ? px(padding) : px(scrollPadding));
+  const top = inset(s.scrollPaddingTop, s.paddingTop);
+  const bottom = inset(s.scrollPaddingBottom, s.paddingBottom);
   return { left: Math.max(r.left, 0), right: Math.min(r.right, window.innerWidth), top: Math.max(r.top + top, 0), bottom: Math.min(r.bottom - bottom, window.innerHeight) };
 }
 

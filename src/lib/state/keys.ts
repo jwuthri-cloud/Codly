@@ -8,7 +8,7 @@ import type { Approval } from '../gen/Approval';
 import { showsPlan } from '../util/planRequest';
 import { openWorkspace, resolveApprovals, runPlan, stopThreadByEsc } from './actions';
 import { twinsIn } from './approvalGroups';
-import { keyActOf, type KeyAct } from '../util/approvalCard';
+import { keyActOf, restsAfterAnswer, type KeyAct } from '../util/approvalCard';
 import { digitPick, isTextField } from '../util/questionKeys';
 import { denyKeyInField, escStep, openOne } from './esc';
 import { requests } from './requests.svelte';
@@ -75,8 +75,14 @@ export function registerCardView(approvalIds: string[], act: () => KeyAct): () =
 /** What a key does to the request now, over the cards that show it (`keyActOf`). */
 export const cardKeyAct = (approvalId: string): KeyAct => keyActOf((cardViews.get(approvalId) ?? []).map((act) => act()));
 
-/** True: the key must not answer the request. It brought its card into view, or the card settles (then it does nothing). */
+/** When a key last sent an answer: the next press does nothing for a moment (`restsAfterAnswer`). */
+let keyAnsweredAt: number | null = null;
+
+/** True: the key must not answer the request. A key answered one a moment ago (the store may not
+ *  know it yet, and the next card has not settled), it brought its card into view, or the card
+ *  settles (then it does nothing). */
 function keyGate(ap: Approval): boolean {
+  if (restsAfterAnswer(performance.now(), keyAnsweredAt)) return true;
   const act = cardKeyAct(ap.id);
   if (act === 'reveal') ui.revealApproval = ap.id;
   return act !== 'answer';
@@ -161,6 +167,7 @@ export function installKeys(): () => void {
         const q = questionKeysOf(ap.id);
         if (q && !e.altKey && !e.shiftKey) {
           e.preventDefault();
+          keyAnsweredAt = performance.now();
           q.send();
         }
         return;
@@ -168,6 +175,7 @@ export function installKeys(): () => void {
       if (e.altKey) {
         if (ap && ap.choices.includes('allow_session')) {
           e.preventDefault();
+          keyAnsweredAt = performance.now();
           resolveApprovals(keyTargetIds(ap), 'allow_session');
         }
         return;
@@ -175,6 +183,7 @@ export function installKeys(): () => void {
       if (e.shiftKey) return;
       if (ap && ap.choices.includes('allow_once')) {
         e.preventDefault();
+        keyAnsweredAt = performance.now();
         resolveApprovals(keyTargetIds(ap), 'allow_once');
         return;
       }
@@ -194,7 +203,10 @@ export function installKeys(): () => void {
       e.preventDefault();
       if (keyGate(ap)) return;
       if (denyKeyAction(ap, e.shiftKey) === 'note') ui.denyNoteFor = ap.id;
-      else resolveApprovals(keyTargetIds(ap), 'deny');
+      else {
+        keyAnsweredAt = performance.now();
+        resolveApprovals(keyTargetIds(ap), 'deny');
+      }
       return;
     }
 
