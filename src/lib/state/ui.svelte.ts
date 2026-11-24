@@ -113,7 +113,8 @@ class Ui {
   hover = $state<Hover>({ agentId: null, taskId: null, path: null });
 
   paletteOpen = $state(false);
-  paletteSeed = $state('');
+  /** The palette's first text. `plain`: searched as it is, a first `> @ # / +` picks no scope. */
+  paletteSeed = $state({ text: '', plain: false });
   settingsOpen = $state(false);
   /** The Settings tab to open on next (read once when the sheet opens). */
   settingsTab: string | null = null;
@@ -416,8 +417,8 @@ class Ui {
     this.findFocus++;
   }
 
-  openPalette(seed = '') {
-    this.paletteSeed = seed;
+  openPalette(seed = '', plain = false) {
+    this.paletteSeed = { text: seed, plain };
     this.paletteOpen = true;
   }
 

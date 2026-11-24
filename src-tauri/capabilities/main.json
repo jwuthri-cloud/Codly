@@ -97,6 +97,7 @@
     "allow-dictation-clear-key",
     "allow-dictation-transcribe",
     "allow-exact-search",
+    "allow-search-chats",
     "allow-message-graph",
     "allow-memory-file",
     "allow-save-memory-file",

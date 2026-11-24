@@ -1,16 +1,20 @@
 <!--
   ⌘K, everywhere. Scopes: > commands · @ agents · # tasks · / files · + new task · ? help.
-  ↵ runs the primary action, ⌘↵ the secondary. Esc pops the scope, then closes. Recents first;
-  "Ask the Lead…" is always the last row, so a query never dead-ends. A row that cannot be taken
-  back (merge, cancel a running plan, approve or deny) asks first: ↵ shows what it will do, ↵
-  again does it. "This agent" lists the controls of the agent of the conversation you are on, the
-  rows its `/` menu offers (one list: composerActions.ts); one that cannot run says why.
+  ↵ runs the primary action, ⌘↵ the secondary. Esc in a scope clears its text, else closes;
+  ⌫ in an empty scope pops it. Recents first; "Ask the Lead…" is always the last row, so a query
+  never dead-ends, and when nothing else matches ↵ on it asks once before it sends (a click
+  sends). A row that cannot be taken back (merge, cancel a running plan, approve or deny) asks
+  first: ↵ shows what it will do, ↵ again does it. "This agent" lists the controls of the agent
+  of the conversation you are on, the rows its `/` menu offers (one list: composerActions.ts);
+  one that cannot run says why. "Said in conversations" lists the messages of this repo that hold
+  the query; ↵ opens that conversation with the find bar on the query.
   ponytail: no Raycast-style ⌘K action panel yet — ⌘↵ runs the row's one secondary action.
 -->
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { api } from '../lib/api';
   import type { Approval } from '../lib/gen/Approval';
+  import type { ChatMessage } from '../lib/gen/ChatMessage';
   import type { Citation } from '../lib/gen/Citation';
   import type { Provider } from '../lib/gen/Provider';
   import type { SearchResult } from '../lib/gen/SearchResult';
@@ -20,7 +24,7 @@
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { narrate } from '../lib/state/narration';
-  import { ROOMS, isRequestThread, ui } from '../lib/state/ui.svelte';
+  import { ROOMS, isClosedThread, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { article } from '../lib/util/format';
   import { highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
@@ -38,7 +42,10 @@
   import { agentTurns } from '../home/agentTurns';
   import { agentDo, slashContext } from '../home/composerActions';
   import { MODES } from '../home/LeadControls.svelte';
-  import { agentGroup, bySection, noRow, offersAsk, okRow, press, rankRows, wants } from './palette';
+  import { findInConversation } from '../home/FindBar.svelte';
+  import {
+    ROOM_WORDS, SAID, SAID_FROM, SAID_MOST, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, offersAsk, okRow, press, rankRows, saidBy, saidOpens, saidWhere, seedOf, snippet, wants, type SaidNames,
+  } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
   type Row = {
@@ -57,6 +64,10 @@
     keep?: boolean;
     /** It cannot be taken back: what it will do, in full, shown before the second ↵ runs it. */
     confirm?: string;
+    /** Asked before the second ↵ only when ↵ took the row; a click runs it (see ./palette.ts `guard`). */
+    askFirst?: string;
+    /** Search words beside the title (`rankRows`). */
+    words?: string;
   };
 
   const SCOPES: Record<Exclude<Scope, null>, { label: string; placeholder: string; icon: string }> = {
@@ -79,11 +90,11 @@
   let armed = $state<string | null>(null);
 
   // Seed (⌘N → "+", ui.openPalette('>') …)
-  const seed = ui.paletteSeed;
-  if (seed && '>@#/+'.includes(seed[0])) {
-    scope = seed[0] as Scope;
-    query = seed.slice(1);
-  } else query = seed;
+  // A plain seed (the find bar's text) stays plain while it is in the field.
+  let plain = ui.paletteSeed.plain;
+  const seed = seedOf(ui.paletteSeed.text, plain);
+  scope = seed.scope as Scope;
+  query = seed.query;
 
   const RECENT_KEY = 'codly.palette.recents';
   let recents: string[] = [];
@@ -103,7 +114,7 @@
 
   function close() {
     ui.paletteOpen = false;
-    ui.paletteSeed = '';
+    ui.paletteSeed = { text: '', plain: false };
   }
   /** Go to the request's card and open its note field: the "no" is sent from there, with your note. */
   function openDenyNote(ap: Approval) {
@@ -128,7 +139,7 @@
 
   const commands = $derived.by((): Row[] => {
     const rows: Row[] = [...controls];
-    for (const r of ROOMS) rows.push({ id: `go:${r.id}`, section: 'Go to', title: `Go to ${r.label}`, sub: r.hint, icon: r.icon, kbd: `G ${r.key}`, run: () => ui.go(r.id) });
+    for (const r of ROOMS) rows.push({ id: `go:${r.id}`, section: 'Go to', title: `Go to ${r.label}`, sub: r.hint, words: ROOM_WORDS[r.id], icon: r.icon, kbd: `G ${r.key}`, run: () => ui.go(r.id) });
     rows.push(
       { id: 'go:artifacts', section: 'Go to', title: 'Go to Artifacts', sub: 'Everything the agents made', icon: 'image', run: () => ((ui.changesLens = 'artifacts'), ui.go('changes')) },
       { id: 'go:timeline', section: 'Go to', title: 'Go to Timeline', sub: 'Per-agent lanes', icon: 'timeline', run: () => ((ui.planLens = 'timeline'), ui.go('plan')) },
@@ -176,7 +187,7 @@
         else rows.push({ id: `ap:no:${ap.id}`, section: 'Needs you', title: no.title, icon: 'x', run: () => resolveApproval(ap.id, 'deny'), confirm: `Deny? ${full}` });
       }
     }
-    for (const c of store.clis)
+    for (const c of inCliOrder(store.clis))
       if (c.path && !c.problem)
         rows.push(
           { id: `quick:${c.provider}`, section: 'Agents', title: `Start an agent with ${PROVIDER_LABEL[c.provider as Provider]}`, sub: 'One step: its default look, name and model, then talk to it 1:1', icon: 'user-plus', run: () => void quickStart(c.provider as Provider) },
@@ -239,6 +250,61 @@
     return () => clearTimeout(t);
   });
 
+  // "Said in conversations": the messages that hold the query, read as the code search is, so
+  // the other groups never wait for it.
+  let said = $state<ChatMessage[]>([]);
+  let saidError = $state<string | null>(null);
+  /** The closed requests' titles, read once, when a message of a closed request is found. */
+  let closedTitles = $state<Map<string, string> | null>(null);
+  let saidSeq = 0;
+  $effect(() => {
+    const q = query.trim();
+    saidError = null;
+    // With no repository open there is nothing to search (⌘K works on the welcome screen too).
+    if (scope || q.length < SAID_FROM || !store.workspace) {
+      ++saidSeq;
+      said = [];
+      return;
+    }
+    const my = ++saidSeq;
+    const t = setTimeout(async () => {
+      try {
+        const hits = await api.searchChats(q);
+        if (hits.some((m) => isClosedThread(m.thread)) && !closedTitles) closedTitles = new Map((await api.closedRequests()).map((c) => [c.thread, c.title]));
+        if (my === saidSeq) said = hits;
+      } catch (e) {
+        if (my === saidSeq) {
+          said = [];
+          saidError = e instanceof Error ? e.message : String(e);
+        }
+      }
+    }, 120);
+    return () => clearTimeout(t);
+  });
+  const names: SaidNames = {
+    request: (thread) => store.chats.find((c) => c.thread === thread && c.author === 'user')?.text ?? store.planOf(thread)?.request ?? null,
+    closed: (thread) => closedTitles?.get(thread) || null,
+    agent: (id) => store.agentMap.get(id)?.name ?? null,
+  };
+  /** Open the conversation a message was said in, with the find bar on `q`. */
+  function openSaid(thread: string, q: string) {
+    ui.openThread(thread);
+    findInConversation(q);
+  }
+  // A message found for an earlier query shows only while it still holds what you typed.
+  const saidRows = $derived.by((): Scored[] => {
+    const q = query.trim();
+    return said
+      .map((m) => ({ m, s: snippet(m.text, q, SAID_WIDTH) }))
+      .filter((x) => x.s.hits.length)
+      .slice(0, SAID_MOST)
+      .map(({ m, s }) => ({
+        // Who first: a long place name is the part that may be cut.
+        id: `said:${m.id}`, section: SAID, title: s.line, hits: s.hits, sub: `${saidBy(m.author, names)} · ${saidWhere(m.thread, names)}`, icon: 'chat',
+        ...(saidOpens(m.thread, names) ? { hint: 'Open', run: () => openSaid(m.thread, q) } : {}),
+      }));
+  });
+
   function fileRow(c: Citation): Row {
     return {
       id: `file:${c.path}:${c.start_line}`, section: search ? `Files · ${search.confidence} confidence` : 'Files',
@@ -253,12 +319,13 @@
   const rows = $derived.by((): Scored[] => {
     const q = query.trim();
     // Ranked by score, then grouped: a section's header shows once, the best match stays first.
-    const rank = (list: Row[], limit = 50): Scored[] => {
+    const rank = (list: Row[], limit = 50, titleOnly = false): Scored[] => {
       if (!q) return bySection(list.slice(0, limit).map((r) => ({ ...r, hits: [] })));
-      return bySection(rankRows(list, q, recents, limit));
+      return bySection(rankRows(list, q, recents, limit, titleOnly));
     };
     if (scope === '>') return rank(commands);
-    if (scope === '@') return rank(agentRows);
+    // "@Ada" lists the agents named so, not the ones whose work mentions it.
+    if (scope === '@') return rank(agentRows, 50, true);
     if (scope === '#') return rank(taskRows);
     if (scope === '/') return (search?.citations ?? []).map((c) => ({ ...fileRow(c), hits: [] }));
     if (scope === '+')
@@ -288,11 +355,13 @@
 
   const withAsk = $derived.by((): Scored[] => {
     const q = query.trim();
-    if (!offersAsk(q, scope, isRequestThread(ui.thread))) return rows;
+    const found = [...rows, ...saidRows];
+    if (!offersAsk(q, scope, isRequestThread(ui.thread))) return found;
     return [
-      ...rows,
+      ...found,
       {
         id: 'ask', section: 'Ask', title: `Ask the Lead: “${oneLine(q, 70)}”`, sub: 'Sends it to the request you are on', icon: 'chat', hits: [], hint: 'Send',
+        askFirst: askFirst(found.length),
         run: () => {
           sendChat(ui.request, q);
           ui.openRequest(ui.request);
@@ -311,6 +380,10 @@
   $effect(() => {
     if (active >= withAsk.length) active = Math.max(0, withAsk.length - 1);
   });
+  // Messages found while "Ask the Lead…" waits for its second ↵ come in above it: the ↵ stays on it.
+  $effect(() => {
+    if (armed === 'ask') active = withAsk.findIndex((r) => r.id === 'ask');
+  });
 
   function setScope(s: Scope) {
     scope = s;
@@ -318,14 +391,16 @@
     tick().then(() => inputEl?.focus());
   }
 
-  /** `again`: a held ↵ repeating, or a later click of a double-click (see ./palette.ts). */
-  function exec(r: Row, alt: boolean, again: boolean) {
+  /** `again`: a held ↵ repeating, or a later click of a double-click; `byKey`: ↵ took the row,
+   *  not a click (see ./palette.ts). */
+  function exec(r: Row, alt: boolean, again: boolean, byKey: boolean) {
     const run = alt && r.alt ? r.alt.run : r.run;
     if (!run) return; // its line says why it cannot run now
-    const p = press(r, armed, again);
+    const p = press({ id: r.id, confirm: guard(r, byKey, alt) }, armed, again);
     armed = p.armed;
     if (!p.run) return;
-    remember(r.id);
+    // A message found is not a place you come back to by name: it stays out of the recents.
+    if (r.section !== SAID) remember(r.id);
     if (!r.keep) close();
     run();
   }
@@ -337,9 +412,11 @@
   }
 
   function onInput() {
-    if (!scope && query.length >= 1 && '>@#/+'.includes(query[0])) {
-      scope = query[0] as Scope;
-      query = query.slice(1).trimStart();
+    if (!query) plain = false;
+    const typed = seedOf(query, plain);
+    if (!scope && typed.scope) {
+      scope = typed.scope as Scope;
+      query = typed.query.trimStart();
     } else if (!scope && query === '?') {
       close();
       ui.shortcutsOpen = true;
@@ -359,7 +436,7 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      if (scope) setScope(null);
+      if (escStep(scope, query) === 'clear') query = '';
       else close();
     } else if (e.key === 'Backspace' && !query && scope) {
       e.preventDefault();
@@ -375,7 +452,7 @@
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const r = withAsk[active];
-      if (r) exec(r, e.metaKey || e.ctrlKey, e.repeat);
+      if (r) exec(r, e.metaKey || e.ctrlKey, e.repeat, true);
     } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
       e.stopPropagation();
@@ -422,6 +499,7 @@
     <div class="list" id="palette-list" role="listbox" bind:this={listEl}>
       <!-- Why the matches may not be the files on disk: the index is behind them. -->
       {#each search?.warnings ?? [] as w, wi (wi)}<p class="warn" role="status">{w}</p>{/each}
+      {#if saidError}<p class="quiet" role="status">Couldn’t search the conversations: {saidError}</p>{/if}
       {#if searchError}
         <p class="hint-empty">Search failed: {searchError}</p>
       {:else if scope === '/' && !search && query.trim().length < 2}
@@ -446,7 +524,7 @@
           aria-disabled={!r.run}
           data-active={i === active}
           onpointermove={() => move(i)}
-          onclick={(e) => exec(r, e.metaKey || e.ctrlKey, e.detail > 1)}
+          onclick={(e) => exec(r, e.metaKey || e.ctrlKey, e.detail > 1, false)}
         >
           <span class="lead">
             {#if r.agentId}<Portrait agent={store.agentMap.get(r.agentId)} size={20} />
@@ -463,8 +541,8 @@
             {:else if r.kbd}<Kbd keys={r.kbd} />{:else if i === active && r.hint}<span class="alt"><Kbd keys="↵" /> {r.hint}</span>{/if}
           </span>
         </button>
-        {#if armed === r.id && r.confirm}
-          <p class="confirm" role="alert">{r.confirm}<span class="how">Press ↵ again to confirm, Esc to go back.</span></p>
+        {#if armed === r.id && (r.confirm ?? r.askFirst)}
+          <p class="confirm" role="alert">{r.confirm ?? r.askFirst}<span class="how">Press ↵ again to {r.id === 'ask' ? 'send' : 'confirm'}, Esc to go back.</span></p>
         {/if}
       {/each}
     </div>
@@ -504,6 +582,7 @@
   .confirm { margin: 2px 12px 8px 44px; padding: 8px 12px; border-radius: var(--r-md); background: color-mix(in srgb, var(--amber) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 45%, transparent); font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-1); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
   .how { display: block; margin-top: 4px; color: var(--ink-3); }
   .warn { padding: 10px 16px 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--amber-ink); }
+  .quiet { padding: 10px 16px 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .hint-empty { padding: 20px 16px; font-size: var(--t-md); color: var(--ink-3); line-height: var(--lh-md); }
   .foot { display: flex; align-items: center; gap: 14px; height: 38px; padding: 0 16px; box-shadow: inset 0 1px 0 var(--line); font-size: var(--t-sm); color: var(--ink-3); flex-shrink: 0; overflow: hidden; white-space: nowrap; }
   .foot span { display: inline-flex; align-items: center; gap: 4px; }

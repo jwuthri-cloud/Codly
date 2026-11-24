@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { AgentDo, SlashContext } from '../../home/composerActions';
 import type { Agent } from '../../lib/gen/Agent';
 import { mkAgent } from '../../office/demo/script';
-import { agentGroup, bySection, noRow, okRow, press, wants } from '../palette';
+import {
+  ROOM_WORDS, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, okRow, press, rankRows, saidBy, saidOpens, saidWhere, seedOf, snippet, wants, type SaidNames,
+} from '../palette';
 
 describe('palette sections', () => {
   const row = (id: string, section: string) => ({ id, section });
@@ -155,5 +157,144 @@ describe('the group "This agent"', () => {
   it('with no agent there is no group', () => {
     expect(agentGroup(at({}), recorder().on)).toEqual([]);
     expect(agentGroup(at({ oneToOne: true }), recorder().on)).toEqual([]);
+  });
+});
+
+describe('the group "Said in conversations"', () => {
+  const names: SaidNames = {
+    request: (t) => (t === 'lead:a' ? 'Fix the login page so that people who forgot their password can still get in' : null),
+    closed: (t) => (t === 'closed:lead:b:900' ? 'Add a bye file' : null),
+    agent: (id) => (id === 'ada' ? 'Ada' : null),
+  };
+  /** The letters a snippet marks. */
+  const marked = (s: { line: string; hits: number[] }) => s.hits.map((i) => s.line[i]).join('');
+
+  it('says where it was said, for each kind of thread', () => {
+    expect(saidWhere('lead:a', names)).toBe('Request: Fix the login page so that people who…');
+    expect(saidWhere('agent:ada', names)).toBe('1:1 with Ada');
+    expect(saidWhere('agent:gone', names)).toBe('1:1 with an agent who left: not open to read');
+    expect(saidWhere('closed:lead:b:900', names)).toBe('Closed request: Add a bye file');
+    expect(saidWhere('closed:lead:c:500', names)).toBe('Closed request');
+    // A request with no message from you is its Lead's conversation.
+    expect(saidWhere('lead', names)).toBe('Lead');
+  });
+
+  it('opens a 1:1 chat only while its agent is in the office', () => {
+    expect(saidOpens('agent:ada', names)).toBe(true);
+    expect(saidOpens('agent:gone', names)).toBe(false);
+    expect([saidOpens('lead:a', names), saidOpens('closed:lead:c:500', names), saidOpens('lead', names)]).toEqual([true, true, true]);
+  });
+
+  it('keeps the line short enough to leave room for who and where', () => {
+    const s = snippet(`${'word '.repeat(30)}needle ${'word '.repeat(30)}`, 'needle', SAID_WIDTH);
+    expect(s.line.length).toBeLessThanOrEqual(SAID_WIDTH + 2);
+    expect(marked(s)).toBe('needle');
+  });
+
+  it('says who said it', () => {
+    expect([saidBy('user', names), saidBy('codly', names), saidBy('ada', names), saidBy('l9', names)]).toEqual(['You', 'Codly', 'Ada', 'An agent']);
+  });
+
+  it('a hit at the start of a long message: its first words, cut at a word border', () => {
+    const s = snippet(`Needle ${'word '.repeat(40)}`, 'needle');
+    expect(s.line.startsWith('Needle word')).toBe(true);
+    expect(s.line.endsWith('word…')).toBe(true);
+    expect(s.line.length).toBeLessThanOrEqual(73);
+    expect(marked(s)).toBe('Needle');
+  });
+
+  it('a hit in the middle: the words around it, cut on both sides', () => {
+    const s = snippet(`${'word '.repeat(30)}needle ${'word '.repeat(30)}`, 'NEEDLE');
+    expect(s.line).toMatch(/^…word .* needle .*word…$/);
+    expect(s.line.length).toBeLessThanOrEqual(74);
+    expect(marked(s)).toBe('needle');
+  });
+
+  it('a hit at the end: the words before it, nothing after', () => {
+    const s = snippet(`${'word '.repeat(40)}the needle`, 'needle');
+    expect(s.line).toMatch(/^…word .*the needle$/);
+    expect(marked(s)).toBe('needle');
+  });
+
+  it('a hit in a code block keeps its one line', () => {
+    const s = snippet('Here is the fix:\n```ts\n  const needle = 1;\nconst other = 2;\n```\nDone.', 'needle');
+    expect(s).toEqual({ line: 'const needle = 1;', hits: [6, 7, 8, 9, 10, 11] });
+  });
+
+  it('a message that does not hold the query marks nothing (the palette leaves it out)', () => {
+    expect(snippet('Something else', 'needle').hits).toEqual([]);
+  });
+});
+
+describe('palette search words and the quick start order', () => {
+  const row = (id: string, title: string, sub?: string, words?: string) => ({ id, title, sub, words });
+  const goTo = [
+    row('go:knowledge', 'Go to Knowledge', 'Team memory, knowledge graph, code search'),
+    row('go:changes', 'Go to Changes', 'Diffs and artifacts', ROOM_WORDS.changes),
+  ];
+
+  it('"merge" finds the Changes room by its words, under the merge of a finished plan', () => {
+    expect(rankRows(goTo, 'merge', [], 12).map((r) => r.id)).toEqual(['go:changes', 'go:knowledge']);
+    const withPlan = [...goTo, row('plan:merge:p1', 'Merge into main: dark mode')];
+    expect(rankRows(withPlan, 'merge', [], 12).map((r) => r.id)).toEqual(['plan:merge:p1', 'go:changes', 'go:knowledge']);
+    expect(rankRows(goTo, 'review', [], 12).map((r) => r.id)).toEqual(['go:changes']);
+    expect(rankRows(goTo, 'diff', [], 12)[0].id).toBe('go:changes');
+    // A word match marks no letters of the title.
+    expect(rankRows(goTo, 'review', [], 12)[0].hits).toEqual([]);
+  });
+
+  it('"@Ada" finds agents by their name only', () => {
+    const agents = [row('agent:l1', 'Mira', 'Claude Code · reading adapters.rs'), row('agent:a1', 'Ada', 'Codex · idle')];
+    expect(rankRows(agents, 'Ada', [], 50, true).map((r) => r.id)).toEqual(['agent:a1']);
+    expect(rankRows(agents, 'Zed', [], 50, true)).toEqual([]);
+  });
+
+  it('quick start lists the CLIs as the wizard does, Claude Code first', () => {
+    const clis = [{ provider: 'opencode' }, { provider: 'codex' }, { provider: 'gemini' }, { provider: 'claude' }];
+    expect(inCliOrder(clis).map((c) => c.provider)).toEqual(['claude', 'codex', 'gemini', 'opencode']);
+    expect(clis[0].provider).toBe('opencode'); // the store's list is not changed
+  });
+});
+
+describe('palette keys', () => {
+  it('Esc clears the text of a scope, and closes an empty scope or the palette', () => {
+    expect(escStep('@', 'Ada')).toBe('clear');
+    expect(escStep('>', 'merge')).toBe('clear');
+    expect(escStep('@', '')).toBe('close');
+    expect(escStep(null, 'fix the bug')).toBe('close');
+    expect(escStep(null, '')).toBe('close');
+  });
+
+  it('"Ask the Lead…" alone asks once when ↵ takes it; a click sends at once', () => {
+    const ask = { id: 'ask', askFirst: askFirst(0) };
+    expect(ask.askFirst).toBe('Send this to the Lead? It starts a turn of the Lead.');
+    const first = press({ id: ask.id, confirm: guard(ask, true, false) }, null, false);
+    expect(first).toEqual({ run: false, armed: 'ask' });
+    expect(press({ id: ask.id, confirm: guard(ask, true, false) }, first.armed, false)).toEqual({ run: true, armed: null });
+    expect(press({ id: ask.id, confirm: guard(ask, false, false) }, null, false)).toEqual({ run: true, armed: null });
+    // ⌘↵ only puts the text in the composer: nothing to ask.
+    expect(guard(ask, true, true)).toBeUndefined();
+  });
+
+  it('"Ask the Lead…" under other rows asks nothing: ↵ reached it on purpose', () => {
+    expect(askFirst(3)).toBeUndefined();
+    expect(guard({ askFirst: askFirst(3) }, true, false)).toBeUndefined();
+    // A row that cannot be taken back asks however it was taken.
+    expect(guard({ confirm: 'Merge?' }, false, false)).toBe('Merge?');
+  });
+});
+
+describe('the palette seed', () => {
+  it('a first > @ # / + picks a scope', () => {
+    expect(seedOf('>theme', false)).toEqual({ scope: '>', query: 'theme' });
+    expect(seedOf('+', false)).toEqual({ scope: '+', query: '' });
+    expect(seedOf('merge', false)).toEqual({ scope: null, query: 'merge' });
+    expect(seedOf('', false)).toEqual({ scope: null, query: '' });
+  });
+
+  it('text from the find bar is searched as it is', () => {
+    expect(seedOf('/api/login', true)).toEqual({ scope: null, query: '/api/login' });
+    expect(seedOf('@Ada', true)).toEqual({ scope: null, query: '@Ada' });
+    expect(seedOf('+page.svelte', true)).toEqual({ scope: null, query: '+page.svelte' });
   });
 });
