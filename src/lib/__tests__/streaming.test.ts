@@ -142,6 +142,33 @@ describe('the store, per agent', () => {
     expect(store.liveOut.size).toBe(0);
     expect(says(buildSpine('lead'))).toEqual([]);
   });
+
+  it('a stream that opens or ends moves `openRevBy`; a new word moves only `liveRevBy`', () => {
+    const open = () => store.openRevBy.get('l1');
+    expect(open()).toBe(0);
+    apply(word('l1', 'i1', 'One '));
+    expect(open()).toBe(1);
+    apply(word('l1', 'i1', 'two'), thought('w1', 'r1', 'hm'));
+    expect(open()).toBe(1);
+    expect(store.liveRevBy.get('l1')).toBe(2);
+    apply(said('l1', 'i1', 'One two'));
+    expect(open()).toBe(2);
+    apply(thought('w1', 'r1', '.'), ev('w1', { type: 'exited', code: 0 }));
+    expect(store.openRevBy.get('w1')).toBe(2);
+  });
+
+  it('the words of one batch join the text once, in order; a stream that ends in the batch keeps none', () => {
+    apply(word('l1', 'i1', 'One '), word('l1', 'i1', 'two '), word('w1', 'i2', 'a'));
+    const first = store.streams.get('i1');
+    expect(first?.text).toBe('One two ');
+    apply(word('l1', 'i1', 'three.'));
+    expect(store.streams.get('i1')).toMatchObject({ text: 'One two three.', ts: first?.ts });
+    // A list a row holds is never changed: the stream is a new object.
+    expect(first?.text).toBe('One two ');
+    apply(word('w1', 'i2', 'b'), said('w1', 'i2', 'ab'), word('l1', 'i1', ' Four.'));
+    expect(store.streams.has('i2')).toBe(false);
+    expect(store.streams.get('i1')?.text).toBe('One two three. Four.');
+  });
 });
 
 describe('the conversation, row by row', () => {

@@ -65,9 +65,21 @@ describe('controlRows', () => {
     ]);
   });
 
-  it('rows of the same minute join into one, oldest first; the next minute is a row of its own', () => {
-    const log = [decision('Ada now works in the mode "Accept edits"', T), changed('opus', T - 900_000), turn(T - 800_000), changed('sonnet', T + 10_000), decision('steer note for Ada: keep it short', T + 30_000)];
-    expect(words(log)).toEqual([['Ada now works in the mode "Accept edits"', 'Ada now works with Sonnet'], ['Steer note for Ada: keep it short']]);
+  it('notes of one kind in the same minute join into one row, oldest first; another kind or the next minute is a row of its own', () => {
+    const log = [
+      decision('Ada now works in the mode "Accept edits"', T), decision('you turned postgres off for Ada\'s run', T + 5_000), changed('opus', T - 900_000), turn(T - 800_000),
+      changed('sonnet', T + 10_000), decision('steer note for Ada: keep it short', T + 30_000),
+    ];
+    expect(words(log)).toEqual([
+      ['Ada now works in the mode "Accept edits"', 'You turned postgres off for Ada\'s run'],
+      ['Ada now works with Sonnet'],
+      ['Steer note for Ada: keep it short'],
+    ]);
+  });
+
+  it('a mode switch keeps its place before a compaction of the same minute (round 8 review: it went behind "and 2 more")', () => {
+    const log = [decision('Ada now works in the mode "Accept edits"', T), decision('asked Ada to compact its conversation', T + 5_000), ev({ type: 'compacting', pre_tokens: 90_000, post_tokens: 12_000 }, T + 10_000)];
+    expect(words(log)).toEqual([['Ada now works in the mode "Accept edits"'], ['You asked Ada to compact its conversation', 'Ada’s conversation was compacted · 90k → 12k tokens']]);
   });
 
   it('a row keeps its notes while nothing changed, so the thread does not draw it again', () => {

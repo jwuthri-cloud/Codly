@@ -5,7 +5,9 @@
   You can always write: a message to a busy agent shows as Queued (in order) until the agent
   takes it (Claude Code and Codex after their current step, the other CLIs as the next turn);
   the first one offers Send now (interrupt the turn, so the agent reads it at once).
-  An error or a turn that failed is a line of its own, where it happened, with the reason.
+  An error or a turn that failed is a line of its own, where it happened, with the reason. Its
+  Retry (also in the head of a 1:1 thread) sends your message again: that copy is a small
+  "Sent again" line, not a second bubble (retryFold.ts).
   What the agent's CLI told about the run (a hook, a goal, an MCP server that did not start) is
   a quiet line; a click opens the agent's history there. All it told in one turn is one line
   that opens into the list (a hook that speaks on every tool call does not fill the thread).
@@ -58,7 +60,9 @@
   import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
-  import { LAYOUT_REST_MS, meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, scrolledUpByHand, type Rect } from './threadScroll';
+  import { LAYOUT_REST_MS, meets, newBelowSorted, nextMove, oldestWaiting, pageKey, pillSpot, revealTop, scrolledUpByHand, unseenFrom, type Rect } from './threadScroll';
+  import { headRetry, retryNow, sentAgain } from './retryFold';
+  import { sysMarks } from './sysMarks';
   import { boxOf, partsOf } from './cards/cardParts';
   import { todoNow } from './todoLine';
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
@@ -86,14 +90,19 @@
 
   // ── what came while you were away: one row, before the first row newer than your leave ──
   const office = $derived(store.workspace?.id ?? null);
-  /** Names for the summary, read without tracking: the rows change when what they name does. */
+  /** Names for the summary, read without tracking: the rows change when what they name does.
+   *  A plan's merge is read with tracking: its done row stays the same when you merge it. */
   const names: AwayNames = {
     agent: (id) => untrack(() => store.agentMap.get(id)?.name ?? 'An agent'),
     task: (id) => untrack(() => {
       const t = store.taskMap.get(id);
       return t ? { key: t.key, assignee: t.assignee } : null;
     }),
-    planMerged: (id) => untrack(() => !!store.mergeOf(id)),
+    planMerged: (id) => {
+      // This session's merges are no reactive state: `rev` moves with each.
+      void store.rev;
+      return !!store.mergeOf(id);
+    },
   };
   const away = $derived.by(() => {
     const w = awayOf.get(awayKey(office, thread));
@@ -159,10 +168,17 @@
   $effect(() => () => clearTimeout(markTimer));
 
   // ── your messages that the agent has not taken yet ──
+  /** Your messages that were sent, from the rows (the clock's tick does not make them again). */
+  const sent = $derived(spine.flatMap((it): Sent[] => (it.kind === 'user' && !it.outgoing?.error ? [{ key: it.key, ts: it.ts, text: it.msg.text }] : [])));
   const waiting = $derived.by(() => {
-    void ui.now;
-    const sent: Sent[] = items.flatMap((it) => (it.kind === 'user' && !it.outgoing?.error ? [{ key: it.key, ts: it.ts, text: it.msg.text }] : []));
-    return queued(thread, sent);
+    // What `queued` reads, but the clock: the time only lets a message go (an agent idle a few
+    // seconds has taken it), so the clock counts only while a message waits.
+    void store.threadAgent(thread);
+    void store.rev;
+    void store.chats;
+    const out = untrack(() => queued(thread, sent));
+    if (out.size) void ui.now;
+    return out;
   });
   const ownerName = $derived(owner ? owner.name : 'the Lead');
   /** The message whose "Send now" you pressed (until it leaves the queue). */
@@ -177,10 +193,10 @@
 
   // ── Retry on a failed turn: only while nothing was said after it, and the agent is free ──
   const isBusy = $derived(busy(thread));
-  const lastSaid = $derived.by(() => {
-    for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'user' || items[i].kind === 'say') return i;
-    return -1;
-  });
+  /** The same Retry in the head of a 1:1 thread (one on a task has the task's Retry there). */
+  const headAgain = $derived(isRequest ? null : headRetry(spine, isBusy));
+  /** Your messages that send the one before them again: a small row each (retryFold.ts). */
+  const sentAgainKeys = $derived(sentAgain(spine));
 
   function mentionParts(text: string): { t: string; agent?: string; task?: string }[] {
     return text.split(/([@#][\w.-]+)/g).filter(Boolean).map((t) => {
@@ -218,24 +234,70 @@
   let followed = false;
   /** The rows there were when you were last at the newest line: the others below the view are counted. */
   let seen = new Set<string>();
+  /** The rows `seen` was last made from (`seeAll`): while they are the same, it is not made again. */
+  let seenOf: Item[] | null = null;
+  /** What the summary of your time away last added to `seen`: its window and the rows it read. */
+  let toldOf: { w: AwayWindow; spine: Item[] } | null = null;
   let below = $state(0);
   const rowEl = (key: string) => list?.querySelector<HTMLElement>(`:scope > li[data-key="${CSS.escape(key)}"]`) ?? null;
   // From the layout, not the screen box: the newest row rises in (a transform) and must not count.
   // A row and the scroller have the same offset parent (`.conv`).
   const offsetOf = (el: HTMLElement) => (scroller ? el.offsetTop - scroller.offsetTop - scroller.scrollTop : 0);
   const atEnd = () => !!scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 2;
+  /** All rows are seen: you are at the newest line. */
+  function seeAll() {
+    if (seenOf === items) return;
+    seenOf = items;
+    seen = new Set(items.map((it) => it.key));
+    newFrom = null;
+  }
+  /** The rows' keys and tops in the scroller's content (a scroll does not move them), read once
+   *  and kept until a row comes or goes or a size changes (`forgetRows`). */
+  let rowsAt: { keys: string[]; tops: number[] } | null = null;
+  /** Per row, how many of the rows from it on are not in `seen` (`unseenFrom`). */
+  let newFrom: number[] | null = null;
+  const forgetRows = () => {
+    rowsAt = null;
+    newFrom = null;
+  };
   function countBelow() {
     if (!scroller || !list) return (below = 0);
-    const rows = [...list.children].map((li) => ({ key: (li as HTMLElement).dataset.key ?? '', top: offsetOf(li as HTMLElement) }));
+    if (!rowsAt) {
+      const kids = [...list.children] as HTMLElement[];
+      const base = scroller.offsetTop;
+      rowsAt = { keys: kids.map((li) => li.dataset.key ?? ''), tops: kids.map((li) => li.offsetTop - base) };
+      newFrom = null;
+    }
     // The summary of your time away shows: the rows it speaks of are told, and not counted as new.
     const summary = away ? rowEl(AWAY_KEY) : null;
-    if (away && summary && meets({ top: 0, bottom: scroller.clientHeight }, { top: offsetOf(summary), bottom: offsetOf(summary) + summary.offsetHeight }))
+    if (away && summary && (!toldOf || toldOf.w !== away.w || toldOf.spine !== spine) && meets({ top: 0, bottom: scroller.clientHeight }, { top: offsetOf(summary), bottom: offsetOf(summary) + summary.offsetHeight })) {
+      toldOf = { w: away.w, spine };
       seen = new Set([...seen, ...awayKeys(spine, away.w)]);
+      newFrom = null;
+    }
+    newFrom ??= unseenFrom(rowsAt.keys, seen);
     // The bottom padding fades out: a row that begins there is not in view yet.
-    below = newBelow(rows, seen, scroller.clientHeight - parseFloat(getComputedStyle(scroller).paddingBottom));
+    below = newBelowSorted(rowsAt.tops, newFrom, scroller.scrollTop + scroller.clientHeight - parseFloat(getComputedStyle(scroller).paddingBottom));
     cancelAnimationFrame(pillFrame);
     pillFrame = requestAnimationFrame(placePill);
   }
+  /** A scroll counts the rows below at most once per frame. */
+  let countFrame = 0;
+  function countSoon() {
+    if (countFrame) return;
+    countFrame = requestAnimationFrame(() => {
+      countFrame = 0;
+      countBelow();
+    });
+  }
+  $effect(() => () => cancelAnimationFrame(countFrame));
+  // A row that grows or shrinks moves the rows after it.
+  $effect(() => {
+    if (!list) return;
+    const ro = new ResizeObserver(forgetRows);
+    ro.observe(list);
+    return () => ro.disconnect();
+  });
 
   // ── the pill keeps off the waiting card's buttons ──
   let bottomEl: HTMLDivElement | undefined = $state();
@@ -310,7 +372,7 @@
     if (el) heldAt = offsetOf(el);
     // Rows that came in below the held card: you are not at the newest line any more.
     if (move === 'hold' || move === 'reveal') atBottom = atEnd();
-    if (atBottom) seen = new Set(items.map((it) => it.key));
+    if (atBottom) seeAll();
     countBelow();
   }
   function onScroll() {
@@ -325,12 +387,12 @@
     lastTop = scroller.scrollTop;
     if (atBottom) {
       unseen = false;
-      seen = new Set(items.map((it) => it.key));
+      seeAll();
     }
     // Where you scrolled the held card to is where it stays.
     const el = heldKey ? rowEl(heldKey) : null;
     if (el) heldAt = offsetOf(el);
-    countBelow();
+    countSoon();
   }
   function toBottom(smooth = false) {
     if (!scroller) return;
@@ -349,6 +411,7 @@
       const el = heldKey ? rowEl(heldKey) : null;
       if (el && heldShows(el)) {
         hold(el);
+        forgetRows();
         countBelow();
       } else if (atBottom) toBottom();
     });
@@ -361,7 +424,10 @@
     const grew = items.length > lastCount && items[0]?.key === lastFirst;
     lastCount = items.length;
     lastFirst = items[0]?.key;
-    tick().then(() => settle(grew));
+    tick().then(() => {
+      forgetRows();
+      settle(grew);
+    });
   });
   // A change of layout (a panel opens or closes, the window is resized) moves the rows: once
   // the thread's size has stayed the same for a moment, the waiting card that showed before is
@@ -389,6 +455,7 @@
           heldAt = offsetOf(el);
           atBottom = atEnd();
         }
+        forgetRows();
         countBelow();
       }, LAYOUT_REST_MS);
     });
@@ -405,23 +472,58 @@
     heldKey = null;
     followed = false;
     tick().then(() => {
+      forgetRows();
       settle(false);
       // What the thread held when you opened it is not new, wherever the view is.
-      seen = new Set(items.map((it) => it.key));
+      seenOf = null;
+      seeAll();
       countBelow();
     });
   });
-  // What you just sent is always in view.
+  // What you just sent is in view, unless a waiting card shows: the card stays where it is (its
+  // keys aim at it), and what you sent is counted below.
   let sentCount = 0;
   $effect(() => {
     const n = store.outbox.filter((o) => o.thread === thread).length;
-    if (n > sentCount) {
+    const held = untrack(() => (heldKey ? rowEl(heldKey) : null));
+    if (n > sentCount && !(held && heldShows(held))) {
       atBottom = true;
-      // While a card waits, at once: a smooth scroll would end where the card is held.
+      // While a card waits out of view, at once: a smooth scroll would end where the card is held.
       tick().then(() => toBottom(!heldKey));
     }
     sentCount = n;
   });
+
+  // PageDown, Space, PageUp, Home and End scroll the thread while the focus is on the page (on
+  // no field, button or card: those take their own keys).
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!scroller || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.target !== document.body && e.target !== document.documentElement) return;
+      const to = pageKey(e.key, e.shiftKey, scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
+      if (to == null) return;
+      e.preventDefault();
+      scroller.scrollTo({ top: to, behavior: ui.reducedMotion ? 'auto' : 'smooth' });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  /** The wheel over a box in a row that keeps the wheel (a card's body that scrolls) and is at
+   *  its end: the browser moves nothing, so the thread takes the wheel. */
+  function onWheel(e: WheelEvent) {
+    if (!scroller || e.ctrlKey || !e.deltaY) return;
+    for (let el = e.target as HTMLElement | null; el && el !== scroller; el = el.parentElement) {
+      if (el.scrollHeight <= el.clientHeight) continue;
+      const css = getComputedStyle(el);
+      if (!/auto|scroll/.test(css.overflowY)) continue;
+      // A box that passes the wheel on does so by itself.
+      if (css.overscrollBehaviorY === 'auto') return;
+      const atItsEnd = e.deltaY > 0 ? el.scrollTop + el.clientHeight >= el.scrollHeight - 1 : el.scrollTop <= 0;
+      if (atItsEnd) scroller.scrollTop += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * scroller.clientHeight : e.deltaY;
+      return;
+    }
+  }
 
   const ownerNow = $derived(owner && !isRequest ? narrate(owner.id) : null);
   /** Its own todo list while it works, and greyed while it waits for you: "Step 3 of 7 · <the step it is on>". */
@@ -447,12 +549,13 @@
         {#if ownerNow}<p class="o-now truncate">{#if ownerTodo}<span class="o-todo num" class:waits={ownerTodo.waiting}>{`${ownerTodo.text} · `}</span>{/if}<Say parts={ownerNow.parts} /></p>{/if}
       </div>
       <RetryButton task={owner.task_id ? store.taskMap.get(owner.task_id) : null} />
+      {#if headAgain && !owner.task_id}{@const again = headAgain}<button class="btn sm" onclick={() => sendChat(thread, again)} data-tip="Send your message again">Retry</button>{/if}
       <button class="btn ghost sm" onclick={() => ui.selectAgent(owner.id)}>Details</button>
       <button class="btn ghost sm" onclick={() => ui.openRequest(backTo)}><Icon name="arrow-left" size={12} />Back to the request</button>
     </header>
   {/if}
 
-  <div class="scroll" bind:this={scroller} onscroll={onScroll}>
+  <div class="scroll" bind:this={scroller} onscroll={onScroll} onwheel={onWheel}>
     <LoadEarlier {thread} {scroller} />
     {#if !items.length}
       {#if thread === 'lead'}
@@ -477,6 +580,9 @@
             {#if it.kind === 'user'}
               {@const q = waiting.get(it.key)}
               {@const failed = it.outgoing?.error ?? null}
+              {#if !q && sentAgainKeys.has(it.key)}
+                <p class="again">Sent again<time class="num">{clock(it.ts)}</time></p>
+              {:else}
               <div class="user selectable" class:queued={!!q} class:failed={!!failed}>
                 <p>{#each mentionParts(it.msg.text) as part, pi (pi)}{#if part.agent}<button class="mention" onclick={() => ui.selectAgent(part.agent!)}>{part.t}</button>{:else if part.task}<button class="mention" onclick={() => ui.selectTask(part.task!)}>{part.t}</button>{:else}{part.t}{/if}{/each}</p>
                 {#if q}
@@ -500,10 +606,11 @@
                   <button class="act" onclick={() => ui.seedComposer(thread, it.msg.text, true)} data-tip="Put it back in the composer, to change and send again">Edit</button>
                 </div>
               {/if}
+              {/if}
             {:else if it.kind === 'system'}
               {#if it.card?.type === 'plan'}<PlanCard planId={it.card.planId} />
               {:else if it.card?.type === 'plan-done'}<PlanDoneCard planId={it.card.planId} />
-              {:else}<p class="sys">{it.text}<time class="num">{clock(it.ts)}</time></p>{/if}
+              {:else}<p class="sys"><span>{#each sysMarks(it.text) as m, mi (mi)}{#if m.code}<code>{m.t}</code>{:else if m.bold}<b>{m.t}</b>{:else}{m.t}{/if}{/each}</span><time class="num">{clock(it.ts)}</time></p>{/if}
             {:else if it.kind === 'say'}
               {@const a = store.agentMap.get(it.agentId)}
               {#if it.header}
@@ -525,8 +632,8 @@
                 </div>
               {/if}
             {:else if it.kind === 'trouble'}
-              {@const again = it.retry}
-              <TroubleRow agentId={it.agentId} eventId={it.eventId} ts={it.ts} what={it.what} reason={it.reason} onretry={again && i > lastSaid && !isBusy ? () => sendChat(thread, again) : undefined} />
+              {@const retry = retryNow(items, i, isBusy)}
+              <TroubleRow agentId={it.agentId} eventId={it.eventId} ts={it.ts} what={it.what} reason={it.reason} onretry={retry ? () => sendChat(thread, retry) : undefined} />
             {:else if it.kind === 'notice' || it.kind === 'control'}
               <NoticeRow agentId={it.agentId} notes={it.notes} />
             {:else if it.kind === 'away'}
@@ -611,6 +718,11 @@
   .mention { display: inline; padding: 0 3px; margin: 0 -1px; border-radius: 4px; color: var(--ink-1); font-weight: var(--w-semi); background: var(--surface-3); font-size: inherit; line-height: inherit; }
   .sys { display: flex; justify-content: center; gap: 8px; font-size: var(--t-sm); color: var(--ink-3); }
   .sys time { color: var(--ink-4); }
+  .sys code { font-family: var(--font-mono); font-size: 0.92em; padding: 0 4px; border-radius: 4px; background: var(--surface-2); color: var(--ink-2); }
+  .sys b { font-weight: var(--w-semi); color: var(--ink-2); }
+  /* Your message sent again (Retry): a small line, not a second bubble. */
+  .again { display: flex; justify-content: flex-end; gap: 8px; margin-top: -12px; font-size: var(--t-sm); color: var(--ink-3); }
+  .again time { color: var(--ink-4); }
   .who { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .face { display: grid; border-radius: 50%; }
   .name { font-weight: var(--w-semi); font-size: var(--t-md); }

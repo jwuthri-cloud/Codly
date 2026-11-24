@@ -45,6 +45,7 @@ import { BILLING, demoCloseOffice, demoMovedTo, demoPlays } from './demo/office'
 import { MergeConflictDemo } from './demo/mergeConflict';
 import { sendBackPlanDemo } from './demo/reviewTask';
 import { demoStates, opensRepo, type DemoStates } from './demo/states';
+import { seedLongThread } from './demo/longThread';
 import { intakeUi } from './state/intake.svelte';
 import { PullRequestDemo } from './demo/pullrequest';
 import { demoIntake } from './demo/intake';
@@ -295,6 +296,7 @@ export class MockTransport implements Transport {
     // Let the UI's relative times follow the virtual clock (dev only).
     (globalThis as { __codlyNow?: () => number }).__codlyNow = () => this.sim.now();
     if (p.get('ws') === '1' || p.get('skip') || isSiteDemo() || opensRepo(states)) this.story.openWorkspace(REPO);
+    if (states.longThread) seedLongThread(this.story, this.sim, states.longThread);
     // `?intake=issue` / `?intake=pr`: that dialog is open when the demo starts.
     if (states.intake) intakeUi.dialog = states.intake;
   }

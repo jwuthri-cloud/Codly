@@ -1,8 +1,9 @@
 // What you did to the agent of a thread, as quiet rows in the thread: a compaction that is done,
 // each change the core recorded for the agent ("agent_control": a mode switch, a compaction you
 // asked for, an MCP server turned on or off, a steer note, a stop of background work), a change
-// of its model or thinking effort, and the last context reading of this window. Rows of the same
-// minute join into one, as notices do. Pure.
+// of its model or thinking effort, and the last context reading of this window. Notes of one kind
+// that follow each other in one minute join into one row; one of another kind keeps its own row,
+// at its place in time. Pure.
 import type { Agent } from '../lib/gen/Agent';
 import type { EventRow } from '../lib/gen/EventRow';
 import { tokens } from '../lib/util/format';
@@ -56,46 +57,86 @@ function compacted(name: string, k: { pre_tokens: number | null; post_tokens: nu
  * nothing changed for you.
  */
 export function controlRows(events: readonly EventRow[], agent: Pick<Agent, 'id' | 'name'>, keeps: (word: string) => boolean, context: ContextRead | null): Note[][] {
-  const notes: Note[] = [];
-  let model: string | null | undefined;
+  const r = new ControlReader(agent, keeps);
+  for (const ev of events) r.add(ev);
+  return r.rows(context);
+}
+
+/** What a note is about: only notes of the same kind join one row. */
+type Kind = 'compaction' | 'control' | 'model' | 'context';
+const kindOf = new WeakMap<Note, Kind>();
+
+/**
+ * The control rows of one agent (see `controlRows`), read one event at a time (`add`, oldest
+ * first): the conversation reads only the events that came since its last read.
+ */
+export class ControlReader {
+  /** The notes the log gave so far, in the log's order. */
+  private notes: Note[] = [];
+  private model: string | null | undefined;
   /** The model the agent's newest run said at its start, while no turn has started since. */
-  let started: string | null = null;
-  for (const ev of events) {
-    if (ev.agent_id !== agent.id) continue;
+  private started: string | null = null;
+  constructor(
+    private readonly agent: Pick<Agent, 'id' | 'name'>,
+    private readonly keeps: (word: string) => boolean,
+  ) {}
+
+  private push(of: object, eventId: number, ts: number, text: string, kind: Kind) {
+    const n = note(of, eventId, ts, text);
+    kindOf.set(n, kind);
+    this.notes.push(n);
+  }
+
+  add(ev: EventRow) {
+    if (ev.agent_id !== this.agent.id) return;
     const k = ev.kind;
+    const name = this.agent.name;
     switch (k.type) {
       case 'session_started':
-        started = k.model;
+        this.started = k.model;
         break;
       case 'turn_started':
-        started = null;
+        this.started = null;
         break;
       case 'compacting': {
-        const text = compacted(agent.name, k);
-        if (text) notes.push(note(ev, ev.id, ev.ts, text));
+        const text = compacted(name, k);
+        if (text) this.push(ev, ev.id, ev.ts, text, 'compaction');
         break;
       }
       case 'decision':
-        if (k.decision_type === 'agent_control') notes.push(note(ev, ev.id, ev.ts, historySentence(k.summary, k.method, keeps)));
+        // A compaction you asked for and the compaction that came of it are one act.
+        if (k.decision_type === 'agent_control') this.push(ev, ev.id, ev.ts, historySentence(k.summary, k.method, this.keeps), k.summary.startsWith('asked ') && k.summary.endsWith(' to compact its conversation') ? 'compaction' : 'control');
         break;
       case 'agent_changed': {
         const now = k.agent.model;
-        const fromStart = started != null && splitModel(now).name === started;
-        if (model !== undefined && now !== model && !fromStart) notes.push(note(ev, ev.id, ev.ts, `${agent.name} now works with ${modelWords(now)}`));
-        model = now;
+        const fromStart = this.started != null && splitModel(now).name === this.started;
+        if (this.model !== undefined && now !== this.model && !fromStart) this.push(ev, ev.id, ev.ts, `${name} now works with ${modelWords(now)}`, 'model');
+        this.model = now;
         break;
       }
     }
   }
-  if (context) notes.push(note(context, 0, context.ts, `Context: ${context.line}`));
-  notes.sort((a, b) => a.ts - b.ts);
 
-  // One row for each minute that has some.
-  const rows: Note[][] = [];
-  for (const n of notes) {
-    const last = rows[rows.length - 1];
-    if (last && Math.floor(last[0].ts / 60_000) === Math.floor(n.ts / 60_000)) last.push(n);
-    else rows.push([n]);
+  /**
+   * The rows, with the last context reading of this window (`context`) in its place. Notes of
+   * the same kind that follow each other in one clock minute are one row; a note of another
+   * kind between them, or a new minute, starts another, so each row stays where it happened.
+   */
+  rows(context: ContextRead | null): Note[][] {
+    const notes = this.notes.slice();
+    if (context) {
+      const n = note(context, 0, context.ts, `Context: ${context.line}`);
+      kindOf.set(n, 'context');
+      notes.push(n);
+    }
+    notes.sort((a, b) => a.ts - b.ts);
+    const rows: Note[][] = [];
+    for (const n of notes) {
+      const last = rows[rows.length - 1];
+      const head = last?.[0];
+      if (head && kindOf.get(head) === kindOf.get(n) && Math.floor(head.ts / 60_000) === Math.floor(n.ts / 60_000)) last.push(n);
+      else rows.push([n]);
+    }
+    return rows;
   }
-  return rows;
 }

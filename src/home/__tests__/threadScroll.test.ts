@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
 import type { Item } from '../spine';
-import { meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, scrolledUpByHand, type Rect, type ScrollState } from '../threadScroll';
+import { meets, newBelow, newBelowSorted, nextMove, oldestWaiting, pageKey, pillSpot, revealTop, scrolledUpByHand, unseenFrom, type Rect, type ScrollState } from '../threadScroll';
 
 const card = (key: string, status: string): Item => ({ kind: 'approval', key, ts: 0, approval: { status } as unknown as Approval, twins: [] });
 const sys = (key: string): Item => ({ kind: 'system', key, ts: 0, text: 'x', card: null });
@@ -149,5 +149,33 @@ describe('where the "new below" pill goes (`pillSpot`)', () => {
     expect(pillSpot([centre, edge, above(buttons.top)], tall, buttons)).toBe(2);
     // No spot off the buttons: the last one.
     expect(pillSpot([centre, edge], parts, r(0, 0, 1000, 1000))).toBe(1);
+  });
+});
+
+describe('newBelowSorted', () => {
+  it('counts what newBelow counts, with a search over the kept tops', () => {
+    const rows = Array.from({ length: 40 }, (_, i) => ({ key: `r${i}`, top: i * 50 + (i % 3) * 7 }));
+    const seen = new Set(rows.filter((_, i) => i % 4 === 0 || i < 10).map((r) => r.key));
+    const tops = rows.map((r) => r.top);
+    const unseen = unseenFrom(rows.map((r) => r.key), seen);
+    for (const bottom of [-10, 0, 49, 50, 333, 1000, 1957, 1958, 5000]) expect(newBelowSorted(tops, unseen, bottom), String(bottom)).toBe(newBelow(rows, seen, bottom));
+    expect(newBelowSorted([], [0], 10)).toBe(0);
+  });
+
+  it('unseenFrom counts the new rows from each row on', () => {
+    expect(unseenFrom(['a', 'b', 'c'], new Set(['b']))).toEqual([2, 1, 1, 0]);
+  });
+});
+
+describe('pageKey', () => {
+  it('moves a page less some overlap, or to an end; other keys are not its', () => {
+    expect(pageKey('PageDown', false, 100, 600, 5000)).toBe(640);
+    expect(pageKey(' ', false, 100, 600, 5000)).toBe(640);
+    expect(pageKey(' ', true, 1000, 600, 5000)).toBe(460);
+    expect(pageKey('PageUp', false, 1000, 600, 5000)).toBe(460);
+    expect(pageKey('Home', false, 1000, 600, 5000)).toBe(0);
+    expect(pageKey('End', false, 1000, 600, 5000)).toBe(5000);
+    expect(pageKey('ArrowDown', false, 1000, 600, 5000)).toBeNull();
+    expect(pageKey('Enter', false, 1000, 600, 5000)).toBeNull();
   });
 });

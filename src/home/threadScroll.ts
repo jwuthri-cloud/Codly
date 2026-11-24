@@ -111,3 +111,42 @@ export function scrolledUpByHand(s: { before: number; now: number; own: number |
   if (s.own != null && Math.abs(s.now - s.own) < 1) return false;
   return !s.atEnd && s.now < s.before - 1;
 }
+
+/**
+ * `newBelow` for a long thread, at the cost of a search: `tops` are the rows' tops in the
+ * thread's order (they never go down), `unseen[i]` how many of the rows from `i` on are new
+ * (`unseenFrom`). Both are kept while the rows and their sizes stay the same, so a scroll reads
+ * nothing of the rows. `viewBottom` in the same frame as `tops`.
+ */
+export function newBelowSorted(tops: readonly number[], unseen: readonly number[], viewBottom: number): number {
+  let lo = 0;
+  let hi = tops.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (tops[mid] >= viewBottom) hi = mid;
+    else lo = mid + 1;
+  }
+  return unseen[lo] ?? 0;
+}
+
+/** For each row, how many of the rows from it on are not among the keys you had seen (one more entry, 0, at the end). */
+export function unseenFrom(keys: readonly string[], seen: ReadonlySet<string>): number[] {
+  const out = new Array<number>(keys.length + 1);
+  out[keys.length] = 0;
+  for (let i = keys.length - 1; i >= 0; i--) out[i] = out[i + 1] + (seen.has(keys[i]) ? 0 : 1);
+  return out;
+}
+
+/**
+ * Where a key scrolls the thread when the focus is on the page (on no field, button or card):
+ * PageDown and Space a page down, PageUp and Shift+Space a page up, Home to the start, End to
+ * the end. Null: the key is not one of these. `page`: the height of the view.
+ */
+export function pageKey(key: string, shift: boolean, top: number, page: number, height: number): number | null {
+  const step = Math.max(40, page - 60);
+  if (key === 'PageDown' || (key === ' ' && !shift)) return top + step;
+  if (key === 'PageUp' || (key === ' ' && shift)) return top - step;
+  if (key === 'Home') return 0;
+  if (key === 'End') return height;
+  return null;
+}

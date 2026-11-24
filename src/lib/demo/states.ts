@@ -3,6 +3,7 @@
 // preview command that runs, required checks that are on… Each parameter is read once, when the
 // mock backend starts; a value this file does not know starts nothing.
 import type { IntakeKind } from '../gen/IntakeKind';
+import { LONG_DEFAULT } from './longThread';
 
 /** The kinds of request `?approval=…` makes a 1:1 agent ask (story.ts `seedAsk`). */
 const ASK_KINDS = ['file', 'plan', 'network', 'permissions', 'question-long'] as const;
@@ -43,12 +44,15 @@ export type DemoStates = {
   twoRequests: boolean;
   /** `?cards=3`: the request is a plan of four tasks, and three of its workers ask you within seconds of each other. */
   threeCards: boolean;
+  /** `?long=2000`: a 1:1 agent with that many turns behind it streams one long answer (demo/longThread.ts); no number: 2000. */
+  longThread: number | null;
 };
 
 export function demoStates(params: URLSearchParams): DemoStates {
   const intake = params.get('intake');
   // `Number('')` is 0: a parameter with no value is not midnight.
   const hour = params.get('hour') ? Number(params.get('hour')) : NaN;
+  const long = params.has('long') ? Math.floor(Number(params.get('long'))) : NaN;
   return {
     trustAsk: params.get('trust') === 'ask',
     mergeConflict: params.get('merge') === 'conflict',
@@ -67,6 +71,7 @@ export function demoStates(params: URLSearchParams): DemoStates {
     searchFails: params.get('search') === 'fail',
     twoRequests: params.get('requests') === 'two',
     threeCards: params.get('cards') === '3',
+    longThread: params.has('long') ? (long > 0 ? long : LONG_DEFAULT) : null,
   };
 }
 
@@ -77,6 +82,6 @@ export function demoStates(params: URLSearchParams): DemoStates {
 export function opensRepo(s: DemoStates): boolean {
   return (
     s.mergeConflict || s.mergeChecks || s.previewRunning || s.checksOn || s.slowHelper || s.planMode || s.intake !== null || s.approval !== null || s.resumeAsk || s.background ||
-    s.turnFailed || s.prOpen || s.searchFails || s.twoRequests || s.threeCards
+    s.turnFailed || s.prOpen || s.searchFails || s.twoRequests || s.threeCards || s.longThread !== null
   );
 }
