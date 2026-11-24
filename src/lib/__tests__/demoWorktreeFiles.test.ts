@@ -57,8 +57,12 @@ describe('the demo agent’s worktree', () => {
     expect(mockAgentGit(fay, 0, log).files.map((f) => f.path)).toEqual(['src/second.ts', 'src/third.ts']);
     // The files the task knows show their text; the diff has exactly the files the Git tab lists.
     const known = [{ path: 'src/second.ts', before: 'a\n', after: 'a\nb\n' }];
-    const files = parseDiff(mockAgentDiff(fay, log, known));
+    const diff = mockAgentDiff(fay, log, { key: 't2', files: known });
+    const files = parseDiff(diff);
     expect(files.map((f) => [f.path, f.added, f.removed])).toEqual([['src/second.ts', 1, 0], ['src/third.ts', 2, 0]]);
+    // A file the task does not know is a change for the task, not one of a 1:1 conversation.
+    expect(diff).toContain('+// Fay: a change for task t2.');
+    expect(diff).not.toContain('1:1 conversation');
     // Off its task, it is back to its own changes outside any task.
     expect(ownFiles({ ...fay, task_id: null }, log)).toEqual(['notes.md']);
   });

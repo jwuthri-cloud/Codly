@@ -812,7 +812,7 @@ export class MockTransport implements Transport {
         // A worker on a task: the files it wrote for the task, with their text as the task's diff has it.
         const agent = sim.agents.get(String(a.agentId));
         const task = agent?.task_id ? sim.tasks.get(agent.task_id) : undefined;
-        return mockAgentDiff(agent, sim.log, task ? story.taskFiles(task) : []);
+        return mockAgentDiff(agent, sim.log, task ? { key: task.key, files: story.taskFiles(task) } : null);
       }
       case 'agent_checkpoints':
         return this.checkpoints.list(sim.agents.get(String(a.agentId)), sim.now());

@@ -2386,15 +2386,16 @@ export class Story {
     if (!legal) throw new Error('Running, review and done are Codly’s stages — tasks move there on their own.');
     const plan = t.plan_id ? sim.plans.get(t.plan_id) : null;
     if (plan && plan.status === 'awaiting_approval' && status === 'ready') throw new Error('Run the plan first — its tasks start together.');
-    const unmet = t.depends_on.filter((d) => sim.tasks.get(d)?.status !== 'done');
+    // Like the core (`move_task`): a task starts only when what it depends on is done.
+    if (status === 'ready' && t.depends_on.some((d) => sim.tasks.get(d)?.status !== 'done')) throw new Error(`${t.key} still waits for its dependencies`);
     const reason = status === 'ready'
-      ? unmet.length ? `Waiting on ${unmet.map((d) => sim.tasks.get(d)?.key).join(', ')}` : t.assignee ? 'Starting…' : 'Ready: a free agent picks it up'
+      ? t.assignee ? 'Starting…' : 'Ready: a free agent picks it up'
       : status === 'cancelled' ? 'Cancelled by you' : stop ? 'stopped by you; Retry to resume' : null;
     const next = sim.patchTask(id, { status, status_reason: reason });
     // After the status: the worker that holds the task lets go at its next step.
     if ((stop || cancel) && t.assignee && this.running.has(t.assignee) && sim.agents.get(t.assignee)?.task_id === id) sim.cancelled.add(t.assignee);
     sim.decision('move', 'human', `You moved ${t.key} to ${status}`, { task: t.key, from, to: status }, { task: id });
-    if (status === 'ready' && !unmet.length) void this.autoStart(next);
+    if (status === 'ready') void this.autoStart(next);
     return next;
   }
 
@@ -2679,9 +2680,10 @@ export class Story {
 
   // ───────────── diffs ─────────────
 
-  /** The files a task writes, with their text: the ones it decided as it worked (`wrote`), else its demo files. */
+  /** The files a task writes, with their text: the ones it decided as it worked (`wrote`), else its
+   *  demo files; a board task of its own (no plan) edits the manifest, as its diff shows. */
   taskFiles(t: Task): RepoFile[] {
-    return this.written.get(t.id) ?? filesOf(this.fileKey(t)) ?? [];
+    return this.written.get(t.id) ?? filesOf(this.fileKey(t)) ?? (t.plan_id ? [] : TASK_FILES.adhoc);
   }
 
   taskDiff(id: string): string {
@@ -2698,7 +2700,14 @@ export class Story {
 
   planDiff(id: string): string {
     const tasks = [...this.sim.tasks.values()].filter((t) => t.plan_id === id && t.status === 'done');
-    return diffOf(tasks.flatMap((t) => this.taskFiles(t)));
+    // One part per file, as git shows a branch: a file two tasks wrote (a fix of the plan's own
+    // test) goes from its text before the first to its text after the last.
+    const byPath = new Map<string, RepoFile>();
+    for (const f of tasks.flatMap((t) => this.taskFiles(t))) {
+      const first = byPath.get(f.path);
+      byPath.set(f.path, first ? { ...f, before: first.before } : f);
+    }
+    return diffOf([...byPath.values()]);
   }
 
   searchIndex() {

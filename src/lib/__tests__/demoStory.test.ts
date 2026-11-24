@@ -6,6 +6,7 @@ import { rulePrefix } from '../demo/approvalRules';
 import { ChecksDemo } from '../demo/checks';
 import claudeRs from '../../../crates/codly-core/src/adapters/claude.rs?raw';
 import mergeConflictRs from '../../../crates/codly-core/src/orchestrator/merge_conflict.rs?raw';
+import plansRs from '../../../crates/codly-core/src/orchestrator/plans.rs?raw';
 import runsRs from '../../../crates/codly-core/src/orchestrator/runs.rs?raw';
 import schedulerRs from '../../../crates/codly-core/src/orchestrator/scheduler.rs?raw';
 import workspaceRs from '../../../crates/codly-core/src/orchestrator/workspace.rs?raw';
@@ -1010,6 +1011,12 @@ describe('the fix of a check that fails on the merge', () => {
     // Its card counts what it changed: one line in one file, not "+0 −0 in 0 files".
     expect(parseDiff(story.taskDiff(fix.id)).map((f) => [f.path, f.added, f.removed])).toEqual([['tests/e2e/settings-theme.spec.ts', 1, 0]]);
     expect(story.taskDiff(fix.id)).toContain("+    await page.waitForResponse((res) => res.url().endsWith('/api/settings'));");
+    // The plan's diff has the test file once, as the fix left it.
+    const files = parseDiff(story.planDiff(plan.id));
+    expect(new Set(files.map((f) => f.path)).size).toBe(files.length);
+    const test = files.filter((f) => f.path === 'tests/e2e/settings-theme.spec.ts');
+    expect(test).toHaveLength(1);
+    expect(story.planDiff(plan.id)).toContain("+    await page.waitForResponse((res) => res.url().endsWith('/api/settings'));");
   });
 });
 
@@ -1027,6 +1034,20 @@ describe('a task that waits on others', () => {
     expect(t3()).toMatchObject({ status: 'pending', status_reason: 'blocked: depends on t1 (cancelled)' });
     const said = sim.log.filter((e) => e.task_id === t3().id && e.kind.type === 'decision' && e.kind.decision_type === 'schedule');
     expect(said.map((e) => e.kind.type === 'decision' && e.kind.summary)).toEqual(['waiting: depends on t1, t2', 'blocked: depends on t1 (cancelled)']);
+  });
+
+  it('cannot be moved to Ready before what it waits on is done, as in the core', async () => {
+    expect(plansRs).toContain('bail!("{} still waits for its dependencies", t.key)');
+    const { sim, story } = demo({ autoplay: true });
+    await until(() => planOf(sim, 'lead')?.status === 'running');
+    const plan = planOf(sim, 'lead')!;
+    const t3 = () => task(sim, plan.id, 't3')!;
+    expect(() => story.moveTask(t3().id, 'ready')).toThrow('t3 still waits for its dependencies');
+    expect(t3()).toMatchObject({ status: 'pending', status_reason: 'waiting: depends on t1, t2' });
+    // So a cancel still says the true thing.
+    story.moveTask(task(sim, plan.id, 't1')!.id, 'cancelled');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(t3()).toMatchObject({ status: 'pending', status_reason: 'blocked: depends on t1 (cancelled)' });
   });
 });
 
@@ -1126,12 +1147,26 @@ describe('the Git tab of a worker on a task', () => {
     const files = mockAgentGit(bo, sim.now(), sim.log).files.map((f) => f.path);
     expect(files).toEqual(['prisma/schema.prisma', 'prisma/migrations/20261025093000_add_theme/migration.sql']);
     const t2 = sim.tasks.get(bo.task_id!)!;
-    const diff = parseDiff(mockAgentDiff(bo, sim.log, story.taskFiles(t2)));
+    const diff = parseDiff(mockAgentDiff(bo, sim.log, { key: t2.key, files: story.taskFiles(t2) }));
     expect(diff.map((f) => f.path)).toEqual(files);
     expect(diff[0].added).toBeGreaterThan(0);
     // Committed: nothing is left in its worktree.
     await until(() => events(sim, 'committed', bo.id).length === 1);
     expect(mockAgentGit(sim.agents.get(bo.id)!, sim.now(), sim.log).files).toEqual([]);
+  });
+
+  it('a worker on a board task of its own shows the manifest it edits, not a note of a 1:1 conversation', async () => {
+    const { sim, story } = demo({ story: { yourRequestFirst: true } });
+    const t = story.createTask('Sort the imports', '');
+    story.moveTask(t.id, 'ready');
+    const worker = () => sim.agents.get(sim.tasks.get(t.id)!.assignee ?? '');
+    await until(() => !!worker() && events(sim, 'files_changed', worker()!.id).length === 1);
+    const now = sim.tasks.get(t.id)!;
+    const diff = mockAgentDiff(worker(), sim.log, { key: now.key, files: story.taskFiles(now) });
+    expect(parseDiff(diff).map((f) => f.path)).toEqual(['package.json']);
+    expect(diff).not.toContain('1:1 conversation');
+    const card = parseDiff(story.taskDiff(t.id)).map((f) => [f.path, f.added, f.removed]);
+    expect(parseDiff(diff).map((f) => [f.path, f.added, f.removed])).toEqual(card);
   });
 });
 

@@ -90,19 +90,20 @@ function editLines(agent: Agent, log: readonly EventRow[], path: string): string
 
 /**
  * `agent_diff`: one change per file the Git tab lists (`mockAgentGit`), nothing for an agent
- * that changed nothing. `known`: the files of the task the agent is on, as the task's diff has
+ * that changed nothing. `task`: the task the agent is on, with its files as the task's diff has
  * them; a file it edited with a call that carries the text shows that text (the change you saw
- * on its card); any other file a short note.
+ * on its card); any other file a short note of what it is a change for.
  */
-export function mockAgentDiff(agent: Agent | undefined, log: readonly EventRow[], known: readonly RepoFile[] = []): string {
+export function mockAgentDiff(agent: Agent | undefined, log: readonly EventRow[], task: { key: string; files: readonly RepoFile[] } | null = null): string {
   if (!agent?.worktree) return '';
+  const what = task ? `a change for task ${task.key}` : 'a change from its 1:1 conversation';
   return ownFiles(agent, log)
     .map((path, i) => {
-      const file = known.find((f) => f.path === path);
+      const file = task?.files.find((f) => f.path === path);
       if (file) return `${unifiedDiff(file)}\n`;
       const edit = editLines(agent, log, path);
       const mark = noteMark(path);
-      const lines = edit ?? [`+${mark}${agent.name}: a change from its 1:1 conversation.`, `+${mark}Not committed yet.`];
+      const lines = edit ?? [`+${mark}${agent.name}: ${what}.`, `+${mark}Not committed yet.`];
       const removed = lines.filter((l) => !l.startsWith('+')).length;
       const added = lines.filter((l) => !l.startsWith('-')).length;
       return [
