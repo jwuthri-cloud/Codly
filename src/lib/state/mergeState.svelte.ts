@@ -14,6 +14,8 @@ import { ui } from './ui.svelte';
 class MergeUi {
   /** What the core last said, by `mergeKey` (missing: not read, or it could not be read). */
   states = $state<Record<string, MergeState>>({});
+  /** The plans whose merge is under way (`mergePlan`): no button starts a second one. */
+  merging = $state<string[]>([]);
 }
 export const mergeUi = new MergeUi();
 

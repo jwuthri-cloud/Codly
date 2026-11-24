@@ -18,6 +18,7 @@ describe('a merge that cannot go straight in', () => {
     vi.restoreAllMocks();
     for (const t of [...toasts.list]) toasts.dismiss(t.id);
     mergeUi.states = {};
+    mergeUi.merging = [];
     store.planMerges = {};
   });
 
@@ -263,6 +264,26 @@ describe('a merge that cannot go straight in', () => {
     await mergePlan('p1');
     await mergePlan('p1');
     expect(toasts.list.filter((t) => t.title === 'Not merged into main')).toHaveLength(1);
+  });
+
+  it('one merge of a plan at a time: a press while it runs starts no second one', async () => {
+    vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(null);
+    let done!: (sha: string) => void;
+    const core = vi.spyOn(api, 'mergePlan').mockReturnValue(new Promise<string>((r) => (done = r)));
+    const first = mergePlan('p1');
+    await vi.waitFor(() => expect(core).toHaveBeenCalledTimes(1));
+    expect(mergeUi.merging).toEqual(['p1']);
+    await mergePlan('p1'); // the chip at the thread's end, pressed while the card's merge runs
+    expect(core).toHaveBeenCalledTimes(1);
+    done('abc1234def');
+    await first;
+    expect(mergeUi.merging).toEqual([]);
+    // A merge that failed lets you try again.
+    core.mockRejectedValueOnce(new Error('the disk is full'));
+    vi.spyOn(api, 'mergeState').mockResolvedValue(clean);
+    await mergePlan('p1');
+    expect(core).toHaveBeenCalledTimes(2);
+    expect(mergeUi.merging).toEqual([]);
   });
 
   it('the toast that says an agent is on it goes once its task is over', async () => {

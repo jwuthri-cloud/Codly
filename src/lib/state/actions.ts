@@ -262,8 +262,19 @@ const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
  *  from, nothing is merged yet: a toast says what the merge would bring and offers to go on
  *  (`into` is then the branch you confirmed). A merge that stops says why and how to go on: a
  *  conflict can go to an agent, and checks that failed on the merge result can be skipped
- *  (`unchecked`). */
+ *  (`unchecked`). One merge of a plan at a time: a press while one is under way (the card, the
+ *  chip at the thread's end, the palette) does nothing. */
 export async function mergePlan(planId: string, into: string | null = null, unchecked = false) {
+  if (mergeUi.merging.includes(planId)) return;
+  mergeUi.merging = [...mergeUi.merging, planId];
+  try {
+    await mergePlanNow(planId, into, unchecked);
+  } finally {
+    mergeUi.merging = mergeUi.merging.filter((id) => id !== planId);
+  }
+}
+
+async function mergePlanNow(planId: string, into: string | null, unchecked: boolean) {
   const plan = store.planMap.get(planId);
   const source = { kind: 'plan' as const, id: planId };
   // A toast that offers to go on goes once that is no longer true (a merge made, the cause gone).

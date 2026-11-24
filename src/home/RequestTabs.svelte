@@ -19,29 +19,20 @@
   import { closeRequest } from '../lib/state/actions';
   import { closeQuestion, closeWithUndo, type CloseQuestion } from '../lib/state/closing';
   import { requests, type Request } from '../lib/state/requests.svelte';
-  import { stoppedByYou } from '../lib/state/stops';
+  import { killedAt, yourStops } from '../lib/state/stops';
   import { store } from '../lib/state/store.svelte';
   import { CLOSED_LIST, isClosedThread, isRequestThread, ui } from '../lib/state/ui.svelte';
   import Icon from '../components/Icon.svelte';
-  import { hasNews, requestNews, type News } from './away';
+  import { hasNews, leadTroubles, requestNews, type News } from './away';
   import { forgetSeen, seenAt } from './lastSeen';
 
   const list = $derived(requests.list);
   const office = $derived(store.workspace?.id ?? null);
-  /** By request: what went wrong in its Lead's turns (an error, a turn that failed or hit its step
-   *  limit, or that something other than you cut), read again when that Lead's rows change. */
+  /** By request: what went wrong in its Lead's turns, read again when that Lead's rows change. */
   const troubles = $derived.by((): News[] => {
-    const out: News[] = [];
-    for (const r of list) {
-      if (!r.lead) continue;
-      void store.revBy.get(r.lead.id);
-      const l = store.live[r.lead.id];
-      for (const e of l?.errors ?? []) out.push({ thread: r.thread, ts: e.ts });
-      const t = l?.turn;
-      const yours = t && stoppedByYou(r.lead.id, t.startedAt);
-      if (t?.endedAt != null && (t.status === 'failed' || t.status === 'max_turns' || (t.status === 'interrupted' && !yours))) out.push({ thread: r.thread, ts: t.endedAt });
-    }
-    return out;
+    const leads = list.flatMap((r) => (r.lead ? [{ thread: r.thread, agentId: r.lead.id }] : []));
+    for (const l of leads) void store.revBy.get(l.agentId);
+    return leadTroubles(store.events, leads, yourStops, killedAt);
   });
   /** By request: when its newest row that is not yours came (a message, a card that asks you, a finished task, a trouble). */
   const newest = $derived(

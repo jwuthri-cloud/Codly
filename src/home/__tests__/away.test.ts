@@ -2,7 +2,9 @@
 // things that need you first, each with the row it is about.
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
-import { AWAY_MS, Presence, STAMP_EVERY_MS, awayFor, awayKeys, awaySummary, hasNews, planDoneWords, requestNews, wasAway, withAway, type AwayNames, type PlanEnd, type Spot } from '../away';
+import type { EventKind } from '../../lib/gen/EventKind';
+import type { EventRow } from '../../lib/gen/EventRow';
+import { AWAY_MS, Presence, STAMP_EVERY_MS, awayFor, awayKeys, awaySummary, hasNews, leadTroubles, planDoneWords, requestNews, wasAway, withAway, type AwayNames, type PlanEnd, type Spot } from '../away';
 import type { Item } from '../spine';
 
 const T = 1_760_000_000_000;
@@ -171,6 +173,33 @@ describe('requestNews', () => {
       isRequest,
     );
     expect(Object.fromEntries(newest)).toEqual({ lead: 30, 'lead:b': 20, 'lead:c': 40 });
+  });
+});
+
+describe('leadTroubles', () => {
+  let id = 0;
+  const ev = (agent: string, ts: number, kind: unknown): EventRow => ({ id: ++id, ts, agent_id: agent, task_id: null, run_id: null, kind: kind as EventKind });
+  const started = (agent: string, ts: number) => ev(agent, ts, { type: 'turn_started', input: 'go' });
+  const ended = (agent: string, ts: number, status: string) => ev(agent, ts, { type: 'turn_completed', status, result_text: null, duration_ms: null });
+  const leads = [{ thread: 'lead', agentId: 'l1' }, { thread: 'lead:b', agentId: 'l2' }];
+  const none = () => [];
+
+  it('lights the dot as the thread shows a trouble row: errors, failed turns and step limits, also of turns before the last', () => {
+    const events = [
+      started('l1', 10), ev('l1', 11, { type: 'error', message: 'rate limited', fatal: false }), ended('l1', 12, 'completed'),
+      started('l1', 20), ended('l1', 21, 'failed'),
+      started('l1', 30), ended('l1', 31, 'completed'),
+      started('l2', 40), ended('l2', 41, 'max_turns'),
+      started('ada', 50), ended('ada', 51, 'failed'), // a worker: not a Lead of a tab
+    ];
+    expect(leadTroubles(events, leads, none, none)).toEqual([{ thread: 'lead', ts: 11 }, { thread: 'lead', ts: 21 }, { thread: 'lead:b', ts: 41 }]);
+  });
+
+  it('a turn you stopped, by button or with Esc, or one you killed, is not news; one its CLI cut is', () => {
+    const events = [started('l1', 10), ended('l1', 12, 'interrupted'), started('l2', 20), ended('l2', 22, 'interrupted'), started('l1', 30), ended('l1', 32, 'interrupted')];
+    const stops = (agent: string) => (agent === 'l1' ? [10] : []);
+    const kills = (agent: string) => (agent === 'l2' ? [21] : []);
+    expect(leadTroubles(events, leads, stops, kills)).toEqual([{ thread: 'lead', ts: 32 }]);
   });
 });
 

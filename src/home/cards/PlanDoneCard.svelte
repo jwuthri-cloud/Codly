@@ -56,17 +56,19 @@
   /** A pull request for it is open and its checks are not read, still run or failed: look at those before you merge here. */
   const pr = $derived(prUi.opened[prKey({ kind: 'plan', id: planId })] ?? null);
   const prChecking = $derived(pullRequestFirst(pr));
-  let busy = $state(false);
+  let working = $state(false);
+  /** A merge or keep from here, or a merge of this plan from elsewhere (the chip at the thread's end), is under way. */
+  const busy = $derived(working || mergeUi.merging.includes(planId));
   // `unchecked`: after the plan's checks failed on the merge result, you merge anyway.
   async function merge(unchecked = false) {
-    busy = true;
+    working = true;
     await mergePlan(planId, null, unchecked);
-    busy = false;
+    working = false;
   }
   async function keep() {
-    busy = true;
+    working = true;
     await keepBranch(planId);
-    busy = false;
+    working = false;
   }
 </script>
 

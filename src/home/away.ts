@@ -4,7 +4,8 @@
 // You were away when the page was hidden or the window had no focus for 10 minutes or more, or
 // when you open a thread that you last had on screen 10 minutes ago or more.
 import type { Approval } from '../lib/gen/Approval';
-import { troubleTitle } from './outcomes';
+import type { EventRow } from '../lib/gen/EventRow';
+import { endedByKill, troubleTitle, troublesOf } from './outcomes';
 import type { Item } from './spine';
 
 /** How long you must be gone before the thread sums up what came, in ms. */
@@ -189,6 +190,25 @@ export function requestNews(
   for (const c of s.chats) if (c.author !== 'user' && isRequest(c.thread)) note(c);
   for (const n of [...s.asks, ...s.finished, ...s.troubles]) note(n);
   return at;
+}
+
+/**
+ * By request: when something went wrong in its Lead's turns (`requestNews`'s `troubles`), by the
+ * rule of the rows the thread shows (outcomes.ts): an error, a turn that failed or hit its step
+ * limit, a turn that something other than you cut. A stop of yours (`stops`: the starts of the
+ * turns you stopped, by button or key) and a turn you killed (`kills`) are not news. One pass
+ * over the log for all the Leads.
+ */
+export function leadTroubles(events: readonly EventRow[], leads: readonly { thread: string; agentId: string }[], stops: (agentId: string) => number[], kills: (agentId: string) => number[]): News[] {
+  const byLead = new Map<string, EventRow[]>(leads.map((l) => [l.agentId, []]));
+  for (const ev of events) if (ev.agent_id) byLead.get(ev.agent_id)?.push(ev);
+  return leads.flatMap((l) => {
+    const yours = stops(l.agentId);
+    const killed = kills(l.agentId);
+    return troublesOf(byLead.get(l.agentId) ?? [], l.agentId, (start) => yours.includes(start))
+      .filter((t) => !endedByKill(t, killed))
+      .map((t) => ({ thread: l.thread, ts: t.ts }));
+  });
 }
 
 /**

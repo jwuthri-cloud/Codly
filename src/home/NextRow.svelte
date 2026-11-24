@@ -90,11 +90,13 @@
       out.push({ label: 'What’s left?', run: () => sendChat(thread, 'What’s left, and is anything at risk?') });
     } else if (plan?.status === 'done' && !store.planMerges[plan.id] && !plan.merged_sha && !plan.kept && !ui.keptPlans.includes(plan.id)) {
       // The plan's card can be far above the end (a review, fix or resolve task came after it):
-      // its merge is here too, while nothing stands in its way.
-      if (!mergeBlock(mergeUi.states[mergeKey({ kind: 'plan', id: plan.id })])) {
+      // its merge is here too, while nothing stands in its way and no merge of it is under way.
+      // A plain chip: the card's rule (a pull request whose checks run comes first) picks the
+      // main button, and the card is often the row just above.
+      if (!mergeBlock(mergeUi.states[mergeKey({ kind: 'plan', id: plan.id })]) && !mergeUi.merging.includes(plan.id)) {
         const target = store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main';
         const id = plan.id;
-        out.push({ label: `Merge into ${target}`, icon: 'merge', primary: true, run: () => void mergePlan(id) });
+        out.push({ label: `Merge into ${target}`, icon: 'merge', run: () => void mergePlan(id) });
       }
       if (store.artifacts.some((a) => a.task_id && store.taskMap.get(a.task_id)?.plan_id === plan.id)) out.push({ label: 'See what they made', icon: 'image', run: () => ((ui.changesLens = 'artifacts'), ui.go('changes')) });
       out.push({ label: 'Anything risky in the diff?', run: () => sendChat(thread, 'Before I merge: is anything in the diff risky?') });

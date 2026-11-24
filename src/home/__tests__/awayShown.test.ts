@@ -39,4 +39,22 @@ describe('the chip to the summary of your time away', () => {
     awayShown.seen(old, true);
     expect(awayShown.hidden).toBe(12);
   });
+
+  it('a new time away for the row on screen does not hide it from the view', () => {
+    const el = rowEl();
+    awayShown.show(el, 12);
+    awayShown.seen(el, true);
+    awayShown.away(el, 14);
+    expect(awayShown.hidden).toBeNull();
+    awayShown.seen(el, false);
+    expect(awayShown.hidden).toBe(14);
+  });
+
+  it('a new time away of a row that went changes nothing', () => {
+    const old = rowEl();
+    const now = rowEl();
+    awayShown.show(now, 12);
+    awayShown.away(old, 40);
+    expect(awayShown.hidden).toBe(12);
+  });
 });

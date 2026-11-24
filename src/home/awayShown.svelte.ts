@@ -14,6 +14,11 @@ class AwayShown {
     };
   }
 
+  /** The row on screen now counts a new time away (the thread gave it a new summary). */
+  away(el: HTMLElement, minutes: number) {
+    if (this.row?.el === el && this.row.minutes !== minutes) this.row = { ...this.row, minutes };
+  }
+
   /** The row came into the view, or left it. */
   seen(el: HTMLElement, inView: boolean) {
     if (this.row?.el === el && this.row.inView !== inView) this.row = { ...this.row, inView };

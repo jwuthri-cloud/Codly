@@ -7,6 +7,7 @@
   above the composer offers a chip that brings it back (awayShown.svelte.ts).
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import { awayFor, type Away } from './away';
   import { awayShown } from './awayShown.svelte';
@@ -18,16 +19,24 @@
   }
   let { summary, onjump, ondismiss }: Props = $props();
   let el: HTMLDivElement | undefined = $state();
+  // The row registers once per element: the thread gives a new summary on every new row, and a
+  // new registration would hide the row from the view for a frame (the chip would blink). Only
+  // `el` is tracked; a new time away goes to the row already there.
   $effect(() => {
     if (!el) return;
     const node = el;
-    const gone = awayShown.show(node, summary.minutes);
+    const gone = untrack(() => awayShown.show(node, summary.minutes));
     const io = new IntersectionObserver(([e]) => awayShown.seen(node, e.isIntersecting));
     io.observe(node);
     return () => {
       io.disconnect();
       gone();
     };
+  });
+  $effect(() => {
+    const node = el;
+    const minutes = summary.minutes;
+    if (node) untrack(() => awayShown.away(node, minutes));
   });
 </script>
 
