@@ -120,6 +120,38 @@ fn resolution_key(plan_id: &str) -> String {
     format!("resolution:{plan_id}")
 }
 
+impl Resolution {
+    /// The record of where `plan` stands when `task` starts on its own branch, at `before`.
+    fn of(plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Self {
+        Resolution {
+            task: task.id.clone(),
+            tip: before.into(),
+            base_commit: plan.base_commit.clone(),
+            base_branch: plan.base_branch.clone(),
+            untracked: Some(untracked),
+        }
+    }
+}
+
+/// What `add_in_place` writes, in the caller's store transaction (`review_back.rs`): the
+/// record of where the plan stands, the new task, and the commit its work is measured from. A
+/// caller that writes more for the task in the same transaction leaves none of it when one
+/// write fails: a record without its task, or for a task that never started, would make a
+/// later `settle_resolution` take back work that never ran. Returns the task's event, to
+/// publish after the commit.
+pub(super) fn add_in_place_tx(tx: &rusqlite::Connection, ws_id: Option<&str>, plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Result<EventRow> {
+    let undo = serde_json::to_string(&Resolution::of(plan, task, before, untracked))?;
+    tx.execute(
+        "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [resolution_key(&plan.id), undo],
+    )?;
+    let mut ev = row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() });
+    ev.id = crate::store::insert_event(tx, ws_id, &ev)?;
+    // What the task changes is measured from the plan's branch as it was.
+    tx.execute("UPDATE task SET base_commit = ?2 WHERE id = ?1", [task.id.as_str(), before])?;
+    Ok(ev)
+}
+
 /// A resolution that Codly starts (kv `merge_start:<plan>`): written before the user's branch
 /// is brought into the plan's branch, removed when the plan runs again. One that is still
 /// there while the plan does not build on `head` was cut short: the merge may be on the
@@ -240,8 +272,17 @@ fn fixes_checks(task: &Task) -> bool {
 }
 
 /// Does this task make the changes the user asked for in review (`review_back.rs`)?
-fn answers_review(task: &Task) -> bool {
+pub(super) fn answers_review(task: &Task) -> bool {
     task.key.starts_with(REVIEW)
+}
+
+/// Why the gate does not review a task on its plan's own branch whose diff is empty: no merge
+/// was made for the changes you asked for in review, so that task changed nothing at all.
+pub(super) fn nothing_to_review(task: &Task) -> String {
+    match answers_review(task) {
+        true => format!("{}: no review, the task changed nothing", task.key),
+        false => format!("{}: no review, nothing was changed by hand in the merge with your branch", task.key),
+    }
 }
 
 /// What the reviewer of a task that worked on its plan's own branch reads after the brief: the
@@ -720,13 +761,7 @@ impl Inner {
     /// worktree. If it does not finish, the plan goes back to where it is now
     /// (`settle_resolution`): its branch at `before`, and no new file but those in `untracked`.
     pub(super) fn add_in_place(&self, ws_id: Option<&str>, plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Result<()> {
-        let undo = Resolution {
-            task: task.id.clone(),
-            tip: before.into(),
-            base_commit: plan.base_commit.clone(),
-            base_branch: plan.base_branch.clone(),
-            untracked: Some(untracked),
-        };
+        let undo = Resolution::of(plan, task, before, untracked);
         self.store.kv_set(&resolution_key(&plan.id), &serde_json::to_string(&undo)?)?;
         self.emit(ws_id, row(None, Some(&task.id), None, EventKind::TaskChanged { task: task.clone() }))?;
         // What the task changes is measured from the plan's branch as it was.
@@ -1450,6 +1485,16 @@ mod tests {
 
         assert_eq!(cancelled_refusal(false), "this plan was cancelled, so no agent works on it any more; resolve the conflict yourself");
         assert_eq!(cancelled_refusal(true), "this plan was cancelled, so no agent works on it any more; fix the checks yourself");
+    }
+
+    #[test]
+    fn a_review_task_with_nothing_to_review_is_not_called_a_merge() {
+        let plan = plan();
+        let (branch, wt) = ("codly/sign-in/integration", Path::new("/data/worktrees/web/sign-in/integration"));
+        let mut review = resolve_task(&plan, "review-2".into(), "main", &[], vec![], branch, wt);
+        assert_eq!(nothing_to_review(&review), "review-2: no review, the task changed nothing");
+        review.key = "resolve".into();
+        assert_eq!(nothing_to_review(&review), "resolve: no review, nothing was changed by hand in the merge with your branch");
     }
 
     #[test]

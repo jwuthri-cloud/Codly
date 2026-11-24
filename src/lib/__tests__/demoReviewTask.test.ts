@@ -2,7 +2,7 @@
 // the core, the comments become one more task of the plan, for the agent that wrote the file,
 // in the plan's worktree, and the plan is done again.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sendBackPlanDemo } from '../demo/reviewTask';
+import { reviewTitle, sendBackPlanDemo } from '../demo/reviewTask';
 import { REPO, Sim } from '../demo/sim';
 import { Story } from '../demo/story';
 import type { EventKind } from '../gen/EventKind';
@@ -46,8 +46,8 @@ describe('Send back on the demo’s finished plan', () => {
     const before = [...sim.tasks.values()].filter((t) => t.plan_id === plan.id && t.status === 'done').length;
 
     const task = sendBackPlanDemo(sim, plan.id, COMMENTS, [file]);
-    expect([task.key, task.title, task.assignee, task.branch, task.worktree]).toEqual(['review', 'Changes you asked for in review', author.assignee, plan.integration_branch, plan.integration_worktree]);
-    expect(task.goal.endsWith(COMMENTS)).toBe(true);
+    expect([task.key, task.title, task.assignee, task.branch, task.worktree]).toEqual(['review', 'Review x: Say it twice.', author.assignee, plan.integration_branch, plan.integration_worktree]);
+    expect(task.goal.startsWith(COMMENTS)).toBe(true);
     expect(sim.plans.get(plan.id)!.status).toBe('running');
     const said = sim.chats.filter((c) => c.thread === plan.thread);
     // Your comments are in Codly's line: no message of yours is added to the request.
@@ -76,5 +76,44 @@ describe('Send back on the demo’s finished plan', () => {
     expect(() => sendBackPlanDemo(sim, plan.id, ' ', ['x'])).toThrow('there is no comment to send');
     sim.patchPlan(plan.id, { merged_sha: 'abc' });
     expect(() => sendBackPlanDemo(sim, plan.id, COMMENTS, ['x'])).toThrow('this plan is merged into your branch; ask for the changes in a new request');
+  });
+
+  it('says what the core says for a done task, by where its plan is', async () => {
+    const { sim, story } = demo();
+    await until(() => [...sim.plans.values()].some((p) => p.thread === 'lead' && p.status === 'done'));
+    const plan = [...sim.plans.values()].find((p) => p.thread === 'lead')!;
+    const done = [...sim.tasks.values()].find((t) => t.plan_id === plan.id && t.status === 'done')!;
+    expect(() => story.sendBackTask(done.id, COMMENTS)).toThrow(`${done.key} is done; send your comments on the plan and they become one more task of it`);
+    sim.patchPlan(plan.id, { status: 'running' });
+    expect(() => story.sendBackTask(done.id, COMMENTS)).toThrow(`${done.key} is done; send your comments on the plan when it is finished, and they become one more task of it`);
+    sim.patchPlan(plan.id, { status: 'done', merged_sha: 'abc' });
+    expect(() => story.sendBackTask(done.id, COMMENTS)).toThrow(`${done.key} is done and its work is merged; ask for the changes in a new request`);
+  });
+
+  it('gives the task to a free worker when the agent that wrote the file is offline', async () => {
+    const { sim } = demo();
+    await until(() => [...sim.plans.values()].some((p) => p.thread === 'lead' && p.status === 'done'));
+    const plan = [...sim.plans.values()].find((p) => p.thread === 'lead')!;
+    const commits = sim.log.filter((e) => e.kind.type === 'committed' && e.task_id && sim.tasks.get(e.task_id)?.plan_id === plan.id);
+    const last = commits[commits.length - 1];
+    const file = (last.kind as Extract<EventKind, { type: 'committed' }>).files[0];
+    const author = sim.tasks.get(last.task_id!)!.assignee!;
+    sim.patchAgent(author, { status: 'offline' });
+
+    const task = sendBackPlanDemo(sim, plan.id, COMMENTS, [file]);
+    expect(task.assignee).toBe(author);
+    await until(() => sim.plans.get(plan.id)!.status === 'done');
+    const finished = sim.tasks.get(task.id)!;
+    expect(finished.status).toBe('done');
+    expect(finished.assignee).not.toBe(author);
+  });
+});
+
+describe('the title of the demo’s review task', () => {
+  it('is the file and the words of the first comment, like the core’s', () => {
+    expect(reviewTitle(COMMENTS)).toBe('Review x: Say it twice.');
+    expect(reviewTitle('Review comments (2):\n\n1. `src/theme.ts:17`\n   > const KEY = 1;\n   Use a namespaced key\n\n2. `b.txt` (the whole file)\n   Hi')).toBe('Review src/theme.ts: Use a namespaced key');
+    expect([...reviewTitle(`Review comments (1):\n\n1. \`b.txt\` (the whole file)\n   ${'word '.repeat(30)}`)]).toHaveLength(80);
+    expect(reviewTitle('Please make the button blue')).toBe('Changes you asked for in review');
   });
 });

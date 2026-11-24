@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { Plan } from '../gen/Plan';
+import type { PullRequest } from '../gen/PullRequest';
 import type { Task } from '../gen/Task';
 import { sendBack } from '../state/actions';
+import { prUi } from '../state/pullRequest.svelte';
 import { review, reviewKey } from '../state/review.svelte';
 import { store, type TaskMark } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
@@ -32,6 +34,7 @@ afterEach(() => {
   ui.draftRequests = [];
   ui.composerSeed = null;
   ui.openRequest('lead');
+  prUi.opened = {};
 });
 
 describe('Send on a 1:1 agent’s diff', () => {
@@ -238,6 +241,34 @@ describe('Send back on the diff of a finished plan', () => {
     expect(ui.composerSeed?.text.startsWith('I reviewed the plan “Add search”. Its work is on the branch codly/ab12/integration.')).toBe(true);
     expect(paths(key)).toHaveLength(2);
     expect(shown().filter(([kind]) => kind === 'error')).toEqual([]);
+  });
+
+  it('with an open or merged pull request on record, the request opens with them, and the core is not asked', async () => {
+    for (const state of ['open', 'merged'] as const) {
+      setUp();
+      prUi.opened['plan:p1'] = { state } as PullRequest;
+      const core = vi.spyOn(api, 'sendBackPlan');
+      expect(await sendBack(target, all), state).toBe(true);
+      expect(core, state).not.toHaveBeenCalled();
+      expect(ui.composerSeed?.text.startsWith('I reviewed the plan “Add search”. Its work is on the branch codly/ab12/integration.'), state).toBe(true);
+      expect(ui.composerSeed?.text, state).toContain('Review comments (2):');
+      // They stay on the diff until you send that message.
+      expect(paths(key), state).toEqual(['b.ts', 'b.ts']);
+      review.clear(key);
+      ui.draftRequests = [];
+      ui.composerSeed = null;
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('with a closed pull request on record, the comments are one more task of the plan', async () => {
+    setUp();
+    prUi.opened['plan:p1'] = { state: 'closed' } as PullRequest;
+    const core = vi.spyOn(api, 'sendBackPlan').mockResolvedValue(review3);
+    expect(await sendBack(target, all)).toBe(true);
+    expect(core).toHaveBeenCalledTimes(1);
+    expect(ui.draftRequests).toEqual([]);
+    expect(paths(key)).toEqual([]);
   });
 
   it('a merged plan opens the new request as before, and the core is not asked', async () => {

@@ -36,6 +36,7 @@ import { DEMO_MCP, MODE_LABEL } from './controls';
 import { BILLING } from './office';
 import { BILLING_FILES, diffOf, INDEX, INDEX_AFTER, NEXT_BUMP, TASK_FILES, type RepoFile } from './repo';
 import { saidWith } from './said';
+import { doneTaskRefusal } from './reviewTask';
 import { Actor, Cancelled, HOME, REPO, Sim, TurnFailed, WORKTREES, sha, uid, type ToolSpec } from './sim';
 import type { AskKind } from './states';
 import { demoWorkspaceId } from './workspaceId';
@@ -2454,7 +2455,7 @@ export class Story {
     const text = comments.trim();
     if (!t) throw new Error('Unknown task');
     if (!text) throw new Error('there is no comment to send');
-    if (t.status === 'done') throw new Error(`${t.key} is done and its work is merged; ask for the changes in a new request`);
+    if (t.status === 'done') throw new Error(doneTaskRefusal(sim, t));
     if (t.status === 'cancelled') throw new Error(`${t.key} is cancelled; reopen it first`);
     if (t.status === 'pending') throw new Error(`${t.key} has not started yet`);
     if (t.status === 'merging') throw new Error(`Codly is working on ${t.key} right now; send your comments again in a moment`);

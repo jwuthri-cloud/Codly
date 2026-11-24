@@ -5,15 +5,21 @@
 //!   plan is done again, and it merges with the change;
 //! - your comments are in Codly's line, not a message of yours: a message from outside Codly
 //!   that came in before still waits for your own words;
-//! - a task that does not finish leaves the plan as it was: its branch at its old tip, done;
-//! - the task goes to the agent that wrote most of the commented files; once that agent left the
-//!   team, the next free agent takes it;
+//! - a task that does not finish leaves the plan as it was: its branch at its old tip, done; so
+//!   does Cancel plan while it is open, in words about the review;
+//! - a send back that fails after its task was added leaves no record behind: a later merge
+//!   takes nothing back from the plan's worktree;
+//! - the task goes to the agent that wrote most of the commented files, by each task's own
+//!   commits (a conflict round's merge does not count); once that agent left the team, the next
+//!   free agent takes it;
+//! - a review task that changed nothing is not reviewed;
 //! - a plan that is running, merged, has an open pull request, a change of yours in its worktree
 //!   or no comment is refused in words the Changes room can show, and a done task of a finished
 //!   or running plan points to its plan.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +28,7 @@ use codly_core::inbound::InboundMessage;
 use codly_core::model::*;
 use codly_core::orchestrator::pull_request::PrSource;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -182,20 +189,24 @@ impl Spawner for FakeSpawner {
 /// b.txt's check: t2 must leave "two" in it, and so must the review.
 const B_CHECK: &str = "grep -q two b.txt";
 
-/// A Lead that plans two tasks for the two members of your team: Ana writes a.txt (t1), Bo
+/// The plan of the Lead: two tasks for the two members of your team. Ana writes a.txt (t1), Bo
 /// writes b.txt and c.txt (t2).
-fn lead() -> Behavior {
+fn two_files() -> Value {
     let task = |id: &str, files: &[&str], verify: &str, member: &str| {
         json!({
             "id": id, "title": format!("Write {}", files.join(" and ")), "goal": format!("Write {}", files.join(" and ")), "assignee": member,
             "acceptance_criteria": ["The files are right"], "write_scope": files, "depends_on": [], "verify": [verify], "size": "S",
         })
     };
-    let plan = json!({
+    json!({
         "summary": "Write the two files",
         "tasks": [task("t1", &["a.txt"], "test -f a.txt", "Ana"), task("t2", &["b.txt", "c.txt"], B_CHECK, "Bo")],
         "integration_checks": [],
-    });
+    })
+}
+
+/// A Lead that plans `plan` for every request.
+fn lead(plan: Value) -> Behavior {
     Arc::new(move |turn: FakeTurn| {
         let plan = plan.clone();
         Box::pin(async move {
@@ -215,6 +226,8 @@ const B: &str = "two\n";
 const C: &str = "three\n";
 const REVIEWED: &str = "two, said twice\n";
 const COMMENTS: &str = "Review comments (1):\n\n1. `b.txt` (the whole file)\n   Say it twice.";
+/// The title of the task COMMENTS make.
+const TITLE: &str = "Review b.txt: Say it twice.";
 
 /// The plan's workers, and a reviewer that approves what it is given. The task with your
 /// review comments writes `review` into b.txt; a conflict with your branch is resolved with
@@ -242,11 +255,11 @@ fn worker(review: &'static str) -> Behavior {
     })
 }
 
-/// A core with one open repo, where a request runs its plan at once. Returns the repo too.
-async fn start(root: &Path, worker: Behavior, turns: Turns) -> (Arc<Core>, PathBuf) {
+/// A core with one open repo, where a request runs its plan (`plan`) at once. Returns the repo too.
+async fn start(root: &Path, plan: Value, worker: Behavior, turns: Turns) -> (Arc<Core>, PathBuf) {
     let repo = temp_repo(root);
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let spawner = FakeSpawner { lead: lead(), worker, turns };
+    let spawner = FakeSpawner { lead: lead(plan), worker, turns };
     let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     let team = ["Ana", "Bo"].map(|name| TeamMember { name: name.into(), role: "Backend dev".into(), ..Default::default() }).to_vec();
@@ -302,7 +315,7 @@ async fn decisions(core: &Core) -> Vec<String> {
 
 /// A plan of two tasks by two agents, finished: (core, repo, plan, the agent that did t2).
 async fn finished_plan(root: &Path, review: &'static str, turns: Turns) -> (Arc<Core>, PathBuf, Plan, Agent) {
-    let (core, repo) = start(root, worker(review), turns).await;
+    let (core, repo) = start(root, two_files(), worker(review), turns).await;
     core.send_chat("lead", "Please write the two files").await.unwrap();
     let plan = wait_plan(&core, PlanStatus::Done).await;
     let (t1, t2) = (task(&core, "t1").await, task(&core, "t2").await);
@@ -337,11 +350,12 @@ async fn review_comments_on_a_finished_plan_go_to_the_agent_that_wrote_the_file_
 
     // Send back: one more task of the plan, for Bo, who wrote b.txt; the plan runs again.
     let sent = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap();
-    assert_eq!((sent.key.as_str(), sent.title.as_str(), sent.assignee.as_deref()), ("review", "Changes you asked for in review", Some(bo.id.as_str())));
+    // Its title is the file and the words of your first comment.
+    assert_eq!((sent.key.as_str(), sent.title.as_str(), sent.assignee.as_deref()), ("review", TITLE, Some(bo.id.as_str())));
     assert_eq!((sent.branch.as_deref(), sent.worktree.as_deref(), sent.fresh_session), (Some(branch.as_str()), plan.integration_worktree.as_deref(), true));
     let scope: Vec<String> = ["a.txt", "b.txt", "c.txt"].map(String::from).to_vec();
     assert_eq!((&sent.write_scope, &sent.verify), (&scope, &vec!["test -f a.txt".to_string(), B_CHECK.to_string()]));
-    assert!(sent.goal.ends_with(COMMENTS), "{}", sent.goal);
+    assert!(sent.goal.starts_with(COMMENTS), "{}", sent.goal);
     let s = core.snapshot().await.unwrap();
     assert_eq!(s.plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Running);
     let err = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap_err().to_string();
@@ -365,7 +379,7 @@ async fn review_comments_on_a_finished_plan_go_to_the_agent_that_wrote_the_file_
         assert_eq!(std::fs::canonicalize(cwd).unwrap(), std::fs::canonicalize(&integ_wt).unwrap());
         // Its reviewer read the task's own commit, not the plan's whole work, and was told so.
         let review = turns.iter().filter(|(role, _, _, _)| *role == Role::Reviewer).map(|(_, _, _, p)| p.clone()).last().expect("a review");
-        assert!(review.contains("[Codly] Review task review: Changes you asked for in review"), "{review}");
+        assert!(review.contains(&format!("[Codly] Review task review: {TITLE}")), "{review}");
         assert!(review.contains("+two, said twice") && !review.contains("+first file"), "{review}");
         assert!(review.contains("About the diff: this task worked on the plan's finished branch; the diff is what it changed there"), "{review}");
     }
@@ -420,6 +434,162 @@ async fn a_review_task_that_does_not_finish_leaves_the_plan_as_it_was() {
     // The plan can be sent back again: a new task of its own.
     let second = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap();
     assert_eq!(second.key, "review-2");
+
+    // Cancel plan while that one is open: the review changes are cancelled, not the plan.
+    task_with(&core, "review-2", TaskStatus::Failed).await;
+    core.cancel_plan(&plan.id).await.unwrap();
+    let again = wait_plan(&core, PlanStatus::Done).await;
+    assert_eq!((&again.id, sh(&repo, &["rev-parse", &branch])), (&plan.id, tip));
+    let cancelled = task(&core, "review-2").await;
+    assert_eq!((cancelled.status, cancelled.status_reason.as_deref()), (TaskStatus::Cancelled, Some("review changes cancelled by you")));
+    let record = decisions(&core).await;
+    let said = "the changes you asked for in review were cancelled by you; the plan finishes again as it was";
+    assert!(record.iter().any(|d| d == said), "{record:?}");
+    assert!(!record.iter().any(|d| d.contains("conflict resolution")), "{record:?}");
+    shut_down(&core).await;
+}
+
+/// Send back fails at one of its writes (`refused`: the store write refused, in SQL). It is one
+/// store transaction, so nothing of it is left: no task, no record of where the plan stood, and
+/// the plan is done as it was. So the next merge attempt takes nothing back: a file that came
+/// into the plan's worktree since stays, and Codly says nothing about changes that never ran.
+async fn a_send_back_that_fails_leaves_nothing_behind(refused: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, repo, plan, _) = finished_plan(dir.path(), REVIEWED, Default::default()).await;
+    let integ_wt = PathBuf::from(plan.integration_worktree.clone().unwrap());
+    let db = store(dir.path());
+    // The store refuses that write, as a full disk would.
+    db.execute_batch(&format!("CREATE TRIGGER refused BEFORE {refused} BEGIN SELECT RAISE(ABORT, 'disk full'); END;")).unwrap();
+    let err = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap_err();
+    assert!(format!("{err:#}").contains("disk full"), "{err:#}");
+    db.execute_batch("DROP TRIGGER refused;").unwrap();
+    let snap = core.snapshot().await.unwrap();
+    assert!(!snap.tasks.iter().any(|t| t.key.starts_with("review")), "no review task is left");
+    let key = format!("resolution:{}", plan.id);
+    let left: Option<String> = db.query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get(0)).optional().unwrap();
+    assert_eq!(left, None, "no record of the task is left");
+    assert_eq!(snap.plans.iter().find(|p| p.id == plan.id).unwrap().status, PlanStatus::Done);
+    assert!(!said(&core, "lead", "codly").await.iter().any(|l| l.contains("What you sent:")));
+    assert!(!decisions(&core).await.iter().any(|d| d.contains("sent the plan back")));
+
+    // Later: a new file in the plan's worktree, and a merge that conflicts with your branch.
+    std::fs::write(integ_wt.join("notes.txt"), "mine\n").unwrap();
+    commit(&repo, "b.txt", "yours\n");
+    core.merge_plan(&plan.id).await.unwrap_err();
+    assert_eq!(std::fs::read_to_string(integ_wt.join("notes.txt")).unwrap(), "mine\n", "the new file stays");
+    let lines = said(&core, "lead", "codly").await;
+    assert!(!lines.iter().any(|l| l.contains("were not finished") || l.contains("was not resolved")), "{lines:?}");
+    let record = decisions(&core).await;
+    assert!(!record.iter().any(|d| d.contains("did not finish")), "{record:?}");
+    shut_down(&core).await;
+}
+
+/// The last write of the record (Codly's line with your comments) is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_back_whose_line_cannot_be_written_leaves_nothing_behind() {
+    a_send_back_that_fails_leaves_nothing_behind("INSERT ON chat WHEN NEW.json LIKE '%What you sent:%'").await;
+}
+
+/// The write of the task itself is refused, after the record of where the plan stood.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_back_whose_task_cannot_be_written_leaves_nothing_behind() {
+    a_send_back_that_fails_leaves_nothing_behind("INSERT ON event WHEN NEW.type = 'task_changed' AND NEW.payload LIKE '%\"key\":\"review\"%'").await;
+}
+
+/// The store of the core in `root`, opened beside it.
+fn store(root: &Path) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(root.join("data/codly.sqlite")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db
+}
+
+/// A review task that changes nothing (b.txt already says what it writes) is not reviewed, and
+/// nothing on record speaks of a merge with your branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_review_task_that_changed_nothing_is_not_reviewed() {
+    let dir = tempfile::tempdir().unwrap();
+    let turns: Turns = Default::default();
+    let (core, _, plan, _) = finished_plan(dir.path(), B, turns.clone()).await;
+    core.update_settings(Settings { review_gate: true, ..core.settings() }).await.unwrap();
+    core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap();
+    task_with(&core, "review", TaskStatus::Done).await;
+    wait_plan(&core, PlanStatus::Done).await;
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d == "review: verify passed (2 commands), 0 files changed within scope"), "{record:?}");
+    assert!(!record.iter().any(|d| d.contains("in the merge with your branch") || d.starts_with("review: review verdict")), "{record:?}");
+    assert!(!turns.lock().unwrap().iter().any(|(role, _, _, _)| *role == Role::Reviewer), "no reviewer ran");
+    shut_down(&core).await;
+}
+
+/// Bo writes b.txt, c.txt and shared.txt (t2). Ana writes a.txt and shared.txt (t1) once t2 is
+/// merged, so her merge conflicts with it, and she resolves that in a conflict round: her
+/// branch has the plan's branch, with Bo's files, merged in. The task with your comments goes by
+/// what each task wrote itself.
+fn conflicting_worker(t2_done: Arc<AtomicBool>) -> Behavior {
+    Arc::new(move |turn: FakeTurn| {
+        let t2_done = t2_done.clone();
+        Box::pin(async move {
+            if turn.spec.role == Role::Reviewer {
+                let reply = turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": [], "issues": [] })).await;
+                assert_eq!(reply["ok"], true, "{reply}");
+                return;
+            }
+            if turn.read("shared.txt").contains("<<<<<<<") {
+                turn.write("shared.txt", "from both\n");
+            } else if turn.prompt.contains("Task t1") {
+                for _ in 0..1200 {
+                    if t2_done.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                assert!(t2_done.load(Ordering::SeqCst), "t2 was not merged in time");
+                turn.write("a.txt", A);
+                turn.write("shared.txt", "from t1\n");
+            } else if turn.prompt.contains("Task t2") {
+                turn.write("b.txt", B);
+                turn.write("c.txt", C);
+                turn.write("shared.txt", "from t2\n");
+            } else if turn.prompt.contains("Task review") {
+                turn.write("b.txt", REVIEWED);
+            }
+            let report = json!({ "status": "done", "summary": "Did it.", "scope_exceptions": ["shared.txt: both tasks need it"] });
+            turn.tool("codly_submit_report", report).await;
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_comments_go_to_the_task_that_wrote_the_file_not_to_one_that_merged_it_in_a_conflict_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let t2_done = Arc::new(AtomicBool::new(false));
+    let (core, _) = start(dir.path(), two_files(), conflicting_worker(t2_done.clone()), Default::default()).await;
+    // The workers cannot see the board: tell them when t2 is merged.
+    let board = core.clone();
+    tokio::spawn(async move {
+        while let Ok(s) = board.snapshot().await {
+            if s.tasks.iter().any(|t| t.key == "t2" && t.status == TaskStatus::Done) {
+                t2_done.store(true, Ordering::SeqCst);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    });
+    core.send_chat("lead", "Please write the two files").await.unwrap();
+    let plan = wait_plan(&core, PlanStatus::Done).await;
+    let record = decisions(&core).await;
+    assert!(record.iter().any(|d| d.starts_with("t1: conflicts with ") && d.contains("shared.txt")), "t1 had a conflict round: {record:?}");
+    let bo = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.name == "Bo").unwrap();
+
+    // Comments on Bo's b.txt go to Bo, although t1 comes first in the plan and its branch has
+    // b.txt from the merge.
+    let sent = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap();
+    assert_eq!(sent.assignee.as_deref(), Some(bo.id.as_str()));
+    let told = "Your review comments are task review of this plan, for Bo (who wrote t2)";
+    let lines = said(&core, "lead", "codly").await;
+    assert!(lines.iter().any(|l| l.starts_with(told)), "{lines:?}");
+    task_with(&core, "review", TaskStatus::Done).await;
+    wait_plan(&core, PlanStatus::Done).await;
     shut_down(&core).await;
 }
 

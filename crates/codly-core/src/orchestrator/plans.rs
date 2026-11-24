@@ -425,7 +425,14 @@ impl Inner {
                 return Ok(());
             }
         }
-        let what = if resolving { "conflict resolution" } else { "plan" };
+        // The task on the plan's own branch made the changes you asked for in review: no
+        // conflict was there.
+        let review = resolving && self.open_resolution(plan)?.as_ref().is_some_and(merge_conflict::answers_review);
+        let what = match (resolving, review) {
+            (true, true) => "review changes",
+            (true, false) => "conflict resolution",
+            (false, _) => "plan",
+        };
         for t in self.store.plan_tasks(&plan.id)? {
             if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
                 continue;
@@ -442,6 +449,7 @@ impl Inner {
         }
         // Branches and worktrees are kept: never delete unmerged work.
         let summary = match resolving {
+            true if review => format!("the changes you asked for in review were {why}; the plan finishes again as it was"),
             true => format!("the conflict resolution of plan \"{}\" was {why}; the plan finishes again as it was", prompts::clip(&plan.summary, 60)),
             false => format!("plan \"{}\" {why}", prompts::clip(&plan.summary, 60)),
         };

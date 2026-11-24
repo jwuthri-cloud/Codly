@@ -38,6 +38,7 @@ import { mergeOfferGone, type MergeRefusal } from '../util/mergeOffer';
 import { flushClosing } from './closing';
 import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
+import { prKey, prUi } from './pullRequest.svelte';
 import { requests } from './requests.svelte';
 import { planOwners, review, reviewKey } from './review.svelte';
 import { killRefusal } from './killRule';
@@ -439,7 +440,9 @@ export function waitingRequest(key: string): string | null {
  * `finishedWorkGoes` says: on a finished plan that is not in your branch they become one more task
  * of the plan, through the core (`sendToPlan`); while the plan runs they stay on the diff until it
  * is done, and you press Send back again then (a plan that does not move on without you, its
- * tasks left blocked or failed, sends them to a new request instead); on merged work (or when the core says they belong there: the plan has a pull request)
+ * tasks left blocked or failed, sends them to a new request instead); on merged work, on a
+ * finished plan whose pull request is open or merged as last read (`planPrState`), or when the
+ * core says they belong there (it read the pull request since)
  * a new request opens with them ready to send: they stay on the diff until you send that message,
  * and Send back again goes to the same request (with the comments as they are now). A 1:1 agent's
  * diff sends them as one message of yours in its 1:1 chat. `paths`: the diff's files, in order.
@@ -462,7 +465,7 @@ export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: st
     return true;
   }
   let rest = list;
-  const goes = finishedWorkGoes(plan, store.tasks);
+  const goes = finishedWorkGoes(plan, store.tasks, planPrState(plan));
   const parts: SplitPart[] = [];
   if (!task && plan) {
     const split = splitByTask(list, planOwners(store.tasks.filter((t) => t.plan_id === plan.id)));
@@ -523,8 +526,12 @@ async function sendToTask(task: Task, key: string, comments: ReviewComment[], pa
 }
 
 /** How the core's refusal ends when the comments belong in a new request: the plan has a pull
- *  request, or is merged since (crates/codly-core/src/orchestrator/review_back.rs, `NEW_REQUEST`). */
-const NEW_REQUEST = 'ask for the changes in a new request';
+ *  request, or is merged since (crates/codly-core/src/orchestrator/review_back.rs, `NEW_REQUEST`;
+ *  a test ties the two, and the demo's, together). */
+export const NEW_REQUEST = 'ask for the changes in a new request';
+
+/** The state of a plan's pull request as Codly last read it; null when none is on record, or it is not read yet. */
+export const planPrState = (plan: Plan | null) => (plan && prUi.opened[prKey({ kind: 'plan', id: plan.id })]?.state) ?? null;
 
 /** Review comments on a finished plan's work, through the core: one more task of the plan, for
  *  the agent that wrote their files. They leave the diff when the core took them (`dropSent`).
