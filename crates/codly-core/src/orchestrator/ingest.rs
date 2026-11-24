@@ -202,7 +202,7 @@ impl Inner {
                 continue;
             }
             let key = format!("{}:{}", abs.display(), meta.len());
-            if !lock(&self.artifacts_seen).insert(key) {
+            if !lock(&self.artifacts_seen).entry(r.agent_id.clone()).or_default().insert(key) {
                 continue;
             }
             let display = cwd

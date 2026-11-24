@@ -30,7 +30,7 @@ use serde_json::Value;
 use crate::model::*;
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql")), M::up(include_str!("m4_workspace_closed.sql")), M::up(include_str!("m5_lookup_indexes.sql")), M::up(include_str!("m6_approval_rules.sql"))])
+    Migrations::new(vec![M::up(include_str!("schema.sql")), M::up(include_str!("m2_run_account.sql")), M::up(include_str!("m3_memory_data.sql")), M::up(include_str!("m4_workspace_closed.sql")), M::up(include_str!("m5_lookup_indexes.sql")), M::up(include_str!("m6_approval_rules.sql")), M::up(include_str!("m7_chat_events.sql"))])
 }
 
 /// One agent process lifetime (`run` table). Not a UI type: the UI sees runs through events.
@@ -177,25 +177,19 @@ impl Store {
     pub fn events(&self, workspace_id: Option<&str>, agent_id: Option<&str>, before: Option<i64>, limit: i64) -> Result<Vec<EventRow>> {
         let conn = self.read();
         // The cursor is a plain range (no "?3 IS NULL OR"), so a page starts at `before` instead
-        // of reading every newer row first; one agent's page walks `event_agent`.
+        // of reading every newer row first; one agent's page walks `event_agent`, one
+        // workspace's walks `event_ws`.
         let (before, limit) = (before.unwrap_or(i64::MAX), limit.clamp(1, 5000));
-        let rows = match agent_id {
-            Some(agent) => conn
-                .prepare_cached(
-                    "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
-                     WHERE agent_id = ?2 AND id < ?3 AND (?1 IS NULL OR workspace_id = ?1 OR workspace_id IS NULL)
-                     ORDER BY id DESC LIMIT ?4",
-                )?
+        let rows = match (agent_id, workspace_id) {
+            (Some(agent), _) => conn
+                .prepare_cached(AGENT_EVENTS_SQL)?
                 .query_map(params![workspace_id, agent, before, limit], event_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
-            None => conn
-                .prepare_cached(
-                    "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
-                     WHERE id < ?2 AND (?1 IS NULL OR workspace_id = ?1 OR workspace_id IS NULL)
-                     ORDER BY id DESC LIMIT ?3",
-                )?
-                .query_map(params![workspace_id, before, limit], event_from_row)?
+            (None, Some(ws)) => conn
+                .prepare_cached(WORKSPACE_EVENTS_SQL)?
+                .query_map(params![ws, before, limit], event_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
+            (None, None) => conn.prepare_cached(ALL_EVENTS_SQL)?.query_map(params![before, limit], event_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?,
         };
         Ok(rows)
     }
@@ -212,10 +206,6 @@ impl Store {
     /// An `approval_requested` row carries the approval as it is now (its answer may be in a
     /// newer page, which the caller already has).
     pub fn thread_events(&self, workspace_id: &str, thread: &str, owner: Option<&str>, before: Option<i64>, limit: i64) -> Result<Vec<EventRow>> {
-        /// A message's time is taken just before its event's. The walk for a request's messages
-        /// ends at the first event this much older than the thread's first message: a minute
-        /// between the two clocks before it would miss a message.
-        const CLOCK_SLACK_MS: i64 = 60_000;
         let (before, limit) = (before.unwrap_or(i64::MAX), limit.clamp(1, 5000));
         let request = is_lead_thread(thread);
         let mut rows = match owner {
@@ -229,58 +219,27 @@ impl Store {
         };
         {
             let conn = self.read();
-            let tasks = if request {
-                Some((
-                    "SELECT t.id FROM task t LEFT JOIN plan p ON p.id = t.plan_id
-                     WHERE t.workspace_id = ?1 AND COALESCE(NULLIF(json_extract(p.json, '$.thread'), ''), 'lead') = ?2",
-                    thread,
-                ))
-            } else {
-                owner.map(|o| ("SELECT id FROM task WHERE workspace_id = ?1 AND json_extract(json, '$.assignee') = ?2", o))
-            };
+            let tasks = if request { Some((REQUEST_TASKS_SQL, thread)) } else { owner.map(|o| (ASSIGNED_TASKS_SQL, o)) };
             if let Some((tasks, of)) = tasks {
-                let mut st = conn.prepare_cached(&format!(
-                    "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
-                     WHERE task_id IN ({tasks}) AND id < ?3
-                       AND type IN ('approval_requested', 'approval_said', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged')
-                     ORDER BY id DESC LIMIT ?4"
-                ))?;
+                let mut st = conn.prepare_cached(&thread_tasks_sql(tasks))?;
                 let found = st.query_map(params![workspace_id, of, before, limit], event_from_row)?;
                 rows.extend(found.collect::<rusqlite::Result<Vec<_>>>()?);
                 newest_first(&mut rows);
             }
             if request {
-                // No index finds a thread's `chat` events, so this walks the workspace's events
-                // backwards. It stops where the page ends (a full page), after `limit` messages,
-                // or at the events from before the thread's first message, whichever is first.
+                // The thread's messages are in `chat`, and the event of each is found by the
+                // message's id (`event_chat`), so the read follows the thread, not the repo's
+                // history. It stops where the page ends when the page is full already. Only the
+                // ids are read there; the rows found are read whole after.
                 let page_end = if rows.len() as i64 >= limit { rows.last().map_or(0, |r| r.id) } else { 0 };
-                let first_message: Option<i64> =
-                    conn.query_row("SELECT MIN(ts) FROM chat WHERE workspace_id = ?1 AND thread = ?2", params![workspace_id, thread], |r| r.get(0))?;
-                if let Some(first_message) = first_message {
-                    // On the way only a `chat` row has its payload read; the rows found are read whole after.
-                    let mut walk = conn.prepare_cached(
-                        "SELECT id, ts,
-                                CASE WHEN type = 'chat' AND json_extract(payload, '$.message.id') IN (SELECT id FROM chat WHERE workspace_id = ?1 AND thread = ?2)
-                                     THEN 1 ELSE 0 END
-                         FROM event WHERE workspace_id = ?1 AND id < ?3 AND id > ?4
-                         ORDER BY id DESC",
-                    )?;
-                    let mut walked = walk.query(params![workspace_id, thread, before, page_end])?;
-                    let mut messages: Vec<i64> = vec![];
-                    while (messages.len() as i64) < limit
-                        && let Some(r) = walked.next()?
-                        && r.get::<_, i64>(1)? >= first_message.saturating_sub(CLOCK_SLACK_MS)
-                    {
-                        if r.get(2)? {
-                            messages.push(r.get(0)?);
-                        }
-                    }
-                    let mut whole = conn.prepare_cached("SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE id = ?1")?;
-                    for id in messages {
-                        rows.push(whole.query_row([id], event_from_row)?);
-                    }
-                    newest_first(&mut rows);
+                let mut st = conn.prepare_cached(THREAD_MESSAGES_SQL)?;
+                let messages = st.query_map(params![workspace_id, thread, before, page_end, limit], |r| r.get::<_, i64>(0))?;
+                let messages = messages.collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut whole = conn.prepare_cached("SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE id = ?1")?;
+                for id in messages {
+                    rows.push(whole.query_row([id], event_from_row)?);
                 }
+                newest_first(&mut rows);
             }
         }
         for row in &mut rows {
@@ -668,6 +627,11 @@ impl Store {
         let mut st = conn.prepare_cached(TASK_EVENTS_SQL)?;
         let rows = st.query_map(params![task_id, ty], event_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A task's latest event of one type: what a check needs when only the last one counts.
+    pub fn last_task_event(&self, task_id: &str, ty: &str) -> Result<Option<EventRow>> {
+        Ok(self.conn().query_row(LAST_TASK_EVENT_SQL, params![task_id, ty], event_from_row).optional()?)
     }
 
     /// The text of the latest message `author` wrote in `thread`.
@@ -1215,6 +1179,57 @@ const ARTIFACT_SQL: &str = "SELECT payload FROM event WHERE type = 'artifact_add
 /// A task's events of one type. `+type` keeps SQLite on the task's own events (`event_task`)
 /// instead of every event of that type ever written (`event_type`).
 const TASK_EVENTS_SQL: &str = "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE task_id = ?1 AND +type = ?2 ORDER BY id";
+
+/// The latest of a task's events of one type, read backwards on `event_task`.
+const LAST_TASK_EVENT_SQL: &str = "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE task_id = ?1 AND +type = ?2 ORDER BY id DESC LIMIT 1";
+
+/// One agent's events (?2) before ?3, newest first, at most ?4, of a workspace (?1, NULL: all)
+/// and of no workspace.
+const AGENT_EVENTS_SQL: &str = "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
+     WHERE agent_id = ?2 AND id < ?3 AND (?1 IS NULL OR workspace_id = ?1 OR workspace_id IS NULL)
+     ORDER BY id DESC LIMIT ?4";
+
+/// A workspace's events (?1) and the events of no workspace before ?2, newest first, at most ?3.
+/// One walk of `event_ws` for each, so the history of another office is not read on the way.
+const WORKSPACE_EVENTS_SQL: &str = "SELECT * FROM (SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE workspace_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3)
+     UNION ALL
+     SELECT * FROM (SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE workspace_id IS NULL AND id < ?2 ORDER BY id DESC LIMIT ?3)
+     ORDER BY id DESC LIMIT ?3";
+
+/// Every event before ?1, newest first, at most ?2.
+const ALL_EVENTS_SQL: &str = "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event WHERE id < ?1 ORDER BY id DESC LIMIT ?2";
+
+/// The approvals and results of the tasks that `tasks` (a query of ?1 and ?2) selects, before
+/// ?3, newest first, at most ?4. `+type` keeps SQLite on each task's own events (`event_task`)
+/// instead of every event of those types ever written (`event_type`).
+fn thread_tasks_sql(tasks: &str) -> String {
+    format!(
+        "SELECT id, ts, agent_id, task_id, run_id, type, payload FROM event
+         WHERE task_id IN ({tasks}) AND id < ?3
+           AND +type IN ('approval_requested', 'approval_said', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged')
+         ORDER BY id DESC LIMIT ?4"
+    )
+}
+
+/// The tasks of a request (?2) of a workspace (?1): those of its plans; a task with no plan
+/// belongs to "lead".
+const REQUEST_TASKS_SQL: &str = "SELECT t.id FROM task t LEFT JOIN plan p ON p.id = t.plan_id
+     WHERE t.workspace_id = ?1 AND COALESCE(NULLIF(json_extract(p.json, '$.thread'), ''), 'lead') = ?2";
+
+/// The tasks of a workspace (?1) assigned to an agent (?2).
+const ASSIGNED_TASKS_SQL: &str = "SELECT id FROM task WHERE workspace_id = ?1 AND json_extract(json, '$.assignee') = ?2";
+
+/// The ids of the events of a thread's messages (?1, ?2) between ?4 and ?3, newest first, at
+/// most ?5. The thread's messages come first (`chat_thread`; CROSS JOIN keeps that order),
+/// then the event of each by the message's id, spelled as the `event_chat` index is (m7).
+/// INDEXED BY holds SQLite to it: left to itself, it walks every message event of the range
+/// (`event_type`). `+chat.id` drops the column's TEXT affinity, which the index's expression
+/// has not: with it, SQLite could not look the id up in the index.
+const THREAD_MESSAGES_SQL: &str = "SELECT event.id FROM chat CROSS JOIN event INDEXED BY event_chat
+     WHERE chat.workspace_id = ?1 AND chat.thread = ?2
+       AND event.type = 'chat' AND json_extract(event.payload, '$.message.id') = +chat.id
+       AND event.workspace_id = ?1 AND event.id < ?3 AND event.id > ?4
+     ORDER BY event.id DESC LIMIT ?5";
 
 /// Open threads of a workspace: answered from the `chat_thread` index alone.
 const CHAT_THREADS_SQL: &str = "SELECT DISTINCT thread FROM chat WHERE workspace_id IS ?1 AND thread NOT LIKE 'closed:%'";
@@ -1855,18 +1870,17 @@ mod tests {
     }
 
     #[test]
-    fn the_walk_for_a_requests_messages_ends_at_its_first_message() {
+    fn a_requests_messages_are_found_by_their_ids_whatever_the_time_of_their_events() {
         let t = Threads::new();
-        // Seen through a row that real data never has: the event of one of the thread's messages,
-        // ten minutes older than every message of the thread. The walk ends before that row
-        // (and so before every event of the repo's life from before this request).
+        // The event of one of the thread's messages, ten minutes older than every message of the
+        // thread: `chat` says the message is the thread's, so its event is on the page.
         let message = ChatMessage { id: new_id(), thread: "lead:x".into(), author: "user".into(), text: "hi".into(), attachment: None, ts: now_ms(), item_id: None };
-        let stray = EventRow { id: 0, ts: message.ts - 600_000, agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::Chat { message } };
-        t.store.append_event(Some(&t.ws), &stray).unwrap();
+        let early = EventRow { id: 0, ts: message.ts - 600_000, agent_id: None, task_id: None, run_id: None, workspace_id: None, kind: EventKind::Chat { message } };
+        let early = t.store.append_event(Some(&t.ws), &early).unwrap();
         let said = t.say("lead:x", "user");
-        assert_eq!(t.page("lead:x", None, None, 50), vec![said]);
-        // The peek of a thread with nothing older (one row asked, no owner): nothing, and no further.
-        assert!(t.page("lead:x", None, Some(said), 1).is_empty());
+        assert_eq!(t.page("lead:x", None, None, 50), vec![said, early]);
+        // The peek of a thread with nothing older (one row asked, no owner): nothing.
+        assert!(t.page("lead:x", None, Some(early), 1).is_empty());
     }
 
     #[test]
@@ -2044,5 +2058,155 @@ mod tests {
         assert!(texts("a").is_empty());
         assert!(texts(" a ").is_empty());
         assert_eq!(texts(" rename ").len(), 2);
+    }
+
+    /// The pages of the timeline and of a thread, and the last event of a task, read by an
+    /// index: none walks the whole `event` table.
+    #[test]
+    fn event_pages_read_by_an_index() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let check = |sql: &str, index: &str, times: usize| {
+            let plan = query_plan(&conn, sql);
+            let scans = plan.lines().any(|l| l.starts_with("SCAN event"));
+            assert!(plan.matches(index).count() == times && !scans, "{sql}\n{plan}");
+        };
+        check(AGENT_EVENTS_SQL, "event_agent", 1);
+        // One walk for the workspace's events, one for those of no workspace.
+        check(WORKSPACE_EVENTS_SQL, "USING INDEX event_ws", 2);
+        // Every event is asked for: the table's own order, from `before` down.
+        check(ALL_EVENTS_SQL, "USING INTEGER PRIMARY KEY (rowid<?)", 1);
+        check(&thread_tasks_sql(REQUEST_TASKS_SQL), "event_task", 1);
+        check(&thread_tasks_sql(ASSIGNED_TASKS_SQL), "event_task", 1);
+        check(THREAD_MESSAGES_SQL, "chat_thread", 1);
+        check(THREAD_MESSAGES_SQL, "event_chat", 1);
+        check(LAST_TASK_EVENT_SQL, "event_task", 1);
+        assert!(!query_plan(&conn, LAST_TASK_EVENT_SQL).contains("TEMP B-TREE"), "the last one is the first on the walk back");
+    }
+
+    #[test]
+    fn the_last_event_of_a_task_is_its_newest_of_that_type() {
+        let t = Threads::new();
+        let verified = |ok| EventKind::Verified { command: "cargo test".into(), ok, exit_code: None, tail: String::new() };
+        assert!(t.store.last_task_event("t1", "verified").unwrap().is_none());
+        t.add(None, Some("t1"), verified(false));
+        let last = t.add(None, Some("t1"), verified(true));
+        t.add(None, Some("t1"), EventKind::TurnStarted { input: None });
+        t.add(None, Some("t2"), verified(false));
+        let found = t.store.last_task_event("t1", "verified").unwrap().unwrap();
+        assert_eq!(found.id, last);
+        assert!(matches!(found.kind, EventKind::Verified { ok: true, .. }));
+    }
+
+    /// 50,000 events of two offices, of no office, of four agents, two tasks and three threads
+    /// (one closed half way and used again). Every page is the rows a plain filter of the whole
+    /// log gives.
+    #[test]
+    fn pages_of_a_long_history_are_the_rows_a_plain_filter_finds() {
+        let t = Threads::new();
+        let other = Workspace {
+            id: new_id(),
+            repo_path: "/tmp/other".into(),
+            name: "other".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: now_ms(),
+        };
+        t.store.upsert_workspace(&other).unwrap();
+        let agents = ["lead", "worker", "other", "other-lead"];
+        let threads = ["lead:x", "lead:y", "agent:worker"];
+        let mut seed: u64 = 7;
+        let mut next = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) % n) as usize
+        };
+        const N: usize = 50_000;
+        let start = now_ms();
+        t.store
+            .tx(|tx| {
+                for i in 0..N {
+                    let ts = start + i as i64;
+                    let ws = match next(10) {
+                        0 => None,
+                        1 => Some(other.id.as_str()),
+                        _ => Some(t.ws.as_str()),
+                    };
+                    let agent = (next(5) > 0).then(|| agents[next(4)].to_string());
+                    let (task, kind) = match next(4) {
+                        0 => {
+                            let thread = threads[next(3)];
+                            let message = ChatMessage { id: new_id(), thread: thread.into(), author: "user".into(), text: "hi".into(), attachment: None, ts: ts - next(3) as i64, item_id: None };
+                            (None, EventKind::Chat { message })
+                        }
+                        1 => (["t1", "t2"].get(next(3)).map(|t| t.to_string()), EventKind::Verified { command: "cargo test".into(), ok: true, exit_code: None, tail: String::new() }),
+                        _ => (None, EventKind::StatusChanged { status: AgentStatus::Working }),
+                    };
+                    insert_event(tx, ws, &EventRow { id: 0, ts, agent_id: agent, task_id: task, run_id: None, workspace_id: None, kind })?;
+                    if i == N / 2 {
+                        tx.execute("UPDATE chat SET thread = 'closed:lead:x:1' WHERE workspace_id = ?1 AND thread = 'lead:x'", [&t.ws])?;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // The whole log and the `chat` table, read plainly.
+        let (log, chat) = {
+            let conn = t.store.conn();
+            let mut st = conn.prepare("SELECT id, ts, agent_id, task_id, run_id, type, payload, workspace_id FROM event").unwrap();
+            let log: Vec<(EventRow, Option<String>)> = st.query_map([], |r| Ok((event_from_row(r)?, r.get(7)?))).unwrap().map(Result::unwrap).collect();
+            let mut st = conn.prepare("SELECT id, workspace_id, thread FROM chat").unwrap();
+            let chat: std::collections::HashMap<String, (Option<String>, String)> =
+                st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?)))).unwrap().map(Result::unwrap).collect();
+            (log, chat)
+        };
+        assert_eq!(log.len(), N);
+        let newest = |mut ids: Vec<i64>, limit: usize| {
+            ids.sort_unstable_by(|a, b| b.cmp(a));
+            ids.truncate(limit);
+            ids
+        };
+        let ids = |rows: Vec<EventRow>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        let filtered_events = |ws: Option<&str>, agent: Option<&str>, before: i64, limit: usize| {
+            let found = log.iter().filter(|(r, w)| {
+                r.id < before && agent.is_none_or(|a| r.agent_id.as_deref() == Some(a)) && ws.is_none_or(|ws| w.is_none() || w.as_deref() == Some(ws))
+            });
+            newest(found.map(|(r, _)| r.id).collect(), limit)
+        };
+        let filtered_thread = |thread: &str, owner: Option<&str>, before: i64, limit: usize| {
+            let tasks: &[&str] = match (thread, owner) {
+                ("lead:x", _) | ("agent:worker", Some("worker")) => &["t1"],
+                ("lead:y", _) => &["t2"],
+                _ => &[],
+            };
+            let found = log.iter().filter(|(r, w)| {
+                let mine = owner.is_some_and(|o| r.agent_id.as_deref() == Some(o)) && (w.is_none() || w.as_deref() == Some(t.ws.as_str()));
+                let of_task = r.task_id.as_deref().is_some_and(|id| tasks.contains(&id)) && matches!(r.kind, EventKind::Verified { .. });
+                let said = is_lead_thread(thread)
+                    && w.as_deref() == Some(t.ws.as_str())
+                    && matches!(&r.kind, EventKind::Chat { message } if chat.get(&message.id) == Some(&(Some(t.ws.clone()), thread.to_string())));
+                r.id < before && (mine || of_task || said)
+            });
+            newest(found.map(|(r, _)| r.id).collect(), limit)
+        };
+
+        let middle = log[N / 3].0.id;
+        for (before, limit) in [(None, 50), (None, 400), (Some(middle), 50), (Some(middle), 400)] {
+            let cursor = before.unwrap_or(i64::MAX);
+            for (ws, agent) in [(Some(t.ws.as_str()), None), (None, None), (Some(t.ws.as_str()), Some("worker")), (Some(other.id.as_str()), None)] {
+                let page = ids(t.store.events(ws, agent, before, limit).unwrap());
+                assert_eq!(page, filtered_events(ws, agent, cursor, limit as usize), "events of {ws:?} by {agent:?} before {before:?}");
+            }
+            for (thread, owner) in [("lead:x", Some("lead")), ("lead:x", None), ("lead:y", Some("other-lead")), ("agent:worker", Some("worker"))] {
+                let page = ids(t.store.thread_events(&t.ws, thread, owner, before, limit).unwrap());
+                assert_eq!(page, filtered_thread(thread, owner, cursor, limit as usize), "{thread} of {owner:?} before {before:?}");
+            }
+        }
+        let mut latest = ids(t.store.latest_events(Some(&t.ws), 300).unwrap());
+        latest.reverse();
+        assert_eq!(latest, filtered_events(Some(&t.ws), None, i64::MAX, 300), "the latest events, oldest first");
     }
 }

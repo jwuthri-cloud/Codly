@@ -60,6 +60,25 @@ pub(super) fn stuck_text(plan: &Plan, tasks: &[Task], stuck: &Stuck) -> String {
 }
 
 impl Inner {
+    /// A plan was closed (done, failed or cancelled): what Codly kept about it in memory goes,
+    /// the keys of its tasks and what it told you about the plan being stuck, with that row in
+    /// the store. A plan that runs again (a review of it) and gets stuck is told about again.
+    pub(super) fn forget_plan_in_memory(&self, plan_id: &str) {
+        match self.store.plan_tasks(plan_id) {
+            Ok(tasks) => {
+                let mut labels = lock(&self.labels);
+                for t in tasks {
+                    labels.remove(&t.id);
+                }
+            }
+            Err(e) => tracing::warn!("the keys of the tasks of plan {plan_id}, which closed, stay in memory: {e:#}"),
+        }
+        lock(&self.stuck_told).remove(plan_id);
+        if let Err(e) = self.store.kv_write(&[(told_key(plan_id), None)]) {
+            tracing::warn!("what Codly told you about plan {plan_id} being stuck stays in the store: {e:#}");
+        }
+    }
+
     /// Say in each stuck plan's thread that it cannot go on, once per stop: again only when
     /// other tasks stopped it, or after it moved on and got stuck again. `plans` and `tasks`
     /// are the office's, as the scheduling pass read them.
@@ -229,5 +248,59 @@ mod tests {
         assert!(text.contains("t1 \"Do t1\" is cancelled. t2 \"Do t2\" failed: `npm test` failed (exit 1) after 3 fix rounds. t3 waits for them."), "{text}");
         assert!(text.contains("Merged into codly/sign-in/integration: 0 of 3 tasks.") && text.ends_with("or cancel the plan."), "{text}");
         assert_eq!((list(&[]), list(&["a"]), list(&["a", "b", "c"])), (String::new(), "a".to_string(), "a, b and c".to_string()));
+    }
+
+    /// What Codly keeps in memory about a plan goes when the plan closes, and a task's key
+    /// when the task is over: after nine plans and three tasks of no plan came and went,
+    /// nothing is left.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn what_is_kept_about_a_plan_goes_when_it_closes() {
+        use crate::orchestrator::{Core, CoreConfig, StartOptions, row};
+        let dir = tempfile::tempdir().unwrap();
+        let opts = StartOptions { env: Some(std::env::vars().collect()), clis: Some(vec![]), ..Default::default() };
+        let core = Core::start_with(CoreConfig { data_dir: dir.path().join("data"), app_exe: "/usr/bin/true".into() }, opts).await.unwrap();
+        let inner = &core.inner;
+        let ws = Workspace {
+            id: "ws".into(),
+            repo_path: dir.path().join("repo").to_string_lossy().into_owned(),
+            name: "repo".into(),
+            default_branch: "main".into(),
+            current_branch: None,
+            head: None,
+            dirty: false,
+            created_at: 0,
+        };
+        inner.store.upsert_workspace(&ws).unwrap();
+        let ends = [PlanStatus::Done, PlanStatus::Failed, PlanStatus::Cancelled];
+        for i in 0..9 {
+            let p = Plan { id: format!("p{i}"), workspace_id: ws.id.clone(), ..plan() };
+            inner.emit(Some(&ws.id), row(None, None, None, EventKind::PlanChanged { plan: p.clone() })).unwrap();
+            let t = Task { id: format!("t{i}"), plan_id: Some(p.id.clone()), ..task("t1", "running", None) };
+            inner.emit(Some(&ws.id), row(None, Some(&t.id), None, EventKind::TaskChanged { task: t.clone() })).unwrap();
+            // What the plan left in memory: its task's key, and that it was told stuck.
+            lock(&inner.labels).insert(t.id.clone(), format!("t1@p{i}"));
+            lock(&inner.stuck_told).insert(p.id.clone(), t.id.clone());
+            inner.store.kv_write(&[(told_key(&p.id), Some(t.id.clone()))]).unwrap();
+            inner.update_plan(&p.id, |p| {
+                p.status = ends[i % 3];
+                Ok(())
+            })
+            .unwrap();
+        }
+        for i in 0..3 {
+            let t = Task { id: format!("quick{i}"), plan_id: None, ..task("q", "running", None) };
+            inner.emit(Some(&ws.id), row(None, Some(&t.id), None, EventKind::TaskChanged { task: t.clone() })).unwrap();
+            lock(&inner.labels).insert(t.id.clone(), "q".into());
+            let end = if i == 0 { TaskStatus::Cancelled } else { TaskStatus::Done };
+            inner.update_task(&t.id, |t| {
+                t.status = end;
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(lock(&inner.labels).is_empty());
+        assert!(lock(&inner.stuck_told).is_empty());
+        assert!(inner.store.kv_prefixed("stuck:").unwrap().is_empty(), "the rows of what Codly told you went too");
+        core.shutdown().await;
     }
 }

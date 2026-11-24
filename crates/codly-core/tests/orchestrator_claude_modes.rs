@@ -1205,5 +1205,5 @@ async fn taking_an_effort_away_reads_the_level_back() {
     seen.lock().unwrap().drops_effort = false;
     turn(&core, &id, "again").await;
     assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("sonnet".to_string())));
-    core.shutdown().await;
+    shut_down(&core).await;
 }

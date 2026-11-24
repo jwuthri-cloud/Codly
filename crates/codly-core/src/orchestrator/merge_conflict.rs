@@ -840,7 +840,7 @@ impl Inner {
             return Ok(vec![]);
         }
         // Its gate's results after its last commit: the last one of each command counts.
-        let since = self.store.task_events(&task.id, "committed")?.last().map_or(0, |e| e.id);
+        let since = self.store.last_task_event(&task.id, "committed")?.map_or(0, |e| e.id);
         let mut results: Vec<(String, bool)> = vec![];
         for e in self.store.task_events(&task.id, "verified")?.into_iter().filter(|e| e.id > since) {
             if let EventKind::Verified { command, ok, .. } = e.kind {

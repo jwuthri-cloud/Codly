@@ -27,6 +27,14 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap()
 }
@@ -382,7 +390,7 @@ async fn review_comments_on_a_finished_plan_go_to_the_agent_that_wrote_the_file_
     assert_eq!(err, "this plan is merged into your branch; ask for the changes in a new request");
     let err = core.send_back_task(&t2.id, COMMENTS).await.unwrap_err().to_string();
     assert_eq!(err, "t2 is done and its work is merged; ask for the changes in a new request");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The worker leaves b.txt so that the plan's check fails through every fix round. You cancel
@@ -412,7 +420,7 @@ async fn a_review_task_that_does_not_finish_leaves_the_plan_as_it_was() {
     // The plan can be sent back again: a new task of its own.
     let second = core.send_back_plan(&plan.id, COMMENTS, &files()).await.unwrap();
     assert_eq!(second.key, "review-2");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Store a pull request for the plan as Codly keeps the one it opened, as last read.
@@ -454,7 +462,7 @@ async fn a_plan_that_cannot_take_review_comments_says_why() {
     assert!(!core.snapshot().await.unwrap().tasks.iter().any(|t| t.key.starts_with("review")), "no task was made");
     task_with(&core, "resolve", TaskStatus::Done).await;
     wait_plan(&core, PlanStatus::Done).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Ana wrote a.txt (t1), Bo wrote b.txt and c.txt (t2). Comments on all three go to Bo, who
@@ -490,5 +498,5 @@ async fn review_comments_go_to_the_agent_that_wrote_most_of_their_files_while_it
     let done = task_with(&core, "review-2", TaskStatus::Done).await;
     assert_ne!(done.assignee.as_deref(), Some(ana.id.as_str()));
     wait_plan(&core, PlanStatus::Done).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }

@@ -315,7 +315,7 @@ impl Inner {
         if task.status != TaskStatus::Blocked {
             return Ok(false);
         }
-        let last = self.store.task_events(&task.id, "decision")?.pop();
+        let last = self.store.last_task_event(&task.id, "decision")?;
         Ok(last.is_some_and(|e| matches!(&e.kind, EventKind::Decision { decision_type, detail, .. } if decision_type == "gate" && !detail["required"].is_null())))
     }
 
@@ -464,7 +464,7 @@ impl Inner {
         if !self.waits_for_checks(&self.task(&task.id)?)? {
             return Ok(None);
         }
-        let mark = self.store.task_events(&task.id, "decision")?.last().map_or(0, |e| e.id);
+        let mark = self.store.last_task_event(&task.id, "decision")?.map_or(0, |e| e.id);
         let held = self.recheck_task(&task.id, vec![], super::gate::Rerun::Codly).await?;
         if !held.is_empty() {
             let cmds: Vec<String> = held.iter().map(|h| format!("`{}`", prompts::clip(&h.command, 80))).collect();

@@ -378,13 +378,15 @@ impl Inner {
         }
         // The commands you ran to try work end with the app, inside the same wait.
         tokio::join!(self.wait_for_runs(tokio::time::Instant::now() + RUNS_GRACE), super::preview::stop_all(&self.cfg.data_dir));
-        self.runs_given_up.store(lock(&self.live).len(), Ordering::SeqCst);
         // Codex agents share one app-server per account; it outlives its threads.
         let codex_stopped = tokio::time::timeout(CODEX_GRACE, crate::adapters::codex::shutdown_server()).await.is_ok();
         if !codex_stopped {
             tracing::warn!("a Codex app-server did not stop in time");
         }
-        if !codex_stopped || !lock(&self.live).is_empty() {
+        // One read decides both: the runs counted as given up are the ones the kill is for.
+        let given_up = lock(&self.live).len();
+        self.runs_given_up.store(given_up, Ordering::SeqCst);
+        if !codex_stopped || given_up > 0 {
             let groups = child_groups().await;
             for g in &groups {
                 let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(*g), nix::sys::signal::Signal::SIGKILL);

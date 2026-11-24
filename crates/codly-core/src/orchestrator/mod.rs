@@ -265,14 +265,16 @@ struct Inner {
     shutting_down: AtomicBool,
     /// How many runs the last `shutdown` gave up waiting for (`Core::runs_given_up`).
     runs_given_up: std::sync::atomic::AtomicUsize,
-    /// Agent names and task keys by id, for readable knowledge-graph entities.
+    /// Agent names and task keys by id, for readable knowledge-graph entities. An agent's goes
+    /// when it is let go, a task's when it is done or cancelled, or its plan is closed.
     labels: Mutex<HashMap<Id, String>>,
     /// Every sign-in of every installed CLI, in your order (`limits` empty: see `quota`).
     accounts: RwLock<Vec<AccountInfo>>,
     /// Latest usage windows per account id (from RateLimit events; persisted in `kv`).
     quota: Mutex<HashMap<String, Vec<UsageWindow>>>,
-    /// Artifact files already announced (absolute path + size), so rewrites re-announce.
-    artifacts_seen: Mutex<HashSet<String>>,
+    /// Artifact files already announced (absolute path + size), so rewrites re-announce, by the
+    /// agent whose event named them (None: an event of no agent). An agent's go when it is let go.
+    artifacts_seen: Mutex<HashMap<Option<Id>, HashSet<String>>>,
     /// Files to copy into `artifacts/` and announce (`ingest::copy_artifacts` does it, so a
     /// copy never runs on the ingest task).
     artifact_copies: mpsc::UnboundedSender<ingest::ArtifactCopy>,
@@ -477,7 +479,7 @@ impl Core {
             labels: Mutex::new(HashMap::new()),
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
-            artifacts_seen: Mutex::new(HashSet::new()),
+            artifacts_seen: Mutex::new(HashMap::new()),
             artifact_copies,
             offers: Mutex::new(HashMap::new()),
             hiring_window_ms: std::sync::atomic::AtomicU64::new(0),
@@ -1422,7 +1424,8 @@ impl Inner {
     }
 
     fn update_task_as(&self, id: &str, by_user: bool, f: impl FnOnce(&mut Task) -> anyhow::Result<()>) -> anyhow::Result<Task> {
-        self.update_row(
+        let mut over = false;
+        let task = self.update_row(
             "task",
             id,
             |t: &mut Task| {
@@ -1431,11 +1434,16 @@ impl Inner {
                 if !by_user && t.status != was && matches!(was, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked) {
                     bail!("task {} is {}", t.key, store::enum_str(&was));
                 }
+                over = t.status != was && matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done);
                 Ok(())
             },
             |t: &Task| row(t.assignee.as_deref(), Some(&t.id), None, EventKind::TaskChanged { task: t.clone() }),
             |t| t.updated_at = now_ms(),
-        )
+        )?;
+        if over {
+            lock(&self.labels).remove(id);
+        }
+        Ok(task)
     }
 
     /// Load-modify-save an agent atomically, like `update_row`. A change to `LIVE_AGENT_FIELDS`
@@ -1443,6 +1451,7 @@ impl Inner {
     /// adds no `agent_changed` row to the event log: the tool and usage events that caused it
     /// are already there, and a full Agent per tool call would bury them.
     fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> anyhow::Result<Agent> {
+        let mut let_go = false;
         let (agent, ev, ws) = self.store.tx(|tx| {
             let (json, ws): (String, Option<String>) = tx
                 .query_row("SELECT json, workspace_id FROM agent WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -1450,7 +1459,9 @@ impl Inner {
                 .ok_or_else(|| anyhow!("unknown agent {id}"))?;
             let mut a: Agent = serde_json::from_str(&json)?;
             let before = serde_json::to_value(&a)?;
+            let was_archived = a.archived;
             f(&mut a);
+            let_go = a.archived && !was_archived;
             refresh_career(&mut a);
             let after = serde_json::to_value(&a)?;
             if after == before {
@@ -1469,17 +1480,31 @@ impl Inner {
         if let Some(ev) = ev {
             self.publish(ws.as_deref(), &ev);
         }
+        if let_go {
+            self.forget_agent_in_memory(&agent.id);
+        }
         Ok(agent)
     }
 
     fn update_plan(&self, id: &str, f: impl FnOnce(&mut Plan) -> anyhow::Result<()>) -> anyhow::Result<Plan> {
-        self.update_row(
+        let closed = |p: &Plan| matches!(p.status, PlanStatus::Done | PlanStatus::Failed | PlanStatus::Cancelled);
+        let mut closes = false;
+        let plan = self.update_row(
             "plan",
             id,
-            f,
+            |p: &mut Plan| {
+                let was = closed(p);
+                f(p)?;
+                closes = !was && closed(p);
+                Ok(())
+            },
             |p: &Plan| row(None, None, None, EventKind::PlanChanged { plan: p.clone() }),
             |p| p.updated_at = now_ms(),
-        )
+        )?;
+        if closes {
+            self.forget_plan_in_memory(&plan.id);
+        }
+        Ok(plan)
     }
 
     fn task(&self, id: &str) -> anyhow::Result<Task> {
