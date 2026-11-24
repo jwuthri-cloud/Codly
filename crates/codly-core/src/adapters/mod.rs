@@ -90,8 +90,10 @@ pub struct SpawnSpec {
     pub env: HashMap<String, String>,
     pub session: SessionMode,
     /// What the earlier runs on the resumed session cost together, as Codly counted them (0 for
-    /// a new session). For ACP agents: they report a session's cost as a running total, and the
-    /// adapter takes this off, so a run's cost starts from zero as with every other CLI.
+    /// a new session; not given to Codex). ACP agents report a session's cost as a running
+    /// total, and so does Claude Code in a `result` that has no cost of the turn's own (after
+    /// `--resume` its totals carry the earlier runs: 2.1.311 part 6, section 3): the adapter
+    /// takes this off, so a run's cost starts from zero as with every other CLI.
     pub session_cost_usd: f64,
     /// Static role rules, appended to the CLI's own system prompt where supported
     /// (Claude `--append-system-prompt`, Codex `developerInstructions`); for ACP agents
@@ -128,10 +130,13 @@ pub struct SpawnSpec {
     /// run, and every later turn of the process fails at once (2.1.311 part 4, section 10), so
     /// Codly ends the run there. Reached during a long tool call (a helper's request passed
     /// it: part 5, section 10, n=2): the turn ends, not the call, which runs on in no list
-    /// until stdin is closed, as the end of the run does. Not recorded: a limit reached while
-    /// a helper still has requests to make. Several Claude agents at once each hold the whole
-    /// rest, so together they can pass the budget until their turns end (the check between
-    /// turns stays). None: no limit of its own.
+    /// until stdin is closed, as the end of the run does (an interrupt does not end it;
+    /// `stop_task` with its task id does: part 6, section 6, n=2 each). One run's own total can
+    /// pass its limit: the requests on their way when it passed are finished and paid, and a
+    /// helper with requests left made one more (part 6, section 6: the totals ended 19% and
+    /// 45% above the limit, n=2; after the `result` nothing more came in 40 s). Several Claude
+    /// agents at once each hold the whole rest, so together they can pass the budget until
+    /// their turns end (the check between turns stays). None: no limit of its own.
     pub max_budget_usd: Option<f64>,
 }
 

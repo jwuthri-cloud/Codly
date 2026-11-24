@@ -301,6 +301,12 @@ impl Spawner for Talker {
 /// after each restart: every run is told what the runs before it cost together.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_resumed_opencode_session_is_told_what_it_cost_before() {
+    a_resumed_session_is_told_what_it_cost_before(Provider::Opencode).await;
+}
+
+/// The Lead on `provider` resumes its session after each restart: every run is told what the
+/// runs before it cost together.
+async fn a_resumed_session_is_told_what_it_cost_before(provider: Provider) {
     let dir = tempfile::tempdir().unwrap();
     let repo = temp_repo(dir.path());
     let told = Arc::new(Mutex::new(Vec::new()));
@@ -308,7 +314,7 @@ async fn a_resumed_opencode_session_is_told_what_it_cost_before() {
     let mut before = vec![];
     for say in ["hi", "back", "again"] {
         let spawner = Arc::new(Talker { told: told.clone(), turns: turns.clone() });
-        let core = start_with(dir.path(), &repo, spawner, Provider::Opencode).await;
+        let core = start_with(dir.path(), &repo, spawner, provider).await;
         // The Lead is the only agent: what the team used so far is what its session cost.
         let cost = core.breaker_status().await.unwrap().used.cost_usd;
         before.push(cost);
@@ -513,7 +519,7 @@ async fn a_turn_that_reaches_its_runs_own_limit_ends_that_run() {
     fake.then(&[Turn { cost: 1.05, reaches: true }]);
     core.send_chat(&thread, "Run three commands").await.unwrap();
     ended(1).await;
-    let budget = "Budget reached: the team has used about $1.05, over the cost budget of $1.00. To go on, raise the budget or press Reset counters in Settings → Autonomy & Budgets.";
+    let budget = "Budget reached: the team has used about $1.05, over the cost budget of $1.00. To go on, raise the budget or press Reset counters in Settings → Autonomy & Budgets. The total can end a little above the budget: a request that was on its way is finished.";
     assert_eq!(errors_of(&core, &agent.id).await, [budget]);
 
     // You raise the budget. The next message starts a new run with what is left now. Its turn
@@ -523,7 +529,8 @@ async fn a_turn_that_reaches_its_runs_own_limit_ends_that_run() {
     core.send_chat(&thread, "Again").await.unwrap();
     ended(2).await;
     let reached = claude::run_limit_reached(&agent.name, 3.95);
-    assert!(reached.contains("3.95 USD of your budget were left then") && reached.ends_with("Send your message again: the next run starts with what is left now."));
+    assert!(reached.contains("3.95 USD of your budget were left then") && reached.contains("Send your message again: the next run starts with what is left now."));
+    assert!(reached.ends_with("It can end a little above the limit: a request that was on its way is finished."), "{reached}");
     assert_eq!(errors_of(&core, &agent.id).await, [budget.to_string(), reached]);
 
     core.send_chat(&thread, "Hi").await.unwrap();
@@ -632,7 +639,7 @@ async fn a_worker_whose_run_reaches_its_limit_with_budget_left_starts_again() {
     let name = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == worker).unwrap().name;
     assert_eq!(
         errors_of(&core, &worker).await,
-        [format!("This run of {name} reached the limit it started with (1.00 USD of your budget were left then). Codly ends this run; the task's card says what comes next.")]
+        [format!("This run of {name} reached the limit it started with (1.00 USD of your budget were left then). Codly ends this run; the task's card says what comes next. It can end a little above the limit: a request that was on its way is finished.")]
     );
     shut_down(&core).await;
 }
@@ -686,7 +693,7 @@ async fn a_second_turn_at_the_runs_own_limit_says_the_same_and_moves_nothing() {
     wait_for("a second run", async || (fake.limits().len() >= 2).then_some(())).await;
     let worker = task_now(&core, &task.id).await.assignee.expect("the task keeps its worker");
     let name = core.snapshot().await.unwrap().agents.into_iter().find(|a| a.id == worker).unwrap().name;
-    let words = format!("This run of {name} reached the limit it started with (1.00 USD of your budget were left then). Codly ends this run; the task's card says what comes next.");
+    let words = format!("This run of {name} reached the limit it started with (1.00 USD of your budget were left then). Codly ends this run; the task's card says what comes next. It can end a little above the limit: a request that was on its way is finished.");
     assert_eq!(errors_of(&core, &worker).await, [words.clone(), words], "both failed turns say the same");
     assert_eq!(
         decisions(&core, "retry").await,
@@ -703,4 +710,12 @@ async fn a_second_turn_at_the_runs_own_limit_says_the_same_and_moves_nothing() {
         .collect();
     assert_eq!(told, Vec::<String>::new(), "no thread is told to send a message");
     core.shutdown().await;
+}
+
+/// Claude Code too: a `result` that has no cost of the turn's own leaves the adapter the
+/// session's total, which after `--resume` carries the earlier runs (2.1.311 part 6, section 3).
+/// Before, a resumed Claude session was told it cost nothing before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resumed_claude_session_is_told_what_it_cost_before() {
+    a_resumed_session_is_told_what_it_cost_before(Provider::Claude).await;
 }

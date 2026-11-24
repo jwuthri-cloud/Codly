@@ -362,7 +362,13 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
     }
     a.extend(["--tools".into(), tools_for(spec).join(",")]);
     // Strict = only Codly's server and the Connections; the user's own setup adds their MCP
-    // servers, plugins and project settings, as in their own Claude Code.
+    // servers, plugins and project settings, as in their own Claude Code. A folder you have
+    // not trusted always gets strict (`orchestrator/trust.rs`), also when "Use my Claude setup"
+    // is on. Dropping it there stays on hold (part 6 §1): the folder's own `.mcp.json` server
+    // started in none of 40 recordings, but under `--setting-sources user,local` the folder's
+    // `.claude/settings.local.json` switched on a plugin the user had turned off, and that
+    // plugin's MCP server started (4 of 4); a plugin the user never installed, named by a file
+    // of the folder, is not recorded.
     if !spec.use_user_setup {
         a.push("--strict-mcp-config".into());
     }
@@ -403,9 +409,13 @@ pub fn run_limit_reached(agent: &str, limit_usd: f64) -> String {
     run_limit_reached_then(agent, limit_usd, "Send your message again: the next run starts with what is left now.")
 }
 
-/// The same words with `next`, what comes next for that run, as their last sentence.
+/// The same words with `next`, what comes next for that run. They end by saying that the run
+/// can cost a little more than its limit: Claude Code finishes the model requests that were on
+/// their way when the limit passed (part 6 §6: the totals ended 19% and 45% above it, n=2).
 pub fn run_limit_reached_then(agent: &str, limit_usd: f64, next: &str) -> String {
-    format!("This run of {agent} reached the limit it started with ({limit_usd:.2} USD of your budget were left then). {next}")
+    format!(
+        "This run of {agent} reached the limit it started with ({limit_usd:.2} USD of your budget were left then). {next} It can end a little above the limit: a request that was on its way is finished."
+    )
 }
 
 /// Does `said` (a failed turn's reason) say that the run of `agent` reached its limit?
@@ -808,8 +818,10 @@ impl Actor {
             self.cancels_queued = can("interrupt_cancel_queued_v1");
         }
         // No prompt of Codly's opened this turn: the CLI started it by itself (a background task
-        // that ended woke it). `system/init` opens every turn, and a `result` ends one: it never
-        // comes for a turn that is not open.
+        // that ended woke it; a helper stopped during the last model request of a turn wakes it
+        // after that turn's `result`, a stopped command does not: part 6 §5, n=2 and n=5).
+        // `system/init` opens every turn, and a `result` ends one: it never comes for a turn
+        // that is not open.
         if !self.turn_active && (init || v["type"] == "result") {
             self.open_turn(None);
         }
@@ -1168,7 +1180,11 @@ impl Actor {
     /// of the CLI's last list. With a helper AND a command in the background and no turn
     /// running (part 5 §5, `r7-shutdown-helper-and-command-*`, n=2): the interrupt ends the
     /// helper and leaves the command listed, `stop_task` ends the command, and the process
-    /// exits 0.70 s after stdin is closed, with nothing left in its process group.
+    /// exits 0.70 s after stdin is closed, with nothing left in its process group. With a turn,
+    /// a helper and a command at once (part 6 §11, `r8-shutdown-all-*`, n=2): the interrupt
+    /// ends the helper and the turn and leaves the command listed, `stop_task` after the turn's
+    /// `result` ends the command, and the process exits 0.73 s after stdin is closed, with
+    /// nothing left in its group.
     async fn wind_down(&mut self) {
         self.drop_unsent();
         let commands = self.norm.commands_in_background();
@@ -1485,6 +1501,9 @@ pub struct ClaudeNormalizer {
     pub outbox: Vec<Value>,
     /// What a turn that reached the run's own spending limit says (`SpawnSpec::max_budget_usd`).
     run_limit: Option<String>,
+    /// What the earlier runs on a resumed session cost (`SpawnSpec::session_cost_usd`): the
+    /// session's totals of a `result` include it (`on_result`).
+    cost_before: f64,
 }
 
 impl ClaudeNormalizer {
@@ -1528,6 +1547,7 @@ impl ClaudeNormalizer {
             interrupt_requested: false,
             outbox: Vec::new(),
             run_limit: spec.max_budget_usd.map(|usd| run_limit_reached(&spec.agent_name, usd)),
+            cost_before: spec.session_cost_usd,
         }
     }
 
@@ -1676,7 +1696,9 @@ impl ClaudeNormalizer {
             // A heartbeat every 30 s while a tool call runs, with the call's id in
             // `parent_tool_use_id` and no output: a life sign for the watchdog. Recorded for a
             // Bash call (part 2 §8), a tool of an MCP server and the `Agent` call that waits for
-            // a subagent (part 3 §3, `r5-tool-progress-mcp` and `-subagent`, n=1 each). A Bash
+            // a subagent (part 3 §3, `r5-tool-progress-mcp` and `-subagent`, n=1 each), and a
+            // slow tool of an HTTP MCP server, whatever its server sends meanwhile (part 6 §10,
+            // `r8-http-slow-*`, n=2 per kind: its progress notifications add no line). A Bash
             // call inside a subagent has none of its own: the `Agent` call's stands for it.
             // WebFetch and WebSearch are not recorded (`watchdog::has_heartbeat`). Every
             // recorded line names its call; one that names none says nothing.
@@ -1988,10 +2010,13 @@ impl ClaudeNormalizer {
     /// 3 §1, part 4 §2), and after an interrupt for every subagent (part 4 §1, part 5 §4). A
     /// command the agent waits for becomes a task about 3 s after its call starts (`local_bash`,
     /// `is_backgrounded` false, the call's `tool_use_id`): its `task_notification` (its own task
-    /// id, an empty `output_file`; "completed" when it ends by itself, written just before the
-    /// call's result, with no `task_updated` and no list line: part 5 §12,
-    /// `r7-bash-becomes-task-*`, n=2 per duration; "stopped" at an interrupt: part 4 §1) ends no
-    /// subagent and no listed task. The call's own result ends it.
+    /// id; "completed" when it ends by itself, written just before the call's result, with no
+    /// `task_updated` and no list line: part 5 §12, `r7-bash-becomes-task-*`, n=2 per duration;
+    /// "failed" when it ends by itself with another exit code than 0, and "stopped" at an
+    /// interrupt: part 6 §7, `r8-bash-task-fails-*`, n=2, and part 4 §1) ends no subagent and no
+    /// listed task. The call's own result ends it. Its `output_file` is empty in those lines,
+    /// but not always: a call cut off by a budget stop, ended when stdin closed, names a file
+    /// there (part 5 §10, `r7-budget-during-call-1-t1`). Codly does not read it.
     fn on_task(&mut self, subtype: &str, v: &Value, out: &mut Vec<EventKind>) {
         if subtype == "task_notification"
             && let (Some(task_id), Some(word)) = (v["task_id"].as_str(), v["status"].as_str())
@@ -2463,10 +2488,15 @@ impl ClaudeNormalizer {
             return;
         }
         self.flush_text(MessagePhase::Final, out);
-        // Per-turn delta: `model_usage_since_last_result` (modelUsage and total_cost_usd are
-        // session-cumulative, including earlier runs after --resume).
+        // Per-turn delta: `model_usage_since_last_result`. `modelUsage` and `total_cost_usd` are
+        // the session's totals: with this process's earlier turns, and after `--resume` with
+        // what the earlier runs cost (part 6 §3, `r8-fork-*`, n=2: the first `total_cost_usd`
+        // after a resume or a fork is the old total plus the new turn, to the last digit). So
+        // a turn's cost from one of them is that total less what the earlier runs cost
+        // (`cost_before`) and less what this process counted before.
         let (mut input, mut output, mut cache_r, mut cache_w, mut cost, mut window) = (0, 0, 0, 0, 0.0, None::<i64>);
-        let per_model = v["model_usage_since_last_result"].as_object().or(v["modelUsage"].as_object());
+        let per_turn = v["model_usage_since_last_result"].as_object();
+        let per_model = per_turn.or(v["modelUsage"].as_object());
         if let Some(models) = per_model {
             for m in models.values() {
                 input += m["inputTokens"].as_i64().unwrap_or(0);
@@ -2481,7 +2511,10 @@ impl ClaudeNormalizer {
             output = u["output_tokens"].as_i64().unwrap_or(0);
             cache_r = u["cache_read_input_tokens"].as_i64().unwrap_or(0);
             cache_w = u["cache_creation_input_tokens"].as_i64().unwrap_or(0);
-            cost = v["total_cost_usd"].as_f64().unwrap_or(0.0) - self.usage.cost_usd.unwrap_or(0.0);
+            cost = v["total_cost_usd"].as_f64().unwrap_or(0.0);
+        }
+        if per_turn.is_none() {
+            cost -= self.cost_before + self.usage.cost_usd.unwrap_or(0.0);
         }
         for m in v["modelUsage"].as_object().into_iter().flat_map(|m| m.values()) {
             if let Some(w) = m["contextWindow"].as_i64() {
@@ -2558,9 +2591,10 @@ impl ClaudeNormalizer {
         // its model answer, the same way: part 5 §4, n=2 each), so none is left here. A turn that
         // fails by a limit (`error_max_turns`) ends no background subagent: it stays listed,
         // ends by its own `task_notification`, and the CLI then starts a turn by itself (part 5
-        // §3, `r7-failed-turn-helper-*`, n=2); so it stays here, as after a completed turn. Not
-        // recorded: a turn that fails by an API error, or by the budget while a subagent still
-        // has requests to make.
+        // §3, `r7-failed-turn-helper-*`, n=2); so it stays here, as after a completed turn. So
+        // does one at a budget stop: the CLI ends it after the `result`, and its own lines say
+        // so (part 6 §6, `r8-after-budget-helper-goes-on-2-t2`, n=1). Not recorded: a turn that
+        // fails by an API error while a subagent works.
         self.helpers.retain(|id, h| {
             if !h.done && !h.background {
                 out.push(EventKind::SubAgent { call_id: id.clone(), description: h.description.clone(), status: "stopped".into() });
@@ -2569,6 +2603,10 @@ impl ClaudeNormalizer {
         });
         let helpers = &self.helpers;
         self.tools.retain(|_, t| t.helper.as_ref().is_some_and(|h| helpers.contains_key(h)));
+        // A call is repeated only in the lines of its own turn: the ids of the calls that are
+        // over go, or the set would grow with every call of a long run.
+        let open = &self.tools;
+        self.tools_seen.retain(|id| open.contains_key(id));
         self.user_denied.clear();
         self.denials_known.clear();
         self.set_status(AgentStatus::Idle, out);
@@ -2842,8 +2880,10 @@ fn written_by_the_cli(v: &Value) -> bool {
 /// back: allow rules for the tool that asked, and directories inside the agent's own folder.
 /// Never `setMode`: sent back, it puts the whole session in another permission mode
 /// (recorded, cli-claude-stream-json-2.1.311 §10; for an Edit request's own and only
-/// suggestion too, part 5 §7, `r7-allow-set-mode-*`, n=2), which is more than the request you
-/// approved. A directory outside `cwd` would let later edits there pass without a question.
+/// suggestion too, part 5 §7, `r7-allow-set-mode-*`, n=2; for a Bash request's, and for a
+/// mode the request did not suggest, `plan` and `dontAsk`: part 6 §9, `r8-bash-set-mode-*`,
+/// n=2 per variant), which is more than the request you approved. A directory outside `cwd`
+/// would let later edits there pass without a question.
 fn grantable(tool: &str, suggestions: &Value, cwd: &Path) -> Vec<Value> {
     let keep = |s: &&Value| match s["type"].as_str() {
         Some("addRules") => s["behavior"] == "allow" && s["rules"].as_array().is_some_and(|r| !r.is_empty() && r.iter().all(|r| r["toolName"] == tool)),
@@ -3718,6 +3758,13 @@ mod tests {
         sp.use_user_setup = false;
         let a = joined(&sp);
         assert!(a.contains("--setting-sources user --") && a.contains("--strict-mcp-config") && !a.contains("ToolSearch"));
+        // Also with the folder's local settings file: under `user,local` that file can switch on
+        // a plugin you turned off, whose MCP server then starts (part 6 §1, n=4). So such a
+        // folder gets only Codly's servers, with and without that file.
+        for local_settings in [false, true] {
+            let a = joined(&SpawnSpec { use_user_setup: false, local_settings, ..spec(Role::Solo, false) });
+            assert!(a.contains("--strict-mcp-config"), "local settings {local_settings}: {a}");
+        }
         // the Lead stays read-only either way
         let lead = joined(&SpawnSpec { use_user_setup: true, ..spec(Role::Lead, true) });
         assert!(lead.contains("Skill,LSP") && !lead.contains("Bash") && !lead.contains("Monitor"));
@@ -4542,7 +4589,7 @@ mod tests {
     #[test]
     fn a_turn_that_reaches_the_runs_own_limit_says_what_to_do() {
         let limited = SpawnSpec { max_budget_usd: Some(0.01), session: SessionMode::Resume { session_id: "sess-1".into() }, ..spec(Role::Solo, false) };
-        let reason = "This run of Ada reached the limit it started with (0.01 USD of your budget were left then). Send your message again: the next run starts with what is left now.";
+        let reason = "This run of Ada reached the limit it started with (0.01 USD of your budget were left then). Send your message again: the next run starts with what is left now. It can end a little above the limit: a request that was on its way is finished.";
         for name in ["r6-budget-midturn-1-c1", "r6-budget-midturn-1-c3"] {
             let mut norm = ClaudeNormalizer::new(&limited, "sess-1".into());
             let mut events = norm.turn_started("Run the Bash command `echo one`, then `echo two`, then `echo three`");
@@ -6516,7 +6563,14 @@ mod tests {
         events.extend(replay(&mut norm, &recorded("r7-budget-during-call-1-t1")));
         let reason = run_limit_reached("Ada", 0.01);
         assert_eq!(turn_ends(&events), [(TurnStatus::Failed, Some(reason.as_str())); 3]);
-        assert!(is_run_limit_reached(&reason, "Ada", 0.01), "the words Codly ends the run by");
+        // What the adapter made of the recorded `result` lines is what Codly ends the run by.
+        let said: Vec<&str> = errors(&events).into_iter().map(|(message, _)| message).filter(|m| is_run_limit_reached(m, "Ada", 0.01)).collect();
+        assert!(!said.is_empty(), "{events:?}");
+        for (_, ended) in turn_ends(&events) {
+            let ended = ended.expect("a failed turn says why");
+            assert!(is_run_limit_reached(ended, "Ada", 0.01), "{ended}");
+            assert!(!is_run_limit_reached(ended, "Ada", 0.02) && !is_run_limit_reached(ended, "Bob", 0.01), "the words name this run and its limit");
+        }
         assert!(!is_run_limit_reached("Claude Code reached its spending limit, so it does no more work in this run", "Ada", 0.01));
 
         let helper_end = events.iter().position(|e| matches!(e, EventKind::SubAgent { status, .. } if status == "completed")).expect("the helper's end");
@@ -6526,5 +6580,353 @@ mod tests {
         let helper = "Write lighthouse keeper story";
         assert_eq!(background_lines(&events), [format!("tid-1 helper: {helper} | -"), format!("- | tid-1 helper completed: {helper}")], "the call is in no list");
         assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{events:?}");
+    }
+
+    // ───── part 6 of the 2.1.311 recordings (`r8-*`) ─────
+
+    /// The cost the adapter last reported for the run.
+    fn last_cost(events: &[EventKind]) -> f64 {
+        events.iter().rev().find_map(|e| if let EventKind::UsageUpdated { usage } = e { usage.cost_usd } else { None }).expect("a usage event")
+    }
+
+    /// What a `result` line says the turn's own model requests cost.
+    fn own_cost(result: &Value) -> f64 {
+        result["model_usage_since_last_result"].as_object().into_iter().flat_map(|m| m.values()).filter_map(|m| m["costUSD"].as_f64()).sum()
+    }
+
+    /// Recordings `r8-bash-task-fails-1` and `-2` (part 6 §7, n=2): a command the agent waits
+    /// for becomes a task and fails by itself (exit code 3: "failed"), and one is cut by an
+    /// interrupt ("stopped"). Each `task_notification` has an empty `output_file`, and ends no
+    /// helper row and no background row: each call ends once, by its own result.
+    #[test]
+    fn a_command_the_agent_waits_for_that_fails_or_is_interrupted_ends_nothing_as_recorded() {
+        for name in ["r8-bash-task-fails-1", "r8-bash-task-fails-2"] {
+            let lines = recorded(name);
+            let ends: Vec<&Value> = lines.iter().filter(|l| l["subtype"] == "task_notification").collect();
+            assert_eq!(ends.iter().map(|l| l["status"].as_str().unwrap()).collect::<Vec<_>>(), ["failed", "stopped"], "{name}");
+            assert!(ends.iter().all(|l| l["output_file"] == ""), "{name}");
+            let calls: Vec<&str> = ends.iter().map(|l| l["tool_use_id"].as_str().unwrap()).collect();
+
+            let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+            let events = replay(&mut norm, &lines);
+            assert!(subagent_lines(&events).is_empty(), "{name}: {events:?}");
+            assert!(background_lines(&events).is_empty(), "{name}: {events:?}");
+            let completed: Vec<(&str, bool, Option<i64>)> = events
+                .iter()
+                .filter_map(|e| if let EventKind::ToolCompleted { call_id, ok, exit_code, .. } = e { Some((call_id.as_str(), *ok, *exit_code)) } else { None })
+                .collect();
+            assert_eq!(completed, [(calls[0], false, Some(3)), (calls[1], false, None)], "{name}: once each, by the call's own result");
+            assert_eq!(turn_ends(&events).iter().map(|t| t.0).collect::<Vec<_>>(), [TurnStatus::Completed, TurnStatus::Interrupted], "{name}");
+            assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{name}: {events:?}");
+            assert!(norm.background.is_empty() && norm.helpers.is_empty(), "{name}");
+        }
+    }
+
+    /// Recordings `r8-shutdown-all-1` and `-2` (part 6 §11, n=2): the stop of an agent with a
+    /// turn running, a helper and a command in the background at once. The interrupt ends the
+    /// helper (its row ends as "stopped") and the turn, and the list still names the command;
+    /// `stop_task` for the command goes out right after the turn's `result`, as the driver
+    /// sent it; stdin is closed when the list is empty. The recorded process exited 0.73 s
+    /// later with nothing left in its group.
+    #[tokio::test]
+    async fn a_stop_with_a_turn_a_helper_and_a_command_at_once_ends_each_as_recorded() {
+        for name in ["r8-shutdown-all-1", "r8-shutdown-all-2"] {
+            let mut cli = Replay::of(name);
+            let kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "interrupt").await;
+            assert_eq!(turns(&kinds), ["start:Do", "end:Completed", "start:Run"], "{name}");
+            assert!(cli.actor.turn_active && cli.actor.norm.helpers_in_background(), "{name}");
+            assert_eq!(cli.actor.norm.commands_in_background(), ["tid-2"], "{name}");
+
+            // 1. The interrupt: the helper and the turn end, the command stays listed.
+            cli.in_place_of_the_drivers_request(AgentCmd::Shutdown).await;
+            assert_eq!(cli.actor.stage, Stage::Interrupting, "{name}");
+            let kinds = cli.play(|l| l["type"] == "result").await;
+            assert_eq!(turns(&kinds), ["end:Interrupted"], "{name}");
+            let ends = subagent_ends(&kinds);
+            assert!(ends.len() == 1 && ends[0].starts_with("toolu-2 stopped: "), "{name}: {ends:?}");
+            let listed = background_lines(&kinds);
+            assert!(listed.len() == 1 && listed[0].starts_with("tid-2 command: ") && listed[0].contains(" | tid-1 helper stopped: "), "{name}: {listed:?}");
+
+            // 2. `stop_task` for the command, written with no wait after that result.
+            assert_eq!(last_sent(cli.dir.path())["request"], json!({ "subtype": "stop_task", "task_id": "tid-2" }), "{name}");
+            assert!(cli.actor.stage == Stage::StoppingTasks && cli.actor.stdin.is_some(), "{name}: {:?}", cli.actor.stage);
+            let kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "stop_task").await;
+            assert!(kinds.is_empty(), "{name}: {kinds:?}");
+            let recorded = cli.drivers_request.take().expect("the driver's stop_task");
+            assert_eq!(recorded["request"], last_sent(cli.dir.path())["request"], "{name}: the request the driver sent");
+
+            // 3. The command's end and the empty list: not shown as this agent's work; stdin closes.
+            let rest = cli.play(|_| false).await;
+            assert!(rest.is_empty(), "{name}: {rest:?}");
+            assert!(cli.actor.stage == Stage::Closing && cli.actor.stdin.is_none(), "{name}: {:?}", cli.actor.stage);
+            assert_eq!(requests_sent(cli.dir.path()), ["interrupt", "stop_task"], "{name}");
+            assert!(cli.actor.norm.background.is_empty() && cli.actor.norm.helpers.is_empty(), "{name}: nothing is left");
+        }
+    }
+
+    /// Recordings `r8-stop-helper-last-request-1` and `-2` (part 6 §5, n=2): "Stop" on a
+    /// background helper while the turn makes its last model request. The helper's row ends as
+    /// "stopped", the turn ends as it would, and then the CLI starts a turn by itself to tell
+    /// the model: a turn with no prompt, which takes none of Codly's.
+    #[tokio::test]
+    async fn a_helper_stopped_in_the_last_request_of_a_turn_wakes_a_turn_of_its_own_as_recorded() {
+        for name in ["r8-stop-helper-last-request-1", "r8-stop-helper-last-request-2"] {
+            let mut cli = Replay::of(name);
+            let mut kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "stop_task").await;
+            assert_eq!(turns(&kinds), ["start:Use", "end:Completed", "start:Write"], "{name}");
+            let task = cli.drivers_request.as_ref().unwrap()["request"]["task_id"].as_str().unwrap().to_string();
+            let (reply, mut answer) = mpsc::unbounded_channel();
+            cli.in_place_of_the_drivers_request(AgentCmd::Session { request: SessionRequest::StopTask(task), reply }).await;
+            kinds.extend(cli.play(|_| false).await);
+            assert_eq!(answer.try_recv().expect("the CLI's answer reaches whoever asked"), Ok(json!({})), "{name}");
+
+            assert_eq!(turns(&kinds), ["start:Use", "end:Completed", "start:Write", "end:Completed", "start", "end:Completed"], "{name}");
+            let ends = subagent_ends(&kinds);
+            assert!(ends.len() == 1 && ends[0].starts_with("toolu-1 stopped: "), "{name}: {ends:?}");
+            assert_eq!(cli.written().len(), 2, "{name}: the turn by itself took no prompt");
+            assert!(cli.actor.waiting.is_empty() && cli.actor.queue.is_empty() && !cli.actor.turn_active, "{name}");
+            assert!(cli.actor.norm.background.is_empty() && cli.actor.norm.helpers.is_empty(), "{name}");
+            assert!(!kinds.iter().any(|k| matches!(k, EventKind::Unknown { .. })), "{name}: {kinds:?}");
+        }
+    }
+
+    /// Recordings `r8-stop-command-mid-turn-1`, `-3` and `-4` (part 6 §5, n=3): "Stop" on a
+    /// background command while a turn runs its own command. The command leaves the list as
+    /// "stopped", the turn's own call completes, and no turn follows.
+    #[tokio::test]
+    async fn a_command_stopped_while_a_turn_runs_wakes_no_turn_as_recorded() {
+        for name in ["r8-stop-command-mid-turn-1", "r8-stop-command-mid-turn-3", "r8-stop-command-mid-turn-4"] {
+            let mut cli = Replay::of(name);
+            let mut kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "stop_task").await;
+            assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start:Run"], "{name}");
+            let task = cli.drivers_request.as_ref().unwrap()["request"]["task_id"].as_str().unwrap().to_string();
+            assert_eq!(cli.actor.norm.commands_in_background(), [task.clone()], "{name}");
+            let (reply, mut answer) = mpsc::unbounded_channel();
+            cli.in_place_of_the_drivers_request(AgentCmd::Session { request: SessionRequest::StopTask(task.clone()), reply }).await;
+            kinds.extend(cli.play(|_| false).await);
+            assert_eq!(answer.try_recv().expect("the CLI's answer reaches whoever asked"), Ok(json!({})), "{name}");
+
+            assert_eq!(turns(&kinds), ["start:Run", "end:Completed", "start:Run", "end:Completed"], "{name}: no turn by itself");
+            assert!(subagent_lines(&kinds).is_empty(), "{name}: {kinds:?}");
+            let listed = background_lines(&kinds);
+            assert!(listed.last().is_some_and(|l| l.starts_with(&format!("- | {task} command stopped: "))), "{name}: {listed:?}");
+            let own = kinds.iter().filter(|k| matches!(k, EventKind::ToolCompleted { call_id, ok: true, .. } if call_id == "toolu-2")).count();
+            assert_eq!(own, 1, "{name}: the turn's own call ran to its end");
+            assert!(cli.actor.norm.background.is_empty() && !cli.actor.turn_active, "{name}");
+            assert!(!kinds.iter().any(|k| matches!(k, EventKind::Unknown { .. })), "{name}: {kinds:?}");
+        }
+    }
+
+    /// Recordings `r8-after-budget-*` (part 6 §6, n=2 per variant: an interrupt after the stop,
+    /// `stop_task` for the call that runs on, a helper with requests left). Every turn fails
+    /// with the run's own reason; the turn costs what its own requests cost (the turn the CLI
+    /// starts by itself after it costs nothing). After the last `result` the lines make no row:
+    /// the end of the call that ran on is in no list and has no result. Only a helper that was
+    /// still at work at the stop ends there, once, as "stopped" (n=1).
+    #[test]
+    fn after_a_budget_stop_later_lines_make_no_rows_and_the_turn_costs_its_own_as_recorded() {
+        let tries = [
+            "r8-after-budget-interrupt-1-t2",
+            "r8-after-budget-interrupt-2-t2",
+            "r8-after-budget-stop-task-1-t1",
+            "r8-after-budget-stop-task-2-t2",
+            "r8-after-budget-helper-goes-on-1-t3",
+            "r8-after-budget-helper-goes-on-2-t2",
+        ];
+        let limited = SpawnSpec { max_budget_usd: Some(0.001), ..spec(Role::Solo, false) };
+        let reason = run_limit_reached("Ada", 0.001);
+        for name in tries {
+            let lines = recorded(name);
+            let results: Vec<&Value> = lines.iter().filter(|l| l["type"] == "result").collect();
+            assert!(results.iter().all(|r| r["subtype"] == "error_max_budget_usd"), "{name}");
+            let last = lines.iter().rposition(|l| l["type"] == "result").unwrap();
+
+            let mut norm = ClaudeNormalizer::new(&limited, "sess-1".into());
+            let mut events = norm.turn_started("Do these steps in order");
+            events.extend(replay(&mut norm, &lines[..=last]));
+            let ends = turn_ends(&events);
+            assert!(!ends.is_empty() && ends.iter().all(|end| *end == (TurnStatus::Failed, Some(reason.as_str()))), "{name}: {ends:?}");
+            let own: f64 = results.iter().map(|r| own_cost(r)).sum();
+            assert!((last_cost(&events) - own).abs() < 1e-12, "{name}: {} vs {own}", last_cost(&events));
+            let helper_at_work = norm.helpers.values().any(|h| !h.done);
+
+            let after = replay(&mut norm, &lines[last + 1..]);
+            let rows: Vec<&EventKind> = after.iter().filter(|e| !matches!(e, EventKind::SubAgent { .. } | EventKind::SubAgentProgress { .. } | EventKind::BackgroundTasks { .. })).collect();
+            assert!(rows.is_empty(), "{name}: {rows:?}");
+            if helper_at_work {
+                let ends = subagent_ends(&after);
+                assert!(ends.len() == 1 && ends[0].starts_with("toolu-1 stopped: "), "{name}: {ends:?}");
+            } else {
+                assert!(after.is_empty(), "{name}: {after:?}");
+            }
+            assert!(norm.helpers.values().all(|h| h.done), "{name}: nothing is left open");
+        }
+    }
+
+    /// Recordings `r8-bash-set-mode-*` (part 6 §9, n=2 per variant): the CLI obeys the mode a
+    /// `setMode` item of an allow names, the request's own (`acceptEdits`) and any other
+    /// (`plan`, `dontAsk`), and an `addRules` item sent back is written to the folder's
+    /// settings. So whatever Codly sends for "once", "for this session" and "always" carries
+    /// no mode and no rule for another tool than the one that asked. (A rule for another tool
+    /// is added here to the recorded request: no recording has one.)
+    #[test]
+    fn an_allow_never_sends_a_mode_or_a_rule_for_another_tool_as_recorded() {
+        let other_tool = json!({ "type": "addRules", "rules": [{ "toolName": "Edit", "ruleContent": "**" }], "behavior": "allow", "destination": "localSettings" });
+        for variant in ["only-set-mode", "all", "plan", "dont-ask"] {
+            for label in [1, 2] {
+                let name = format!("r8-bash-set-mode-{variant}-{label}");
+                let lines = recorded(&name);
+                let asked = lines.iter().find(|l| l["request"]["subtype"] == "can_use_tool").expect("the recorded request").clone();
+                let suggested: Vec<&str> = asked["request"]["permission_suggestions"].as_array().unwrap().iter().filter_map(|s| s["type"].as_str()).collect();
+                assert_eq!(suggested, ["addRules", "addDirectories", "setMode"], "{name}");
+                let mut widened = asked.clone();
+                widened["request"]["permission_suggestions"].as_array_mut().unwrap().push(other_tool.clone());
+
+                for request in [&asked, &widened] {
+                    for choice in [ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::AllowAlways] {
+                        let mut s = spec(Role::Solo, false);
+                        s.cwd = PathBuf::from(format!("/tmp/work/{name}"));
+                        let mut norm = ClaudeNormalizer::new(&s, "sess-1".into());
+                        let a = approval_of(&norm.on_message(request));
+                        assert!(a.choices.contains(&choice), "{name}: {:?}", a.choices);
+                        let (reply, _) = norm.answer(&a.id, &ApprovalDecision { choice, message: None, answers: None }).unwrap();
+                        let granted = &reply["response"]["response"]["updatedPermissions"];
+                        if choice == ApprovalChoice::AllowOnce {
+                            assert!(granted.is_null(), "{name}: {granted}");
+                            continue;
+                        }
+                        let granted = granted.as_array().unwrap_or_else(|| panic!("{name} {choice:?}: {reply}"));
+                        assert!(!granted.is_empty(), "{name}");
+                        for item in granted {
+                            assert!(item["mode"].is_null(), "{name} {choice:?}: {item}");
+                            match item["type"].as_str() {
+                                Some("addRules") => assert!(item["rules"].as_array().unwrap().iter().all(|r| r["toolName"] == "Bash"), "{name} {choice:?}: {item}"),
+                                Some("addDirectories") => {}
+                                _ => panic!("{name} {choice:?}: {item}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recordings `r8-http-slow-*` (part 6 §10, n=2 per kind): a tool of an HTTP MCP server
+    /// that takes 70 s, with an event stream, with progress notifications, and with a JSON
+    /// answer given more time. In each the only lines while it runs are the CLI's heartbeats
+    /// at 30 and 60 s, each a life sign of that call for the watchdog (`has_heartbeat`).
+    #[test]
+    fn a_slow_tool_of_an_http_server_gives_a_life_sign_every_30_s_as_recorded() {
+        for variant in ["sse", "progress", "json-env", "json-timeout"] {
+            for label in [1, 2] {
+                let name = format!("r8-http-slow-{variant}-{label}");
+                let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+                let mut events = norm.turn_started("Call the tool mcp__ping-http__ping once");
+                events.extend(replay(&mut norm, &recorded(&name)));
+                assert_eq!(tool_calls(&events), [("toolu-1", "mcp__ping-http__ping")], "{name}");
+                let signs: Vec<&str> = events.iter().filter_map(|e| if let EventKind::ToolProgress { call_id } = e { Some(call_id.as_str()) } else { None }).collect();
+                assert_eq!(signs, ["toolu-1", "toolu-1"], "{name}");
+                let done = events.iter().any(|e| matches!(e, EventKind::ToolCompleted { call_id, ok: true, output: Some(out), .. } if call_id == "toolu-1" && out.contains("pong after 70 s")));
+                assert!(done, "{name}: {events:?}");
+                assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{name}: {events:?}");
+            }
+        }
+    }
+
+    /// Recordings `r8-fork-1-b` (a fork: a new session id), `r8-fork-1-d` and `r8-rewind-1-b`
+    /// (a resume and a rewind: the same id), part 6 §2 and §3, n=2 with the `-2` runs. Each
+    /// `init` is read as the start of any run, and the turn costs its own requests
+    /// (`model_usage_since_last_result`), not the line's `total_cost_usd`, which carries the
+    /// session's earlier turns.
+    #[test]
+    fn a_fork_a_resume_and_a_rewind_start_as_any_run_and_cost_their_own_turn_as_recorded() {
+        for (name, session) in [("r8-fork-1-b", "sess-2"), ("r8-fork-1-d", "sess-1"), ("r8-rewind-1-b", "sess-1")] {
+            let lines = recorded(name);
+            let result = lines.iter().find(|l| l["type"] == "result").unwrap();
+            let (own, total) = (own_cost(result), result["total_cost_usd"].as_f64().unwrap());
+            assert!(own > 0.0 && own < total, "{name}: {own} {total}");
+            let resumed = SpawnSpec { session: SessionMode::Resume { session_id: "sess-1".into() }, session_cost_usd: total - own, ..spec(Role::Solo, false) };
+            let mut norm = ClaudeNormalizer::new(&resumed, "sess-1".into());
+            let mut events = norm.turn_started("List every secret word I asked you to remember");
+            events.extend(replay(&mut norm, &lines));
+            let starts: Vec<Option<&str>> = events.iter().filter_map(|e| if let EventKind::SessionStarted { session_id, .. } = e { Some(session_id.as_deref()) } else { None }).collect();
+            assert_eq!(starts, [Some(session)], "{name}");
+            assert_eq!(turn_ends(&events).iter().map(|t| t.0).collect::<Vec<_>>(), [TurnStatus::Completed], "{name}");
+            assert!((last_cost(&events) - own).abs() < 1e-12, "{name}: {}", last_cost(&events));
+            assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{name}: {events:?}");
+        }
+    }
+
+    /// A `result` with no `model_usage_since_last_result` (no 2.1.311 line lacks it; an older
+    /// or a later CLI may): its cost comes from the session's totals, `modelUsage` or else
+    /// `total_cost_usd`. After `--resume` those carry what the earlier runs cost (part 6 §3).
+    /// Before, a new process counted all of it again; now what the session cost before
+    /// (`SpawnSpec::session_cost_usd`) is taken off once, and the next turn of the process
+    /// costs only what it added. The line is `r8-fork-1-d`'s, with the key taken out.
+    #[test]
+    fn a_resumed_session_is_not_charged_again_when_a_result_has_no_cost_of_its_own() {
+        let lines = recorded("r8-fork-1-d");
+        let full = lines.iter().find(|l| l["type"] == "result").unwrap().clone();
+        // Part 6 §3, label 1: a's last `total_cost_usd`, and d's own turn.
+        let (before, own) = (0.00080338, 0.00006082);
+        let total = full["total_cost_usd"].as_f64().unwrap();
+        assert!((total - (before + own)).abs() < 1e-12, "{total}");
+        let mut session_totals = full.clone();
+        session_totals.as_object_mut().unwrap().remove("model_usage_since_last_result");
+        let mut total_only = session_totals.clone();
+        total_only.as_object_mut().unwrap().remove("modelUsage");
+
+        let resumed = SpawnSpec { session: SessionMode::Resume { session_id: "sess-1".into() }, session_cost_usd: before, ..spec(Role::Solo, false) };
+        let new = spec(Role::Solo, false);
+        let cost_of = |spec: &SpawnSpec, results: &[&Value]| {
+            let mut norm = ClaudeNormalizer::new(spec, "sess-1".into());
+            let mut events = norm.turn_started("List every secret word");
+            for result in results {
+                events.extend(norm.on_message(result));
+            }
+            last_cost(&events)
+        };
+        for (what, line) in [("modelUsage", &session_totals), ("total_cost_usd", &total_only)] {
+            assert!((cost_of(&resumed, &[line]) - own).abs() < 1e-6, "{what}: the turn's own cost");
+            assert!((cost_of(&new, &[line]) - total).abs() < 1e-12, "{what}: a new session costs its total");
+        }
+        // The next turn of the same process: what the session's total added since.
+        let mut next = total_only.clone();
+        next["total_cost_usd"] = json!(total + 0.0001);
+        assert!((cost_of(&resumed, &[&total_only, &next]) - (own + 0.0001)).abs() < 1e-6);
+        // The per-turn key, when it is there, is the cost, whatever the session cost before.
+        assert!((cost_of(&resumed, &[&full]) - own_cost(&full)).abs() < 1e-12);
+    }
+
+    /// Every tool call of a run was kept by its id until the run ended. Now the end of a turn
+    /// forgets the calls that are over, and keeps those still open (a background helper's).
+    #[test]
+    fn a_long_run_forgets_the_calls_that_are_over() {
+        let mut norm = ClaudeNormalizer::new(&spec(Role::Solo, false), "sess-1".into());
+        norm.turn_started("go");
+        norm.on_message(&tool_use("toolu-helper", "Agent", json!({ "description": "Look around" })));
+        norm.on_message(&tool_result("toolu-helper", "Async agent launched successfully.", json!({ "status": "async_launched" }), false));
+        // The helper's own call, which stays open through every turn.
+        let mut helpers_call = tool_use("toolu-helpers-call", "Bash", json!({ "command": "sleep 600" }));
+        helpers_call["parent_tool_use_id"] = json!("toolu-helper");
+        norm.on_message(&helpers_call);
+        let result = json!({ "type": "result", "subtype": "success", "result": "ok", "model_usage_since_last_result": {} });
+        norm.on_message(&result);
+        for turn in 0..100 {
+            norm.turn_started("go on");
+            for call in 0..100 {
+                let id = format!("toolu-{turn}-{call}");
+                norm.on_message(&tool_use(&id, "Bash", json!({ "command": "true" })));
+                // (the last call of each turn gets no result: the turn's end cuts it off)
+                if call < 99 {
+                    norm.on_message(&tool_result(&id, "", json!({}), false));
+                }
+            }
+            norm.on_message(&result);
+            assert!(norm.tools_seen.len() <= norm.tools.len(), "turn {turn}: {} ids for {} open calls", norm.tools_seen.len(), norm.tools.len());
+        }
+        assert_eq!(norm.tools_seen, HashSet::from(["toolu-helpers-call".to_string()]), "the open call is kept");
+        let again = norm.on_message(&helpers_call);
+        assert!(tool_calls(&again).is_empty(), "a line that repeats the open call starts nothing: {again:?}");
     }
 }

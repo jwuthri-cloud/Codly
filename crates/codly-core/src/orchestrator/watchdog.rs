@@ -93,10 +93,13 @@ impl Flag {
 /// line, `ToolProgress`)? Recorded on 2.1.311 for a Bash call, a tool of an MCP server and
 /// the `Agent` call that waits for a helper (listed as `Task` by the CLI), once each
 /// (docs/research/cli-claude-stream-json-2.1.311-part2.md §8 and -part3.md §3), and for a tool
-/// of an HTTP MCP server as for a stdio one (-part5.md §6, `r7-tool-progress-http-70-*`, n=2).
-/// Such an HTTP call that got no byte back ended by itself at 60 s ("The operation timed out.");
-/// that end is not counted on: a server that streams its answer was not recorded. Not
-/// recorded, so not counted on: WebFetch, WebSearch and every other tool.
+/// of an HTTP MCP server as for a stdio one (-part5.md §6, `r7-tool-progress-http-70-*`, n=2;
+/// -part6.md §10, `r8-http-slow-*`, n=2 per kind: also for a server that streams its answer or
+/// sends progress notifications, which add no line of their own). Such an HTTP call ends by
+/// itself at 60 s ("The operation timed out.") only when its server sends nothing until it is
+/// done; a server that streams its answer is not cut there, and `MCP_TOOL_TIMEOUT` or the
+/// server's own `timeout` moves that limit (-part6.md §10). So that end is not counted on.
+/// Not recorded, so not counted on: WebFetch, WebSearch and every other tool.
 fn has_heartbeat(tool: &str) -> bool {
     matches!(tool, "Bash" | "Agent" | "Task") || tool.starts_with("mcp__")
 }
@@ -698,6 +701,25 @@ mod tests {
         // The heartbeats stop (the CLI hangs): flagged 10 minutes later, not an hour.
         assert_eq!(step(PLAIN - secs(1), limit(&w, Provider::Claude), w.flagged, None), Step::Wait);
         assert_eq!(step((now + PLAIN).duration_since(w.last_event), limit(&w, Provider::Claude), w.flagged, None), Step::Flag);
+    }
+
+    /// The slow tool of an HTTP MCP server as recorded (part 6 §10, `r8-http-slow-*`, n=2 per
+    /// kind: a 70 s call, with the CLI's heartbeats at 30 and 60 s and no other line): the
+    /// plain limit, and the heartbeats alone keep it from being silent.
+    #[test]
+    fn a_slow_tool_of_an_http_server_is_kept_alive_by_its_heartbeats() {
+        let start = Instant::now();
+        let tool = "mcp__ping-http__ping";
+        assert!(has_heartbeat(tool));
+        let mut w = with_open(start, &[("toolu-1", tool)]);
+        assert_eq!(limit(&w, Provider::Claude), PLAIN);
+        for at in [30, 60] {
+            w.seen(&EventKind::ToolProgress { call_id: "toolu-1".into() }, start + secs(at), 0);
+            assert_eq!(w.last_event, start + secs(at), "a heartbeat is a life sign");
+        }
+        assert_eq!(step(secs(10), limit(&w, Provider::Claude), w.flagged, None), Step::Wait);
+        w.seen(&completed("toolu-1"), start + secs(70), 0);
+        assert!(w.open_tools.is_empty(), "its result ends the call");
     }
 
     /// The tools of Claude Code whose calls have a recorded heartbeat keep the plain limit: an

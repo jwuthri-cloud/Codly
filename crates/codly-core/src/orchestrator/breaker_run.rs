@@ -38,6 +38,9 @@ use crate::model::*;
 const KV_KEY: &str = "breaker";
 /// What the team used since the last Reset, and today (`Saved`).
 const KV_SPENT: &str = "breaker_spent";
+/// Ends the words of a turn that took the team past its budget: Claude Code finishes a request
+/// that was on its way (part 6, section 6).
+const OVER_BY_A_REQUEST: &str = "The total can end a little above the budget: a request that was on its way is finished.";
 
 /// The counts that outlive the app.
 #[derive(Default, Serialize, Deserialize)]
@@ -168,7 +171,10 @@ impl Inner {
     /// task): a task's worker and reviewer are not told to send a message, since Codly moves
     /// their task on (`run_limit_turn_end`), and a Lead's turn may have been started by Codly
     /// (a worker's question, a follow-up), not by a message of yours. Any other agent: the
-    /// run's own words, which ask you to send your message again.
+    /// run's own words, which ask you to send your message again. Each form ends with the
+    /// sentence that the total can end a little above the limit or the budget
+    /// (`claude::run_limit_reached_then`, `OVER_BY_A_REQUEST`; recorded 19% and 45% above:
+    /// part 6, section 6).
     pub(super) fn run_limit_words(&self, run_id: &str, role: Role, task: bool, kind: &mut EventKind) {
         let said = match kind {
             EventKind::Error { message, .. } => message,
@@ -186,7 +192,7 @@ impl Inner {
             None => {
                 let then = |next: &str| claude::run_limit_reached_then(&agent, limit, next);
                 let words = match (breaker::over_budget(&rt.cfg, rt.tracker.floor()), role) {
-                    (Some(budget), _) => budget.reached(),
+                    (Some(budget), _) => format!("{} {OVER_BY_A_REQUEST}", budget.reached()),
                     (None, Role::Worker) if task => then("Codly ends this run; the task's card says what comes next."),
                     (None, Role::Reviewer) if task => then("Its review stops here: re-run the checks of the task to review it again."),
                     (None, Role::Lead) => then(&format!("The next message to {agent} starts a new run with what is left now.")),

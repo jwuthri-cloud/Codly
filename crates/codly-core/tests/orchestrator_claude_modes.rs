@@ -585,9 +585,9 @@ async fn a_live_claude_agent_changes_its_effort_and_takes_the_default_model_with
 
 /// Before, a thinking effort could not be taken away from a live session: the agent was
 /// stopped, and its next message started a new process. Recorded since (part 4 §4, n=2, on a
-/// process started with `--effort high`): `effortLevel: null` takes it away at once. Between
-/// turns the same run goes on; during a turn the change waits for the agent to rest, as a new
-/// effort does.
+/// process started with `--effort high`): `effortLevel: null` takes it away at once. The same
+/// run goes on, also when the change comes during a turn (part 6 §12: the CLI takes it there
+/// too, n=2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_live_claude_agent_gives_up_its_effort_without_a_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -598,23 +598,25 @@ async fn a_live_claude_agent_gives_up_its_effort_without_a_restart() {
     let run = agent(&core, &id).await.run_id;
     assert!(run.is_some());
 
-    // During a turn: the agent must rest first, and nothing reaches the session.
+    // During a turn: the level goes away in the same run, at once.
     core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
     wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
-    let e = core.set_agent_model(&id, Some("opus".into())).await.unwrap_err().to_string();
-    assert!(e.contains("is still working: stop its turn first"), "{e}");
-    assert!(!seen.lock().unwrap().log.iter().any(|l| l.starts_with("effort:")), "{:?}", seen.lock().unwrap().log);
-    seen.lock().unwrap().release.notify_one();
-    settled(&core, &id, 2).await;
-
-    // Between turns: the level goes away in the same run.
     let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
     assert_eq!(a.model.as_deref(), Some("opus"), "the row shows no effort");
     assert_eq!(last_seen(&seen), "effort:none");
     assert!(!seen.lock().unwrap().log.iter().any(|l| l.starts_with("model:")), "the model was not asked for again");
     assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
-    assert!(codly_said(&core, &id, "now works with Claude Code's default thinking effort, in the same conversation: no restart was needed.").await);
+    assert!(
+        codly_said(
+            &core,
+            &id,
+            "now works with Claude Code's default thinking effort, in the same conversation: no restart was needed. Claude Code does not say whether the turn that runs already uses it."
+        )
+        .await
+    );
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
 
     // Its next run starts with no effort.
     stop(&core, &id).await;
@@ -682,10 +684,11 @@ async fn a_model_switch_reaches_the_live_session_during_a_turn() {
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
     assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
 
-    // The effort request is recorded between turns only: during one it is not sent.
-    let e = core.set_agent_model(&id, Some("sonnet:high".into())).await.unwrap_err().to_string();
-    assert!(e.contains("is still working: stop its turn first"), "{e}");
-    assert_eq!(last_seen(&seen), "model:sonnet");
+    // The effort too, in the same turn (part 6 §12: the CLI takes it there, n=2).
+    let a = core.set_agent_model(&id, Some("sonnet:high".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("sonnet:high"));
+    assert_eq!(last_seen(&seen), "effort:high", "the model was not asked for again");
+    assert_eq!(turns_done(&core, &id).await, 1, "the turn is still not over");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
 
     // The turn ends as any other, in the same process.
@@ -722,11 +725,12 @@ async fn a_1_to_1_agent_on_a_task_changes_its_model_without_a_restart() {
     let a = core.set_agent_model(&id, None).await.unwrap();
     assert_eq!(a.model.as_deref(), Some("claude-opus-5-5"));
     assert_eq!(last_seen(&seen), "model:default");
-    // Another effort waits for the end of the turn, and a task's run is not restarted for it.
-    let e = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap_err().to_string();
-    assert!(e.contains("is on a task"), "{e}");
-    assert_eq!(last_seen(&seen), "model:default");
+    // Another effort reaches the task's run while its turn runs (part 6 §12), with no restart.
+    let a = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus:high"));
+    assert_eq!(last_seen(&seen), "effort:high");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
+    assert_eq!(agent(&core, &id).await.task_id.as_deref(), Some(task.id.as_str()), "still on its task");
     shut_down(&core).await;
 }
 
@@ -1206,4 +1210,78 @@ async fn taking_an_effort_away_reads_the_level_back() {
     turn(&core, &id, "again").await;
     assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("sonnet".to_string())));
     core.shutdown().await;
+}
+
+/// Recorded (part 6 §12, `r8-effort-mid-turn-high-*` and `-null-*`, n=2 each): Claude Code takes
+/// an effort level while a turn runs, and its settings name the new level at once. Before, the
+/// change was refused until the turn ended ("is still working"). Now it reaches the session,
+/// and the thread says that the CLI does not tell whether the running turn uses it yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_change_reaches_the_live_session_during_a_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let run = agent(&core, &id).await.run_id;
+    core.set_agent_model(&id, Some("opus:low".into())).await.unwrap();
+
+    core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
+    wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
+    let a = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus:high"));
+    assert_eq!(last_seen(&seen), "effort:high", "the effort alone went out");
+    assert_eq!(turns_done(&core, &id).await, 1, "the turn it was sent in is not over");
+    assert_eq!((agent(&core, &id).await.run_id, seen.lock().unwrap().shutdowns), (run, 0), "the same run goes on");
+    assert!(
+        codly_said(
+            &core,
+            &id,
+            "now works with thinking effort high, in the same conversation: no restart was needed. Claude Code does not say whether the turn that runs already uses it."
+        )
+        .await
+    );
+
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
+    // Between turns the thread does not say it.
+    core.set_agent_model(&id, Some("opus:max".into())).await.unwrap();
+    let events = core.events(Some(&id), None, 500).await.unwrap();
+    let last = events.iter().rev().find_map(|e| match &e.kind {
+        EventKind::Chat { message } if message.author == "codly" && message.text.contains("thinking effort max") => Some(message.text.clone()),
+        _ => None,
+    });
+    assert_eq!(last.as_deref(), Some(format!("{} now works with thinking effort max, in the same conversation: no restart was needed.", a.name).as_str()));
+    shut_down(&core).await;
+}
+
+/// The read-back holds during a turn as between turns: Claude Code answers "success" also for
+/// a level it drops, and only its settings say what the session works with. With another
+/// model too, the model changes and the agent says the effort did not; the effort alone is
+/// not taken in place, and a running turn is not stopped for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_the_session_drops_during_a_turn_is_said_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    core.set_agent_model(&id, Some("sonnet:low".into())).await.unwrap();
+    core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
+    wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
+    seen.lock().unwrap().drops_effort = true;
+
+    let e = format!("{:#}", core.set_agent_model(&id, Some("opus:max".into())).await.unwrap_err());
+    assert!(e.contains("changed its model, but not its thinking effort") && e.contains("did not take the effort level \"max\""), "{e}");
+    assert!(e.contains("it works with \"low\""), "{e}");
+    assert_eq!(agent(&core, &id).await.model.as_deref(), Some("opus:low"));
+
+    let e = core.set_agent_model(&id, Some("opus:max".into())).await.unwrap_err().to_string();
+    assert!(e.contains("is still working: stop its turn first"), "{e}");
+    {
+        let s = seen.lock().unwrap();
+        assert_eq!(s.log[s.log.len() - 3..], ["model:opus", "effort:max", "effort:max"], "the session was asked each time");
+        assert_eq!(s.shutdowns, 0, "the running turn was not stopped");
+    }
+    assert!(!codly_said(&core, &id, "thinking effort max").await, "nothing changed in place");
+    seen.lock().unwrap().drops_effort = false;
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
+    shut_down(&core).await;
 }
