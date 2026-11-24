@@ -87,6 +87,7 @@ mod outside;
 pub mod resume;
 mod chat_search;
 mod review_back;
+mod new_conversation;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

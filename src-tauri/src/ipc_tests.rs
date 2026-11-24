@@ -108,6 +108,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::agent_diff,
             crate::agent_controls::set_agent_permission_mode,
             crate::agent_controls::compact_agent,
+            commands::new_conversation,
             crate::agent_controls::agent_context_usage,
             crate::session_commands::reconnect_agent_mcp,
             crate::session_commands::set_agent_mcp_enabled,
@@ -402,6 +403,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "compact_agent", json!({ "agentId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     let e = invoke(&wv, "agent_context_usage", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    // `/new` in a 1:1 chat, with the key the composer sends.
+    let e = invoke(&wv, "new_conversation", json!({ "agentId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     // "Reconnect" on an MCP server and "Stop" on a background command, with the keys the agent
     // sheet sends: the core answers (no agent here), not the argument check.

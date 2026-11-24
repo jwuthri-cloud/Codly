@@ -317,6 +317,8 @@ export const api = {
   setAgentPermissionMode: (agentId: string, mode: PermissionMode) => call<Agent>('set_agent_permission_mode', { agentId, mode }),
   /** Ask a running Claude or Codex agent to compact its conversation now. Resolves when the CLI took the request. */
   compactAgent: (agentId: string) => call<void>('compact_agent', { agentId }),
+  /** `/new` in a 1:1 chat: the agent's next message starts a new session of its CLI. Rejects with the core's reason. */
+  newConversation: (agentId: string) => call<void>('new_conversation', { agentId }),
   agentContextUsage: (agentId: string) => call<ContextUsage>('agent_context_usage', { agentId }),
   /** Try again to connect one MCP server of a live Claude agent. Rejects with Claude Code's own reason when it still does not connect. */
   reconnectAgentMcp: (agentId: string, server: string) => call<void>('reconnect_agent_mcp', { agentId, server }),

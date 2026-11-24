@@ -8,10 +8,14 @@ import type { Checkpoint } from '../../lib/gen/Checkpoint';
 import type { LeadMode } from '../../lib/gen/LeadMode';
 import { contextReads, showContext } from '../../lib/state/control.svelte';
 import type { McpServer } from '../../lib/state/session';
+import { store } from '../../lib/state/store.svelte';
 import { toasts } from '../../lib/state/toasts.svelte';
+import { ui } from '../../lib/state/ui.svelte';
+import type { Task } from '../../lib/gen/Task';
 import { AgentTurns, noTurn } from '../agentTurns';
 import { slashCommands, type SlashContext, type SlashDo } from '../composerActions';
 import { filterSlash } from '../composerMenu';
+import { startNewConversation } from '../newConversation';
 
 /** The modes of a request, as LeadControls lists them. */
 const modes: SlashContext['modes'] = (['ask', 'plan', 'auto', 'direct'] as LeadMode[]).map((id) => ({ id, label: id[0].toUpperCase() + id.slice(1), hint: `${id} hint`, icon: 'chat' }));
@@ -174,9 +178,9 @@ describe('what only the core knows, right after / opened the menu', () => {
   const typed = (c: SlashContext, query: string) => filterSlash(list(c), query);
 
   it('the action waits in its place: ↵ on its name runs nothing, and no action that holds the same letters', () => {
-    // "New request" holds a u, and "Compact Ada’s context" holds "te": they run, and they are not first.
+    // "issue" holds a u, and "Compact Ada’s context" holds "te": they run, and they are not first.
     expect(typed(opened, 'u')[0]).toEqual({ name: 'undo', label: 'Undo Ada’s last turn…', icon: 'arrow-left', off: 'Reading what Codly kept of its turns…', wait: true });
-    expect(typed(opened, 'u')[1]).toMatchObject({ name: 'new', run: expect.any(Function) });
+    expect(typed(opened, 'u')[1]).toMatchObject({ name: 'issue', run: expect.any(Function) });
     expect(typed(opened, 'te')[0]).toEqual({ name: 'terminal', label: 'Continue in your terminal', icon: 'terminal', off: 'Asking Codly if it can go…', wait: true });
     expect(typed(opened, 'te')[1]).toMatchObject({ name: 'compact', run: expect.any(Function) });
     expect(pick(opened, 'undo')).toEqual([]);
@@ -188,7 +192,7 @@ describe('what only the core knows, right after / opened the menu', () => {
     expect(typed(yes, 'u')[0]).toMatchObject({ name: 'undo', run: expect.any(Function) });
     expect(typed(yes, 'te')[0]).toMatchObject({ name: 'terminal', run: expect.any(Function) });
     const no = typed(at({ oneToOne: true, agent: ada, turns: { off: 'Codly kept no turn of Ada yet' } }), 'u');
-    expect(no[0]).toMatchObject({ name: 'new' });
+    expect(no[0]).toMatchObject({ name: 'issue' });
     expect(no.find((x) => x.name === 'undo')).toEqual({ name: 'undo', label: 'Undo Ada’s last turn…', icon: 'arrow-left', off: 'Codly kept no turn of Ada yet' });
     expect(no.slice(no.findIndex((x) => x.name === 'undo')).every((x) => 'off' in x)).toBe(true);
   });
@@ -226,6 +230,120 @@ describe('what /undo can open', () => {
     const turns = new AgentTurns(() => Promise.reject(new Error('git is not installed')));
     await turns.ask({ id: 'ada', name: 'Ada' });
     expect(turns.of('ada')).toEqual({ off: 'git is not installed' });
+  });
+});
+
+describe('/new', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const t of [...toasts.list]) toasts.dismiss(t.id);
+    store.agents = [];
+    store.tasks = [];
+    store.chats = [];
+    store.live = {};
+    ui.thread = 'lead';
+  });
+  const row = (c: SlashContext, name: string) => list(c).find((x) => x.name === name);
+  const withClear = 'The text and the attached files (for a new conversation: /new)';
+
+  it('a new conversation with a 1:1 agent, a new request anywhere else; /clear keeps its meaning', () => {
+    expect(row(claudeChat, 'new')).toMatchObject({ label: 'New conversation', hint: 'Start a new conversation: Ada forgets this one' });
+    expect(row(codexChat, 'new')).toMatchObject({ label: 'New conversation', hint: 'Start a new conversation: Cody forgets this one' });
+    expect(row(claudeChat, 'clear')).toMatchObject({ hint: withClear });
+    expect(pick(claudeChat, 'clear')).toEqual(['clear']);
+    // A request, a chat with a worker of a plan or a reviewer, or an agent that is gone: `/new` is a new request, as before.
+    for (const c of [request, goneChat, at({ oneToOne: true, agent: running('wes', 'claude', 'worker') }), at({ oneToOne: true, agent: running('rex', 'claude', 'reviewer') })]) {
+      expect(row(c, 'new')).toMatchObject({ label: 'New request', hint: 'Its own Lead, in parallel' });
+      expect(pick(c, 'new')).toEqual(['newRequest']);
+      expect(row(c, 'clear')).toMatchObject({ hint: 'The text and the attached files' });
+    }
+  });
+
+  it('a 1:1 agent that cannot start one says why, in the core’s words', () => {
+    const chat = (agent: Agent, over: Partial<SlashContext> = {}) => off(at({ oneToOne: true, agent, ...over })).new;
+    const task = (status: Task['status'], over: Partial<Task> = {}) => ({ id: 't4', key: 'T-4', status, assignee: 'ada', ...over }) as Task;
+    store.tasks = [task('running')];
+    expect(chat({ ...ada, task_id: 't4' })).toBe('Ada is on T-4: start a new conversation when the task is done');
+    // Given to it, waiting for its turn: the task goes back to it.
+    store.tasks = [task('pending')];
+    expect(chat(ada)).toBe('Ada is on T-4: start a new conversation when the task is done');
+    // Stopped: it waits for you, not for the task to end.
+    store.tasks = [task('failed')];
+    expect(chat(ada)).toBe('Ada still has T-4 (failed): retry it or cancel it first');
+    store.tasks = [task('blocked')];
+    expect(chat(ada)).toBe('Ada still has T-4 (blocked): retry it or cancel it first');
+    // Done, cancelled, or another agent's: nothing holds Ada.
+    store.tasks = [task('done'), task('cancelled', { id: 't5' }), task('failed', { id: 't6', assignee: 'bo' })];
+    expect(row(claudeChat, 'new')).toMatchObject({ run: expect.any(Function) });
+    expect(chat(ada, { busy: true })).toBe('Ada is still working: stop its turn first');
+    const there = { agent_id: 'ada', cwd: '/w', command: 'claude --resume s1', copy_command: 'cd /w && claude --resume s1', since: 1 };
+    expect(chat(ada, { takeover: { takeover: there, blocked: null } })).toBe('Ada is in your terminal: give it back first');
+  });
+
+  it('asks once before it acts: nothing reaches the core until you press Start', () => {
+    const core = vi.spyOn(api, 'newConversation').mockResolvedValue(undefined);
+    expect(pick(claudeChat, 'new')).toEqual([]);
+    expect(core).not.toHaveBeenCalled();
+    const asked = toasts.list.at(-1)!;
+    expect([asked.kind, asked.title, asked.body, asked.action?.label]).toEqual([
+      'attention',
+      'Start a new conversation?',
+      'Ada forgets what was said. Files and checkpoints stay as they are. Esc to go back.',
+      'Start',
+    ]);
+    // It waits for you: Esc on the empty composer takes it away (esc.ts `composerEsc`).
+    expect(toasts.waiting?.id).toBe(asked.id);
+    // `/new` again while it shows asks nothing more.
+    pick(claudeChat, 'new');
+    expect(toasts.list.filter((t) => t.title === 'Start a new conversation?')).toHaveLength(1);
+    asked.action!.run();
+    expect(core).toHaveBeenCalledWith('ada');
+  });
+
+  it('the question goes when the conversation it asks about goes on', () => {
+    const ask = () => {
+      for (const t of [...toasts.list]) toasts.dismiss(t.id);
+      store.agents = [ada];
+      ui.thread = 'agent:ada';
+      pick(claudeChat, 'new');
+      return toasts.list.at(-1)!.action!.gone!;
+    };
+    const said = (id: string, thread = 'agent:ada') => ({ id, thread, author: 'user', text: 'hi', ts: 1 }) as (typeof store.chats)[number];
+    store.chats = [said('m1')];
+    let gone = ask();
+    expect(gone()).toBe(false);
+    // Another thread's message, or Ada's own answer, changes nothing.
+    store.chats = [said('m1'), said('m2', 'lead'), { ...said('m3'), author: 'ada' }];
+    expect(gone()).toBe(false);
+    // You said something to Ada since.
+    store.chats = [...store.chats, said('m4')];
+    expect(gone()).toBe(true);
+    // On its way to Ada.
+    gone = ask();
+    store.queueOutgoing('agent:ada', 'one more thing', Date.now());
+    expect(gone()).toBe(true);
+    // You left the chat.
+    store.chats = [];
+    gone = ask();
+    ui.thread = 'lead';
+    expect(gone()).toBe(true);
+    // Ada is at work, or on a task, or gone.
+    gone = ask();
+    store.live = { ada: { ...store.liveFor('ada'), turns: [{ start: 1, end: null, input: null }] } };
+    expect(gone()).toBe(true);
+    store.live = {};
+    gone = ask();
+    store.agents = [{ ...ada, task_id: 't1' }];
+    expect(gone()).toBe(true);
+    gone = ask();
+    store.agents = [];
+    expect(gone()).toBe(true);
+  });
+
+  it('a refusal of the core says why', async () => {
+    vi.spyOn(api, 'newConversation').mockRejectedValue('Ada is still working: stop its turn first');
+    expect(await startNewConversation({ id: 'ada', name: 'Ada' })).toBe(false);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t start a new conversation with Ada', 'Ada is still working: stop its turn first']]);
   });
 });
 
