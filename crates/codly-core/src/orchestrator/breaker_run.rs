@@ -173,19 +173,19 @@ impl Inner {
         };
         let mut rt = lock(&self.breaker);
         let Some((agent, limit)) = rt.limits.get(run_id).cloned() else { return };
-        if *said != claude::run_limit_reached(&agent, limit) {
+        if !claude::is_run_limit_reached(said, &agent, limit) {
             return;
         }
         // The error and the turn's end say the same, even if the count moved in between.
         let words = match rt.reached.get(run_id) {
             Some(words) => words.clone(),
             None => {
-                let reached = format!("This run of {agent} reached the limit it started with ({limit:.2} USD of your budget were left then).");
+                let then = |next: &str| claude::run_limit_reached_then(&agent, limit, next);
                 let words = match (breaker::over_budget(&rt.cfg, rt.tracker.floor()), role) {
                     (Some(budget), _) => budget.reached(),
-                    (None, Role::Worker) if task => format!("{reached} Codly ends this run; the task's card says what comes next."),
-                    (None, Role::Reviewer) if task => format!("{reached} Its review stops here: re-run the checks of the task to review it again."),
-                    (None, Role::Lead) => format!("{reached} The next message to {agent} starts a new run with what is left now."),
+                    (None, Role::Worker) if task => then("Codly ends this run; the task's card says what comes next."),
+                    (None, Role::Reviewer) if task => then("Its review stops here: re-run the checks of the task to review it again."),
+                    (None, Role::Lead) => then(&format!("The next message to {agent} starts a new run with what is left now.")),
                     (None, _) => said.clone(),
                 };
                 rt.reached.insert(run_id.to_string(), words.clone());

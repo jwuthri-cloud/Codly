@@ -456,11 +456,11 @@ impl Inner {
         }
         let mut effort_kept = None;
         if let Some(level) = &switch.effort
-            && let Err(e) = self.set_live_effort(id, level.as_deref()).await
+            && let Err(e) = self.set_live_effort(id, level.as_deref(), switch.effort_now.as_deref()).await
         {
             if switch.model.is_none() {
-                // The request is recorded on a process that started with no `--effort`. Whether
-                // a process that started with one takes it is not: the restart always does.
+                // The session kept the effort it had (it dropped the new level, or did not give
+                // its own up): a new process, started with the effort asked for, has it.
                 tracing::info!("{} restarts for the thinking effort {level:?}: {e:#}", agent.name);
                 return Ok(None);
             }
@@ -499,17 +499,25 @@ impl Inner {
     /// Set the reasoning effort of a live Claude session, then read it back: Claude Code
     /// answers "success" also for a level it drops (recorded), and only its settings say what
     /// the session works with. None takes the session's level away: the CLI's default for its
-    /// model follows, which Codly does not know, so there is nothing to read back.
-    async fn set_live_effort(&self, agent_id: &str, level: Option<&str>) -> Result<()> {
+    /// model follows, "medium" at once for every level recorded (a process started with `low`,
+    /// `high` or `max`: part 4 §4 and part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2
+    /// each). So that switch did not take only when the settings still name `before`, the
+    /// level the agent's row had, and that level is not the default one; any other answer is
+    /// the CLI's default for the model.
+    async fn set_live_effort(&self, agent_id: &str, level: Option<&str>, before: Option<&str>) -> Result<()> {
         let answer = self.ask_session(agent_id, SessionRequest::Effort(level.map(str::to_owned)))?;
         Self::session_answer(answer).await?;
-        let Some(level) = level else { return Ok(()) };
         let answer = self.ask_session(agent_id, SessionRequest::Settings)?;
         let settings = Self::session_answer(answer).await?;
-        match settings["applied"]["effort"].as_str() {
-            Some(applied) if applied == level => Ok(()),
-            Some(applied) => bail!("Claude Code did not take the effort level \"{level}\": it works with \"{applied}\""),
-            None => bail!("Claude Code did not say which effort level it works with"),
+        let applied = settings["applied"]["effort"].as_str();
+        match (level, applied) {
+            (Some(level), Some(applied)) if applied == level => Ok(()),
+            (Some(level), Some(applied)) => bail!("Claude Code did not take the effort level \"{level}\": it works with \"{applied}\""),
+            (Some(_), None) => bail!("Claude Code did not say which effort level it works with"),
+            (None, Some(applied)) if before == Some(applied) && applied != "medium" => {
+                bail!("Claude Code did not take the effort away: it still works with \"{applied}\"")
+            }
+            (None, _) => Ok(()),
         }
     }
 

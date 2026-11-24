@@ -480,8 +480,10 @@ impl Inner {
     /// between turns only (part 2 of the 2.1.311 recordings, scenario 13) and is sent during
     /// a turn all the same. The effort request is recorded between turns only, and is sent
     /// only then: a new level, and no level for a session that has one (`effortLevel: null`
-    /// takes the level away at once and for the next turns: part 4 §4, n=2, recorded only on
-    /// a process started with `--effort high`; it is sent for any level). None = the switch
+    /// takes the level away at once and for the next turns, "medium" after it, on a process
+    /// started with `--effort low`, `high` or `max`: part 4 §4 and part 5 §8,
+    /// `r7-effort-null-low-*` and `-max-*`, n=2 each; it is read back, as a level is:
+    /// `set_live_effort`). None = the switch
     /// needs the restart: another CLI, no live process, a change of effort while the agent
     /// works, or an effort level Claude Code does not list.
     fn live_model_switch(&self, agent: &Agent, model: Option<&str>) -> Option<LiveSwitch> {

@@ -112,7 +112,9 @@ everything an agent started. Claude Code runs each shell command in a process gr
 CLI: Codly interrupts the turn (also with no turn running when a helper works in the
 background: the interrupt ends every helper and starts no turn), has the CLI drop the messages
 that still wait in it, asks it to stop the background commands it tracks (`stop_task`), and
-closes its input only then; a CLI that
+closes its input only then (recorded with a helper and a command at once: cli-claude-stream-json-2.1.311-part5.md §5). With no
+turn running the helpers get 1 s and the commands 2 s, so both steps end inside the 4 s the app
+waits when it quits; a CLI that
 does not exit gets SIGTERM, at which it ends those commands itself. Two things Codly cannot
 end: a process that a command left behind with `&` (`npm run dev &`) is in no list of the CLI
 and in no group Codly knows, so it runs on until it ends or you end it; and a background
