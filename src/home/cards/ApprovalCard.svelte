@@ -7,7 +7,8 @@
   they are not only brings the card into view, and one pressed while it settles does nothing.
   The keycaps take their room whether they show or not: showing them moves nothing. A keycap
   shows only while its key acts where the focus is (`keycapActs`): with text in the composer, or
-  in the card's answer field, ⌘⌫ deletes text and Skip or Deny shows no keycap. A card too
+  in the card's answer field, ⌘⌫ deletes text and Skip or Deny shows no keycap; with a draft in
+  the composer ⌘↵ sends the draft and Approve shows no ⌘↵ keycap. A card too
   big for its scroller never takes the keys, and says so: its buttons answer it.
   Questions (AskUserQuestion / requestUserInput) render as a choice to answer: 1-9 pick, ↵ in the
   answer field or ⌘↵ send. A question that comes in its request's envelope (an MCP server's
@@ -398,11 +399,15 @@
     };
   });
 
-  /** Where the focus `active` is, for the keys of `card`: the composer's text is read as the keys read it (state/keys.ts). */
+  /** Where the focus `active` is, for the keys of `card`: the composer's text is read as the keys
+   *  read it (state/keys.ts: any text for the deny keys; Composer.svelte: trimmed text for ⌘↵). */
   function focusOf(active: Element | null, card: HTMLElement): KeyFocus {
     if (!active || !isTextField(active)) return 'page';
     if (card.contains(active)) return 'own-field';
-    if (active.closest('[aria-label="Composer"]')) return (active as HTMLInputElement).value ? 'composer-text' : 'composer-empty';
+    if (active.closest('[aria-label="Composer"]')) {
+      const value = (active as HTMLInputElement).value;
+      return !value ? 'composer-empty' : value.trim() ? 'composer-text' : 'composer-blank';
+    }
     return 'field';
   }
 

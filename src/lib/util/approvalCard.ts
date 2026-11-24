@@ -162,23 +162,25 @@ export function answerTakesFocus(questions: Pick<AskedQuestion, 'options' | 'own
 
 /**
  * Where the focus is while a card shows its keycaps: on no text field ('page'), in the composer
- * ('composer-empty', 'composer-text'), in a text field of the card itself ('own-field': its
- * answer), or in another text field ('field').
+ * ('composer-empty'; 'composer-blank': only spaces; 'composer-text'), in a text field of the card
+ * itself ('own-field': its answer), or in another text field ('field').
  */
-export type KeyFocus = 'page' | 'composer-empty' | 'composer-text' | 'own-field' | 'field';
+export type KeyFocus = 'page' | 'composer-empty' | 'composer-blank' | 'composer-text' | 'own-field' | 'field';
 
 /**
  * Whether the key of a keycap (`kbd`: '⌘↵', '⌥⌘↵', '⌘⌫', '⇧⌘⌫', or a digit '1'-'9') acts with the
  * focus at `focus`, so the card shows it: a keycap never shows a key that would do something else.
- * As state/keys.ts and the card's answer field take them: ⌘↵ acts but in another text field (in
- * the card's answer field the field sends); ⌥⌘↵ only on the page and in the composer; the deny
- * keys are text keys in a field with text and in the card's field (`denyKeyInField`), and act only
- * on the page and in the empty composer; a digit is a character in every text field.
+ * As state/keys.ts, the composer and the card's answer field take them: ⌘↵ acts but in another
+ * text field and in a composer with a draft (Composer.svelte sends the draft; with only spaces it
+ * leaves the key to the card; in the card's answer field the field sends); ⌥⌘↵ only on the page
+ * and in the composer; the deny keys are text keys in a field with any text, spaces too, and in the
+ * card's field (`denyKeyInField`), and act only on the page and in the empty composer; a digit is a
+ * character in every text field.
  */
 export function keycapActs(kbd: string, focus: KeyFocus): boolean {
   if (/^[1-9]$/.test(kbd)) return focus === 'page';
-  if (kbd === '⌘↵') return focus !== 'field';
-  if (kbd === '⌥⌘↵') return focus === 'page' || focus === 'composer-empty' || focus === 'composer-text';
+  if (kbd === '⌘↵') return focus !== 'field' && focus !== 'composer-text';
+  if (kbd === '⌥⌘↵') return focus === 'page' || focus.startsWith('composer-');
   if (kbd === '⌘⌫' || kbd === '⇧⌘⌫') return focus === 'page' || focus === 'composer-empty';
   throw new Error(`no approval key ${kbd}`);
 }

@@ -316,7 +316,10 @@ describe('the keycaps a card shows, by where the focus is (`keycapActs`)', () =>
   });
 
   it('in a field with text ⌘⌫ deletes text: Deny and Skip show no keycap', () => {
-    expect(shown('composer-text')).toEqual(['⌘↵', '⌥⌘↵']);
+    // A draft in the composer: ⌘↵ sends the draft (Composer.svelte), only ⌥⌘↵ is left to the card.
+    expect(shown('composer-text')).toEqual(['⌥⌘↵']);
+    // Only spaces: the composer leaves ⌘↵ to the card, but ⌘⌫ still deletes a space.
+    expect(shown('composer-blank')).toEqual(['⌘↵', '⌥⌘↵']);
     // Any other field (an Ask-me answer): the keys act there, the card shows none.
     expect(shown('field')).toEqual([]);
   });
