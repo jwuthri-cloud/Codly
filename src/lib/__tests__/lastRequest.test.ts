@@ -98,6 +98,28 @@ describe('the request you were last on, across a restart', () => {
     expect(ui.lastRequest('n1')).toBeNull();
   });
 
+  it('a new request whose composer kept text is a tab again after a restart, and you land on it', () => {
+    const items = new Map([
+      ['codly.request.d1', 'lead:new'],
+      ['codly.draft.d1.lead:new', JSON.stringify({ text: 'a long request I never sent', files: [], at: 7 })],
+      ['codly.draft.d1.agent:ada', JSON.stringify({ text: 'to ada', files: [], at: 8 })],
+    ]);
+    vi.stubGlobal('localStorage', {
+      get length() {
+        return items.size;
+      },
+      key: (i: number) => [...items.keys()][i] ?? null,
+      getItem: (key: string) => items.get(key) ?? null,
+      setItem: (key: string, value: string) => void items.set(key, value),
+      removeItem: (key: string) => void items.delete(key),
+    });
+    store.workspace = office('d1');
+    store.chats = said(['lead']);
+    reopenLastRequest();
+    expect(ui.draftRequests).toEqual([{ thread: 'lead:new', ts: 7, kept: true }]);
+    expect(ui.request).toBe('lead:new');
+  });
+
   it('a storage that refuses (private mode) changes nothing else: you still move between requests', async () => {
     const refuse = () => {
       throw new Error('The operation is insecure.');

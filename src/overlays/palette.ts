@@ -7,6 +7,7 @@
 import { agentCommands, type AgentDo, type SlashContext } from '../home/composerActions';
 import { filterSlash } from '../home/composerMenu';
 import type { ApprovalSubject } from '../lib/gen/ApprovalSubject';
+import type { ChatMessage } from '../lib/gen/ChatMessage';
 import type { Provider } from '../lib/gen/Provider';
 import { permissionsAsked } from '../lib/util/permissionsAsked';
 import { showsPlan } from '../lib/util/planRequest';
@@ -81,8 +82,16 @@ export function guard(row: { confirm?: string; askFirst?: string }, byKey: boole
   return row.confirm ?? (byKey && !alt ? row.askFirst : undefined);
 }
 
-/** The question of "Ask the Lead…" when it is the only row (`others`: the rows above it). */
-export const askFirst = (others: number): string | undefined => (others ? undefined : 'Send this to the Lead? It starts a turn of the Lead.');
+/**
+ * The question of "Ask the Lead…" when it is the only row (`others`: the rows above it). Once it
+ * is asked (`asked`: the row waits for its second ↵) it stays: rows found a moment later come in
+ * above it and do not take the question away under you.
+ */
+export const askFirst = (others: number, asked = false): string | undefined => (others && !asked ? undefined : 'Send this to the Lead? It starts a turn of the Lead.');
+
+/** The hint in the palette's empty field: it finds what was said too, and offers the Lead only where "Ask the Lead…" is a row (`offersAsk`). */
+export const paletteHint = (inRequest: boolean): string =>
+  `Search agents, tasks, conversations and commands${inRequest ? ', or ask the Lead…' : '…'}`;
 
 /** Whether the last row "Ask the Lead: …" is offered: for a query, with no scope or in commands,
  *  and only on a request (in a 1:1 there is no Lead you are talking to). */
@@ -176,8 +185,43 @@ export type SaidNames = {
   request: (thread: string) => string | null;
   /** A closed request's title (`closed_requests`). */
   closed: (thread: string) => string | null;
+  /** The name an agent had in a closed request (`ClosedTranscript.authors`): its Lead is archived. */
+  closedAuthor: (thread: string, id: string) => string | null;
   agent: (id: string) => string | null;
 };
+
+/** What the group knows of the closed requests among the messages found: their titles (read
+ *  once) and who wrote in each (read once per request). */
+export type SaidKnown = { titles: Map<string, string> | null; authors: Map<string, Record<string, string>> };
+
+/** The core's reads the group makes (`api`). */
+export type SaidReads = {
+  searchChats: (q: string) => Promise<ChatMessage[]>;
+  closedRequests: () => Promise<{ thread: string; title: string }[]>;
+  closedRequest: (thread: string) => Promise<{ authors: Record<string, string> }>;
+};
+
+/**
+ * The messages that hold `q`, and what names the closed requests among the first `SAID_MOST` of
+ * them: the titles, and who wrote in each. A failed read of those names keeps the messages
+ * found (their rows say "Closed request" and "An agent" for now, and the next search asks
+ * again); only a failed search throws.
+ */
+export async function searchSaid(q: string, read: SaidReads, known: SaidKnown): Promise<{ hits: ChatMessage[]; known: SaidKnown }> {
+  const hits = await read.searchChats(q);
+  const closed = [...new Set(hits.slice(0, SAID_MOST).map((m) => m.thread).filter(isClosedThread))];
+  if (!closed.length) return { hits, known };
+  const [titles, ...authors] = await Promise.allSettled([
+    known.titles ? Promise.resolve(null) : read.closedRequests(),
+    ...closed.map((t) => (known.authors.has(t) ? Promise.resolve(null) : read.closedRequest(t))),
+  ]);
+  const byThread = new Map(known.authors);
+  authors.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value) byThread.set(closed[i], r.value.authors);
+  });
+  const list = titles.status === 'fulfilled' ? titles.value : null;
+  return { hits, known: { titles: list ? new Map(list.map((c) => [c.thread, c.title])) : known.titles, authors: byThread } };
+}
 
 /** The start of `text` on one line, cut at a word border near `max` characters. */
 export function firstWords(text: string, max = 40): string {
@@ -199,11 +243,11 @@ export function saidWhere(thread: string, names: SaidNames): string {
   return title ? `Request: ${firstWords(title)}` : 'Lead';
 }
 
-/** Who said it: you, Codly, or an agent by its name. */
-export function saidBy(author: string, names: SaidNames): string {
+/** Who said it (in `thread`): you, Codly, or an agent by its name, as it was in a closed request. */
+export function saidBy(author: string, thread: string, names: SaidNames): string {
   if (author === 'user') return 'You';
   if (author === 'codly') return 'Codly';
-  return names.agent(author) ?? 'An agent';
+  return (isClosedThread(thread) ? names.closedAuthor(thread, author) : null) ?? names.agent(author) ?? 'An agent';
 }
 
 /** A 1:1 chat opens only while its agent is in the office: one who left has no conversation to show. */

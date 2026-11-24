@@ -287,7 +287,7 @@ export function installKeys(): () => void {
       const now = Date.now();
       if (typing) {
         const field = e.target as HTMLElement;
-        if (!e.repeat && composerField(field) && !(field as HTMLTextAreaElement).value.trim()) escFirst = { thread: ui.thread, at: now };
+        if (!e.repeat && composerField(field) && !(field as HTMLTextAreaElement).value.trim() && !field.closest('[aria-label="Composer"][data-files]')) escFirst = { thread: ui.thread, at: now };
         field.blur();
         return;
       }
@@ -313,7 +313,7 @@ export function installKeys(): () => void {
           turnRuns: busy(ui.thread),
           waits: !!agent && store.pendingApprovals.some((a) => a.agent_id === agent.id),
           inTerminal: !!agent && takeovers.has(agent.id),
-          composerEmpty: [...document.querySelectorAll<HTMLTextAreaElement>('[aria-label="Composer"] textarea')].every((t) => !t.value.trim()),
+          composerEmpty: [...document.querySelectorAll<HTMLTextAreaElement>('[aria-label="Composer"] textarea')].every((t) => !t.value.trim()) && !document.querySelectorAll('[aria-label="Composer"][data-files]').length,
         }),
         second: escPair(first, ui.thread, now),
       });

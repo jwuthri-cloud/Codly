@@ -15,6 +15,8 @@ const part = (closing = false) => ({ closest: (selector: string) => (selector ==
 
 let onKey: ((e: KeyboardEvent) => void) | null = null;
 let modals: ReturnType<typeof part>[] = [];
+/** The composers on the page whose draft holds files (marked `data-files`). */
+let withFiles: object[] = [];
 let off: () => void = () => {};
 
 /** Esc on `target`; `used`: a field or a menu already took it (`defaultPrevented`). */
@@ -25,14 +27,14 @@ function press(target: object, used = false) {
 /** Esc, pressed on the page's body. */
 const esc = (used = false) => press({ tagName: 'BODY', isContentEditable: false, closest: () => null }, used);
 
-/** The composer's text field, holding `value`. */
-function composer(value: string) {
+/** The composer's text field, holding `value`; `files`: the draft has attached files too. */
+function composer(value: string, files = false) {
   return {
     tagName: 'TEXTAREA',
     isContentEditable: false,
     value,
     blurred: false,
-    closest: (selector: string) => (selector === '[aria-label="Composer"]' ? {} : null),
+    closest: (selector: string) => (selector === '[aria-label="Composer"]' || (files && selector === '[aria-label="Composer"][data-files]') ? {} : null),
     blur() {
       this.blurred = true;
     },
@@ -46,7 +48,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal('window', { addEventListener: (_: string, fn: (e: KeyboardEvent) => void) => (onKey = fn), removeEventListener: () => (onKey = null) });
   // The modal dialogs are the only dialogs of this page.
-  vi.stubGlobal('document', { querySelectorAll: (selector: string) => (selector.includes('aria-modal') || selector.includes('role="dialog"') ? modals : []) });
+  vi.stubGlobal('document', { querySelectorAll: (selector: string) => (selector.includes('aria-modal') || selector.includes('role="dialog"') ? modals : selector === '[aria-label="Composer"][data-files]' ? withFiles : []) });
   off = installKeys();
   ui.go('home');
   ui.mode = 'blend';
@@ -58,6 +60,7 @@ afterEach(() => {
   for (const t of [...toasts.list]) toasts.dismiss(t.id);
   ui.selection = null;
   modals = [];
+  withFiles = [];
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -153,6 +156,23 @@ describe('Esc Esc in a 1:1 chat with an agent that rests', () => {
 
   it('an Esc in a composer that holds text begins no pair', () => {
     escIn(composer('fix the header'));
+    vi.advanceTimersByTime(300);
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
+  });
+
+  it('files attached with no text are a draft too: an Esc in that composer begins no pair', () => {
+    const field = composer('', true);
+    escIn(field);
+    expect(field.blurred).toBe(true);
+    vi.advanceTimersByTime(300);
+    esc();
+    expect(rewindLayer.agentId).toBeNull();
+  });
+
+  it('with files in the composer, two presses outside it open nothing either', () => {
+    withFiles = [{}];
+    esc();
     vi.advanceTimersByTime(300);
     esc();
     expect(rewindLayer.agentId).toBeNull();

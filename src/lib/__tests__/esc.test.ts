@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Plan } from '../gen/Plan';
 import type { Task } from '../gen/Task';
-import { composerEsc, denyKeyInField, ESC_PAIR_WINDOW, ESC_STOP_WINDOW, escPair, escStep, escStop, mayRewind, openOne, type EscState, type RewindHere } from '../state/esc';
+import { BACKSPACE_REST, backspaceLeaves, composerEsc, denyKeyInField, ESC_PAIR_WINDOW, ESC_STOP_WINDOW, escPair, escStep, escStop, mayRewind, openOne, REWIND_HELD_LINE, rewindHeldByDraft, type EscState, type RewindHere } from '../state/esc';
 import { keyTargetChanges } from '../state/keys';
 import { store } from '../state/store.svelte';
 import { ui } from '../state/ui.svelte';
@@ -240,5 +240,62 @@ describe('⌘F', () => {
     expect(ui.canFind).toBe(true);
     ui.go('plan');
     expect(ui.canFind).toBe(false);
+  });
+});
+
+describe('Esc Esc over a draft', () => {
+  const idle: RewindHere = { oneToOne: true, agent: { role: 'solo', worktree: '/wt/ada' }, turnRuns: false, waits: false, inTerminal: false, composerEmpty: true };
+
+  it('where "Undo a turn" would open, a draft holds it, and the composer says why', () => {
+    expect(rewindHeldByDraft({ ...idle, composerEmpty: false })).toBe(true);
+    expect(REWIND_HELD_LINE).toBe('Undo a turn opens when the message field is empty');
+  });
+
+  it('says nothing where the list would not open anyway, or does open', () => {
+    expect(rewindHeldByDraft(idle)).toBe(false);
+    expect(rewindHeldByDraft({ ...idle, composerEmpty: false, turnRuns: true })).toBe(false);
+    expect(rewindHeldByDraft({ ...idle, composerEmpty: false, oneToOne: false })).toBe(false);
+  });
+});
+
+describe('⌫ on an empty line of a 1:1 chat', () => {
+  const key = { empty: true, repeat: false, modifier: false, sinceChange: BACKSPACE_REST, sinceKey: BACKSPACE_REST };
+
+  it('goes back to the request only on a field that was empty and rested', () => {
+    expect(backspaceLeaves(key)).toBe(true);
+    // The press that empties the field: it held a letter when the key went down.
+    expect(backspaceLeaves({ ...key, empty: false })).toBe(false);
+    // The presses right after it, of a hand still clearing the draft.
+    expect(backspaceLeaves({ ...key, sinceChange: BACKSPACE_REST - 1 })).toBe(false);
+    expect(backspaceLeaves({ ...key, sinceChange: 0 })).toBe(false);
+    // Taps that run on past the end of the draft: each one comes soon after the one before.
+    expect(backspaceLeaves({ ...key, sinceChange: 5000, sinceKey: BACKSPACE_REST - 1 })).toBe(false);
+  });
+
+  it('25 taps at a hand’s pace clear a 19-letter draft and stay in the chat', () => {
+    // A press every 150 ms; the field empties with the 19th.
+    let length = 19;
+    let changedAt = 0;
+    let keyAt = -10_000;
+    const left: number[] = [];
+    for (let n = 1; n <= 25; n++) {
+      const now = n * 150;
+      if (backspaceLeaves({ empty: !length, repeat: false, modifier: false, sinceChange: now - changedAt, sinceKey: now - keyAt })) left.push(n);
+      keyAt = now;
+      if (length) {
+        length--;
+        changedAt = now;
+      }
+    }
+    expect(left).toEqual([]);
+    // A pause, then one more press: now it goes back to the request.
+    const now = 25 * 150 + BACKSPACE_REST;
+    expect(backspaceLeaves({ empty: true, repeat: false, modifier: false, sinceChange: now - changedAt, sinceKey: now - keyAt })).toBe(true);
+  });
+
+  it('a held key or a modifier never leaves', () => {
+    expect(backspaceLeaves({ ...key, repeat: true, sinceChange: 5000 })).toBe(false);
+    expect(backspaceLeaves({ ...key, modifier: true, sinceChange: 5000 })).toBe(false);
+    expect(BACKSPACE_REST).toBe(600);
   });
 });

@@ -6,22 +6,24 @@
   webview has none, the paragraph of the current match gets an outline). History that is not
   loaded is not searched: the bar says so and offers to load it. Work folded into one line is
   searched by that line. With no match here, "Search all conversations" asks the palette; a
-  message found there opens its conversation with this bar on the same text.
+  message found there opens its conversation with this bar on the same text, at that message.
 -->
 <script module lang="ts">
   import { ui } from '../lib/state/ui.svelte';
 
-  /** The text the next find bar starts with (`findInConversation`). */
-  let seed: string | null = null;
+  type Seed = { text: string; message: string; item: string | null };
+  /** The text the next find bar starts with, and the message it was found in (`findInConversation`). */
+  let seed: Seed | null = null;
 
-  /** Open the find bar on `text`, in the conversation on screen. It goes to the first match as
-   *  soon as one is on screen: the conversation may still be loading. */
-  export function findInConversation(text: string) {
-    seed = text;
+  /** Open the find bar on `text`, in the conversation on screen, at message `message` (`item`:
+   *  the agent's message the row shows, `ChatMessage.item_id`). It goes there as soon as a match
+   *  is on screen: the conversation may still be loading. */
+  export function findInConversation(text: string, message: string, item: string | null) {
+    seed = { text, message, item };
     ui.openFind();
   }
 
-  function takeSeed(): string | null {
+  function takeSeed(): Seed | null {
     const s = seed;
     seed = null;
     return s;
@@ -33,6 +35,8 @@
   import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
   import { findMatches, stepMatch, type Piece } from './find';
+  import { afterSearch, messageRows, pickRow, type Seek } from './findSeek';
+  import { LAYOUT_REST_MS } from './threadScroll';
   import { SAID_FROM } from '../overlays/palette';
 
   interface Props {
@@ -58,10 +62,12 @@
   const registry = typeof CSS !== 'undefined' && 'highlights' in CSS ? CSS.highlights : null;
 
   const first = takeSeed();
-  let query = $state(first ?? '');
-  /** The text came from the palette: go to its first match as soon as one is on screen, also
-   *  when the conversation shows only after the search (a closed request loads). */
-  let seeking = first !== null;
+  let query = $state(first?.text ?? '');
+  /** The text came from the palette: go to the picked message's match as soon as one is on
+   *  screen, also when the conversation shows only after the search (a closed request loads). */
+  let seeking: Seek | null = first && { query: first.text, keys: messageRows(first.message, first.item, store.chatKeys) };
+  /** The conversation settles its own scroll after it shows: the match is brought back into view once it has. */
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
   let input: HTMLInputElement | undefined = $state();
   /** The matches, in the page's order (ranges follow the page as it changes). */
   let ranges: Range[] = [];
@@ -159,11 +165,21 @@
     }
     total = ranges.length;
     if (!total) more = false;
-    if (seeking && total) {
-      seeking = false;
+    const at = seeking && root ? pickRow(seeking.keys, [...root.querySelectorAll<HTMLElement>('[data-key]')].map((e) => e.dataset.key ?? '')) : null;
+    const row = at && root ? root.querySelector(`[data-key="${CSS.escape(at)}"]`) : null;
+    const sought = afterSearch(seeking, query, total, row ? ranges.findIndex((r) => row.contains(r.startContainer)) : -1);
+    seeking = sought.seek;
+    if (sought.go !== null && root) {
+      current = sought.go === 'view' ? firstInView(root) : sought.go;
+      const here = ranges[current];
+      clearTimeout(settleTimer);
+      // Only if you are still on that match (the page may have been searched again since).
+      settleTimer = setTimeout(() => {
+        const now = ranges[current];
+        if (here && now?.startContainer === here.startContainer && now.startOffset === here.startOffset) reveal(root);
+      }, LAYOUT_REST_MS);
       jump = true;
-    }
-    if (jump && root) current = firstInView(root);
+    } else if (jump && root) current = firstInView(root);
     else {
       const same = was ? ranges.findIndex((r) => r.startContainer === was.startContainer && r.startOffset === was.startOffset) : -1;
       current = same >= 0 ? same : Math.min(current, Math.max(0, total - 1));
@@ -185,13 +201,24 @@
     ui.composerFocus++;
   }
 
+  /** A new search once the page shows what changed. Asked twice before it runs (a new text and
+   *  a new seek at once), it runs once: a second one would leave the match it went to. */
+  let searchDue = false;
+  let gone = false;
+  function searchSoon() {
+    if (searchDue) return;
+    searchDue = true;
+    tick().then(() => {
+      searchDue = false;
+      if (!gone) search(true);
+    });
+  }
+
   // A new text to find, or another conversation on screen: search, and go to a match.
   $effect(() => {
     void query;
     void thread;
-    let live = true;
-    tick().then(() => live && search(true));
-    return () => (live = false);
+    searchSoon();
   });
 
   // The page changes (a message streams in, earlier history loads, a row opens): search again,
@@ -225,8 +252,11 @@
     void ui.findFocus;
     const s = takeSeed();
     if (s !== null) {
-      query = s;
-      seeking = true;
+      query = s.text;
+      seeking = { query: s.text, keys: messageRows(s.message, s.item, store.chatKeys) };
+      // Also when the text and the conversation are the ones on screen (another hit of the same
+      // search): nothing else searches then, and the seek must not wait for the page to change.
+      searchSoon();
     }
     tick().then(() => {
       input?.focus();
@@ -235,6 +265,8 @@
   });
 
   onDestroy(() => {
+    gone = true;
+    clearTimeout(settleTimer);
     ranges = [];
     paint();
     ui.findOpen = false;

@@ -29,7 +29,7 @@ import { answerText } from '../util/outcome';
 import { safetyPlace } from '../util/approvalFooter';
 import { openSettings } from '../../overlays/settingsLink';
 import { safetyLink } from '../../overlays/settingsPages';
-import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
+import { draftSlot, forgetDraft, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
 import { yourAnswers, yourChoice } from './answers';
 import { diffstats } from './diffstats.svelte';
@@ -95,6 +95,7 @@ export async function openWorkspace(path?: string) {
  *  there, when it is still one, and in the room you were in. */
 export function reopenLastRequest() {
   const office = store.workspace?.id;
+  if (office) ui.restoreKeptDrafts(office);
   const last = office ? ui.lastRequest(office) : null;
   if (last && requests.get(last)) ui.resumeRequest(last);
 }
@@ -238,6 +239,8 @@ export async function closeRequest(thread: string): Promise<boolean> {
   // Review comments its composer held and did not send stay on their diff: a request that is
   // no tab any more holds none (`waitingRequest`), and its thread name is never given again.
   ui.draftRequests = ui.draftRequests.filter((d) => d.thread !== thread);
+  // Its composer's draft goes too, also the copy kept across a restart.
+  forgetDraft(draftSlot(store.workspace?.id, thread));
   if (ui.request === thread) ui.openRequest((list[i + 1] ?? list[i - 1])?.thread ?? 'lead');
   await store.resync(); // its messages moved out of the thread without events
   return true;
