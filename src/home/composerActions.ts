@@ -19,6 +19,7 @@ import { store } from '../lib/state/store.svelte';
 import { openInTerminal, showTerminal, takeovers } from '../lib/state/takeover.svelte';
 import { isRequestThread, ui } from '../lib/state/ui.svelte';
 import { agentTurns } from './agentTurns';
+import { newConversationRow } from './newConversation';
 import { rewindLayer } from './rewindLayer.svelte';
 import type { SlashCommand } from './composerMenu';
 
@@ -165,7 +166,9 @@ export function slashCommands(c: SlashContext, on: SlashDo): SlashCommand[] {
   const control = (...names: string[]) => names.flatMap((n) => mine.filter((r) => r.name === n));
 
   const list: SlashCommand[] = [
-    { name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: on.newRequest },
+    // `/new` is what a Claude Code or Codex user types for an empty context: in a 1:1 chat it
+    // starts a new conversation with the agent (newConversation.ts), in a request a new request.
+    c.oneToOne ? newConversationRow(c) : { name: 'new', label: 'New request', hint: 'Its own Lead, in parallel', icon: 'plus', run: on.newRequest },
     { name: 'issue', label: 'From issue…', hint: 'A GitHub link or number', icon: 'link', run: on.fromIssue },
     { name: 'pr', label: 'From pull request…', hint: 'Its reviews and failing checks', icon: 'merge', run: on.fromPullRequest },
     ...control('stop'),
@@ -189,7 +192,7 @@ export function slashCommands(c: SlashContext, on: SlashDo): SlashCommand[] {
   else list.push({ ...diff, off: 'This request has no changes yet' });
 
   list.push(
-    { name: 'clear', label: 'Clear the draft', hint: 'The text and the attached files', icon: 'trash', run: on.clear },
+    { name: 'clear', label: 'Clear the draft', hint: `The text and the attached files${c.oneToOne ? ' (for a new conversation: /new)' : ''}`, icon: 'trash', run: on.clear },
     { name: 'closed', label: 'Closed requests', hint: 'Read them again', icon: 'clock', run: on.closed },
     { name: 'settings', label: 'Settings', hint: '⌘,', icon: 'settings', run: on.settings },
     { name: 'shortcuts', label: 'Keyboard shortcuts', hint: '?', icon: 'keyboard', run: on.shortcuts },

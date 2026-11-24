@@ -7,7 +7,7 @@ fn main() {
         "reconnect_agent_mcp", "set_agent_mcp_enabled", "stop_agent_task",
         "agent_takeover", "list_takeovers", "take_over_agent", "open_takeover_terminal", "give_back_agent",
         "retry_core", "ui_subscribe", "ui_set_visible", "detect_clis", "list_accounts", "recent_workspaces", "list_repos", "open_workspace", "update_settings",
-        "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "model_catalog", "set_agent_model", "set_agent_look", "set_workspace_team", "set_request_prefs",
+        "send_chat", "run_plan", "cancel_plan", "close_thread", "resolve_approval", "interrupt_agent", "stop_agent", "new_conversation", "model_catalog", "set_agent_model", "set_agent_look", "set_workspace_team", "set_request_prefs",
         "approval_rule_offer", "add_approval_rule", "approval_rules", "remove_approval_rule",
         "breaker_config", "set_breaker_config", "breaker_status", "reset_breaker", "plan_spent",
         "create_task", "move_task", "recheck_task", "accept_task", "assign_task", "task_diff", "plan_diff", "send_back_task", "send_back_plan", "merge_plan", "merge_plan_warning", "undo_merge", "merge_agent", "repo_sync", "commit_checkout", "push_checkout", "get_events", "search_code",

@@ -530,6 +530,31 @@ describe('the demo transport', () => {
     expect((await snapshot(plain)).events.some((e) => e.kind.type === 'notice')).toBe(false);
   });
 
+  it('`/new` with a 1:1 agent: its thread says so and its context meter is empty; an agent at work is refused', async () => {
+    const t = open('?intake=issue');
+    const agent = await call<Agent>(t, 'hire_from_manifest', { manifest: { ...reviewHire(demoDraft('Keep the docs up to date')).manifest, provider: 'codex' }, confirmShell: false });
+    await call(t, 'send_chat', { thread: `agent:${agent.id}`, text: 'Are you free?' });
+    const turns = async (type: 'turn_started' | 'turn_completed') => (await snapshot(t)).events.filter((e) => e.agent_id === agent.id && e.kind.type === type).length;
+    for (let i = 0; i < 50 && !(await turns('turn_started')); i++) await vi.advanceTimersByTimeAsync(100);
+    expect([await turns('turn_started'), await turns('turn_completed')]).toEqual([1, 0]);
+    await expect(call(t, 'new_conversation', { agentId: agent.id })).rejects.toThrow(`${agent.name} is still working: stop its turn first`);
+    let before: Agent | undefined;
+    for (let i = 0; i < 30 && !before; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      const s = await snapshot(t);
+      if (s.events.some((e) => e.agent_id === agent.id && e.kind.type === 'turn_completed')) before = s.agents.find((a) => a.id === agent.id);
+    }
+    expect(before?.usage.context_used).toBeGreaterThan(0);
+    expect(await call(t, 'new_conversation', { agentId: agent.id })).toBeNull();
+    const s = await snapshot(t);
+    expect(s.agents.find((a) => a.id === agent.id)).toMatchObject({ session_id: null, usage: { context_used: null } });
+    expect(s.chats.filter((c) => c.thread === `agent:${agent.id}`).at(-1)).toMatchObject({
+      author: 'codly',
+      text: `New conversation. ${agent.name} starts without what was said above. Files and checkpoints are as they are.`,
+    });
+    await expect(call(t, 'new_conversation', { agentId: 'nope' })).rejects.toThrow('unknown agent nope');
+  });
+
   // The last test of this file: the demo's neighbourhood is one for the page, and an office that closed stays closed.
   it('answers Close office: the open office closes once its tasks are over, and its plot is free', async () => {
     // (`?intake=issue` opens the repo and starts no scripted request: no agent is in a turn)

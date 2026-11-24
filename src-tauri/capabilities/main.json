@@ -51,6 +51,7 @@
     "allow-remove-approval-rule",
     "allow-interrupt-agent",
     "allow-stop-agent",
+    "allow-new-conversation",
     "allow-model-catalog",
     "allow-set-agent-model",
     "allow-set-agent-look",

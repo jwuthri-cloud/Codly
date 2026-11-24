@@ -12,6 +12,7 @@ import { toasts } from '../../lib/state/toasts.svelte';
 import { AgentTurns, noTurn } from '../agentTurns';
 import { slashCommands, type SlashContext, type SlashDo } from '../composerActions';
 import { filterSlash } from '../composerMenu';
+import { startNewConversation } from '../newConversation';
 
 /** The modes of a request, as LeadControls lists them. */
 const modes: SlashContext['modes'] = (['ask', 'plan', 'auto', 'direct'] as LeadMode[]).map((id) => ({ id, label: id[0].toUpperCase() + id.slice(1), hint: `${id} hint`, icon: 'chat' }));
@@ -136,8 +137,8 @@ describe('the actions of /', () => {
     // A request has its modes before its Lead starts.
     expect(pick(newRequest, 'auto')).toEqual(['requestMode auto']);
     const gone = 'This agent is gone';
-    expect(off(goneChat)).toMatchObject({ ask: gone, plan: gone, edits: gone, model: 'Not for this agent', compact: gone, context: gone, undo: gone, terminal: gone, mcp: gone });
-    expect(runs(goneChat)).toEqual(['new', 'issue', 'pr', 'clear', 'closed', 'settings', 'shortcuts']);
+    expect(off(goneChat)).toMatchObject({ new: gone, ask: gone, plan: gone, edits: gone, model: 'Not for this agent', compact: gone, context: gone, undo: gone, terminal: gone, mcp: gone });
+    expect(runs(goneChat)).toEqual(['issue', 'pr', 'clear', 'closed', 'settings', 'shortcuts']);
   });
 
   it('an agent’s controls wait for what the sheet waits for', () => {
@@ -174,9 +175,9 @@ describe('what only the core knows, right after / opened the menu', () => {
   const typed = (c: SlashContext, query: string) => filterSlash(list(c), query);
 
   it('the action waits in its place: ↵ on its name runs nothing, and no action that holds the same letters', () => {
-    // "New request" holds a u, and "Compact Ada’s context" holds "te": they run, and they are not first.
+    // "issue" holds a u, and "Compact Ada’s context" holds "te": they run, and they are not first.
     expect(typed(opened, 'u')[0]).toEqual({ name: 'undo', label: 'Undo Ada’s last turn…', icon: 'arrow-left', off: 'Reading what Codly kept of its turns…', wait: true });
-    expect(typed(opened, 'u')[1]).toMatchObject({ name: 'new', run: expect.any(Function) });
+    expect(typed(opened, 'u')[1]).toMatchObject({ name: 'issue', run: expect.any(Function) });
     expect(typed(opened, 'te')[0]).toEqual({ name: 'terminal', label: 'Continue in your terminal', icon: 'terminal', off: 'Asking Codly if it can go…', wait: true });
     expect(typed(opened, 'te')[1]).toMatchObject({ name: 'compact', run: expect.any(Function) });
     expect(pick(opened, 'undo')).toEqual([]);
@@ -188,7 +189,7 @@ describe('what only the core knows, right after / opened the menu', () => {
     expect(typed(yes, 'u')[0]).toMatchObject({ name: 'undo', run: expect.any(Function) });
     expect(typed(yes, 'te')[0]).toMatchObject({ name: 'terminal', run: expect.any(Function) });
     const no = typed(at({ oneToOne: true, agent: ada, turns: { off: 'Codly kept no turn of Ada yet' } }), 'u');
-    expect(no[0]).toMatchObject({ name: 'new' });
+    expect(no[0]).toMatchObject({ name: 'issue' });
     expect(no.find((x) => x.name === 'undo')).toEqual({ name: 'undo', label: 'Undo Ada’s last turn…', icon: 'arrow-left', off: 'Codly kept no turn of Ada yet' });
     expect(no.slice(no.findIndex((x) => x.name === 'undo')).every((x) => 'off' in x)).toBe(true);
   });
@@ -226,6 +227,57 @@ describe('what /undo can open', () => {
     const turns = new AgentTurns(() => Promise.reject(new Error('git is not installed')));
     await turns.ask({ id: 'ada', name: 'Ada' });
     expect(turns.of('ada')).toEqual({ off: 'git is not installed' });
+  });
+});
+
+describe('/new', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const t of [...toasts.list]) toasts.dismiss(t.id);
+  });
+  const row = (c: SlashContext, name: string) => list(c).find((x) => x.name === name);
+
+  it('a new conversation in a 1:1 chat, a new request in a request; /clear keeps its meaning', () => {
+    expect(row(claudeChat, 'new')).toMatchObject({ label: 'New conversation', hint: 'Start a new conversation: Ada forgets this one' });
+    expect(row(codexChat, 'new')).toMatchObject({ label: 'New conversation', hint: 'Start a new conversation: Cody forgets this one' });
+    expect(row(request, 'new')).toMatchObject({ label: 'New request' });
+    expect(pick(request, 'new')).toEqual(['newRequest']);
+    expect(row(claudeChat, 'clear')).toMatchObject({ hint: 'The text and the attached files (for a new conversation: /new)' });
+    expect(row(request, 'clear')).toMatchObject({ hint: 'The text and the attached files' });
+    expect(pick(claudeChat, 'clear')).toEqual(['clear']);
+  });
+
+  it('an agent that cannot start one says why, in the core’s words', () => {
+    const chat = (agent: Agent, over: Partial<SlashContext> = {}) => off(at({ oneToOne: true, agent, ...over })).new;
+    expect(chat(running('wes', 'claude', 'worker'))).toBe('Only a 1:1 agent can start a new conversation');
+    expect(chat({ ...ada, task_id: 't1' })).toBe('Ada is on a task: start a new conversation when the task is done');
+    expect(chat(ada, { busy: true })).toBe('Ada is still working: stop its turn first');
+    const there = { agent_id: 'ada', cwd: '/w', command: 'claude --resume s1', copy_command: 'cd /w && claude --resume s1', since: 1 };
+    expect(chat(ada, { takeover: { takeover: there, blocked: null } })).toBe('Ada is in your terminal: give it back first');
+    expect(off(goneChat).new).toBe('This agent is gone');
+  });
+
+  it('asks once before it acts: nothing reaches the core until you press Start', () => {
+    const core = vi.spyOn(api, 'newConversation').mockResolvedValue(undefined);
+    expect(pick(claudeChat, 'new')).toEqual([]);
+    expect(core).not.toHaveBeenCalled();
+    const asked = toasts.list.at(-1)!;
+    expect([asked.kind, asked.title, asked.body, asked.action?.label]).toEqual([
+      'attention',
+      'Start a new conversation?',
+      'Ada forgets what was said. Files and checkpoints stay as they are. Esc to go back.',
+      'Start',
+    ]);
+    // It waits for you: Esc on the empty composer takes it away (esc.ts `composerEsc`).
+    expect(toasts.waiting?.id).toBe(asked.id);
+    asked.action!.run();
+    expect(core).toHaveBeenCalledWith('ada');
+  });
+
+  it('a refusal of the core says why', async () => {
+    vi.spyOn(api, 'newConversation').mockRejectedValue('Ada is still working: stop its turn first');
+    expect(await startNewConversation({ id: 'ada', name: 'Ada' })).toBe(false);
+    expect(toasts.list.map((t) => [t.kind, t.title, t.body])).toEqual([['error', 'Couldn’t start a new conversation with Ada', 'Ada is still working: stop its turn first']]);
   });
 });
 

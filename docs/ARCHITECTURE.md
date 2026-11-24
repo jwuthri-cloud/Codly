@@ -718,6 +718,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       activity.rs                         the work under way now, for the shell (keep awake, quit question)
                       resume.rs                           after a restart: the question before work goes on, round counts, what stood
                       chat_search.rs                      "Said in conversations": messages of the open repo that hold a query, for the palette
+                      new_conversation.rs                 `/new` in a 1:1 chat: the same agent starts a new session of its CLI, with an empty context
   store/            SQLite: schema.sql, later migrations (m2…m6), typed queries; backup.rs: a copy
                     of the database once a day and before a migration (`<data dir>/backups/`), and
                     the way back from a database that cannot be used (it is moved aside, never deleted;
