@@ -5,6 +5,7 @@
 // inside the CLI stays, and the core tells the agent which files went back.
 import type { AgentCheckpoints } from '../lib/gen/AgentCheckpoints';
 import type { LastTurn } from '../lib/gen/LastTurn';
+import { ESC_PAIR_WINDOW } from '../lib/state/esc';
 import { ago, plural } from '../lib/util/format';
 import { noTurn } from './agentTurns';
 
@@ -38,6 +39,12 @@ export function rewindRows(kept: Pick<AgentCheckpoints, 'checkpoints'>, now: num
 export function rewindOff(kept: Pick<AgentCheckpoints, 'off' | 'checkpoints'>, name: string): string | null {
   return noTurn({ off: kept.off, checkpoints: kept.checkpoints.filter((c) => c.kind === 'turn') }, name);
 }
+
+/** The line under the list's title when the turns are not of the agent's own worktree: a 1:1 agent on a task works in the task's. */
+export const rewindWhere = (kept: Pick<AgentCheckpoints, 'task'>): string | null => (kept.task ? `Turns of task ${kept.task}, in its worktree` : null);
+
+/** The files too big for a checkpoint, which a restore leaves as they are; null: none. */
+export const leftOutLine = (kept: Pick<AgentCheckpoints, 'left_out'>): string | null => (kept.left_out.length ? `Not kept, too big: ${kept.left_out.join(', ')}` : null);
 
 /** The first file names, cut: "a.ts, b.ts, c.ts and 2 more". `changed`: how many files there are in all. */
 export function namesLine(files: string[], changed: number): string {
@@ -107,6 +114,17 @@ export function pick(nav: RewindNav, rows: RewindRow[], at: number): { nav: Rewi
 }
 
 /**
+ * The focus moved onto row `at` (Tab, a press, the keys): the keys are there now, so ↵ acts on
+ * the row that has the focus. The confirm line of another row closes: it asked about that row.
+ * A row that cannot be picked takes no focus, and changes nothing.
+ */
+export function focusRow(nav: RewindNav, rows: RewindRow[], at: number): RewindNav {
+  const it = rewindItems(rows, nav.open)[at];
+  if (!it || !pickable(rows, it) || at === nav.at) return nav;
+  return { ...nav, at, asking: null };
+}
+
+/**
  * A key in the list. ↑ ↓ move over the rows that can be picked, → lists the files of the turn
  * (← and Esc close them), ↵ shows the confirm line in place and a second ↵ restores. Esc closes
  * one level: the confirm line, then the files, then the list.
@@ -133,6 +151,13 @@ export function rewindKey(nav: RewindNav, rows: RewindRow[], key: string): { nav
   if (key === 'Enter') return pick(nav, rows, nav.at);
   return { nav, act: null };
 }
+
+/**
+ * Is an Esc at `now` held by the list that an Esc closed at `closedAt`: it only leaves the
+ * composer the focus went back to. It must not begin a pair (esc.ts `escPair`): three fast
+ * presses would close the list and open it again.
+ */
+export const heldAfterClose = (closedAt: number, now: number): boolean => now >= closedAt && now - closedAt <= ESC_PAIR_WINDOW;
 
 /**
  * The checkpoint "Put this file back" of the sheet's Last turn restores from: the newest turn

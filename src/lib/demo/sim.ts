@@ -644,3 +644,37 @@ export class Actor {
       this.emit({ type: 'rate_limit', window: w.window, used_fraction: w.used_fraction, resets_at: w.resets_at, status: w.status });
   }
 }
+
+/** One turn of an agent that changed files (`editedTurns`). */
+export type EditedTurn = {
+  /** The id of its `turn_started` row: a later turn has a higher one. */
+  id: number;
+  /** The task the agent was on (its id), null: its own work. */
+  task: string | null;
+  ts: number;
+  /** As the core names a turn's checkpoint (orchestrator/checkpoints.rs `turn_label`): the prompt on one line, without its tag, cut at 120. */
+  label: string;
+  /** The files it changed, in the order it first changed them. */
+  files: string[];
+};
+
+/**
+ * The turns of agent `agentId` that changed files, oldest first, as the log tells them: the
+ * demo's checkpoints follow them (demo/checkpoints.ts). The log is cut: its oldest turns go.
+ */
+export function editedTurns(sim: Pick<Sim, 'log'>, agentId: string): EditedTurn[] {
+  const turns: EditedTurn[] = [];
+  let at: EditedTurn | undefined;
+  for (const row of sim.log) {
+    if (row.agent_id !== agentId) continue;
+    const k = row.kind;
+    if (k.type === 'turn_started') {
+      const line = (k.input ?? '').trim().replace(/^\[(User|Codly|Lead)\]/, '').split(/\s+/).filter(Boolean).join(' ');
+      at = { id: row.id, task: row.task_id, ts: row.ts, label: !line ? 'a turn' : line.length > 120 ? `${line.slice(0, 119)}…` : line, files: [] };
+      turns.push(at);
+    } else if (k.type === 'files_changed' && at) {
+      for (const p of k.paths) if (!at.files.includes(p)) at.files.push(p);
+    }
+  }
+  return turns.filter((t) => t.files.length);
+}

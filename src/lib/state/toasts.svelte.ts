@@ -32,6 +32,8 @@ class Toasts {
   private startedAt = new Map<number, number>();
   /** The toasts that are put away now (`putAway`): none of them counts down. */
   private away = new Set<number>();
+  /** The page is out of view (`seen`): no toast counts down. */
+  private hidden = false;
 
   /**
    * Shows a toast, and gives its id. A toast with the kind, the title and the text of one that
@@ -107,8 +109,9 @@ class Toasts {
   }
 
   resume(id: number) {
-    // Not one that is put away (the pointer can leave it at the moment the stack folds), and not one that went.
-    if (this.away.has(id) || !this.list.some((t) => t.id === id)) return;
+    // Not one that is put away (the pointer can leave it at the moment the stack folds), not one
+    // that went, and none while the page is out of view.
+    if (this.hidden || this.away.has(id) || !this.list.some((t) => t.id === id)) return;
     const rem = this.remaining.get(id);
     if (rem != null && !this.timers.has(id)) this.arm(id, rem);
   }
@@ -126,6 +129,20 @@ class Toasts {
     for (const id of before) if (!this.away.has(id)) this.resume(id);
   }
 
+  /**
+   * The page is in view (`visible`) or not (another tab or window is in front). While it is not,
+   * no toast counts down, so none goes before you could see it: one that came meanwhile starts
+   * its time when the page is seen, one that showed goes on with the time it had left, 1.2 s at least.
+   */
+  seen(visible: boolean) {
+    if (this.hidden === !visible) return;
+    this.hidden = !visible;
+    for (const t of this.list) {
+      if (this.hidden) this.pause(t.id);
+      else this.resume(t.id);
+    }
+  }
+
   /** Its time starts again. One that stands still now (the pointer is on it, or it is put away) gets the whole time when it goes on. */
   private restart(id: number, ms: number) {
     if (ms && !this.timers.has(id) && this.remaining.has(id)) this.remaining.set(id, ms);
@@ -141,8 +158,8 @@ class Toasts {
       return;
     }
     this.remaining.set(id, ms);
-    // Put away: its time starts when it shows again.
-    if (this.away.has(id)) return;
+    // Put away, or the page is out of view: its time starts when it shows again.
+    if (this.away.has(id) || this.hidden) return;
     this.startedAt.set(id, Date.now());
     this.timers.set(id, setTimeout(() => this.dismiss(id), ms));
   }

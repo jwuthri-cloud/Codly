@@ -289,3 +289,50 @@ describe('a toast whose action can no longer be done', () => {
     expect(titles()).toEqual(['Push failed', 'Saved']);
   });
 });
+
+describe('while the page is out of view', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    for (const t of [...toasts.list]) toasts.dismiss(t.id);
+    toasts.seen(true);
+    vi.useRealTimers();
+  });
+
+  it('a toast that came meanwhile has its whole time from when the page is seen', () => {
+    toasts.seen(false);
+    toasts.show({ kind: 'success', title: 'Saved' });
+    vi.advanceTimersByTime(60_000);
+    expect(titles()).toEqual(['Saved']);
+    toasts.seen(true);
+    vi.advanceTimersByTime(3999);
+    expect(titles()).toEqual(['Saved']);
+    vi.advanceTimersByTime(1);
+    expect(titles()).toEqual([]);
+  });
+
+  it('a toast that showed goes on with the time it had left, 1.2 s at least', () => {
+    toasts.show({ kind: 'success', title: 'Saved' });
+    toasts.show({ kind: 'info', title: 'Ada joined' });
+    vi.advanceTimersByTime(3500);
+    toasts.seen(false);
+    vi.advanceTimersByTime(60_000);
+    expect(titles()).toEqual(['Saved', 'Ada joined']);
+    toasts.seen(true);
+    vi.advanceTimersByTime(1199);
+    expect(titles()).toEqual(['Saved', 'Ada joined']);
+    vi.advanceTimersByTime(1);
+    expect(titles()).toEqual(['Ada joined']);
+    vi.advanceTimersByTime(1299);
+    expect(titles()).toEqual(['Ada joined']);
+    vi.advanceTimersByTime(1);
+    expect(titles()).toEqual([]);
+  });
+
+  it('at most three stay in the list, and one that is dismissed leaves it at once', () => {
+    toasts.seen(false);
+    const ids = ['a', 'b', 'c', 'd', 'e'].map((title) => toasts.show({ kind: 'info', title }));
+    expect(titles()).toEqual(['c', 'd', 'e']);
+    toasts.dismiss(ids[3]);
+    expect(titles()).toEqual(['c', 'e']);
+  });
+});
