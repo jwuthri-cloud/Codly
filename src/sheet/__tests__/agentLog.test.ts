@@ -27,7 +27,7 @@ describe('the log work of an agent’s sheet', () => {
     reset();
     let builds = 0;
     const work = logWork(() => ++builds);
-    const read = (open: boolean) => work.read(open, agentLogKey('a1', store.revBy.get('a1')));
+    const read = (open: boolean) => work.read(open, agentLogKey('a1'));
     expect(read(true)).toBe(1);
     // Another agent's events: nothing runs.
     apply([said('b1'), said('b1')]);
@@ -44,13 +44,30 @@ describe('the log work of an agent’s sheet', () => {
     expect(read(true)).toBe(3);
   });
 
+  // A snapshot starts the per-agent counts at 0 again: the count of before and of after can be equal.
+  it('runs again after a snapshot that brought events of its agent, though the count starts again', () => {
+    reset();
+    let builds = 0;
+    const work = logWork(() => ++builds);
+    const read = () => work.read(true, agentLogKey('a1'));
+    expect(read()).toBe(1);
+    const snap = { as_of: id + 1, clis: [], accounts: [], workspace: null, settings: null, workspace_team: null, request_prefs: {}, agents, plans: [], tasks: [], approvals: [], chats: [], memories: [], triples: [], artifacts: [], events: [] };
+    (store as unknown as { mergeSnapshot(s: Snapshot, missed: EventRow[]): void }).mergeSnapshot(snap as unknown as Snapshot, [said('a1')]);
+    expect(store.revBy.get('a1')).toBe(0);
+    expect(read()).toBe(2);
+    expect(read()).toBe(2);
+    // A new office (applySnapshot) as well.
+    reset();
+    expect(read()).toBe(3);
+  });
+
   it('runs again when what else it reads changes (History’s filter, the live run)', () => {
     reset();
     let builds = 0;
     const work = logWork(() => ++builds);
-    work.read(true, agentLogKey('a1', store.revBy.get('a1'), 'all'));
-    work.read(true, agentLogKey('a1', store.revBy.get('a1'), 'all'));
-    work.read(true, agentLogKey('a1', store.revBy.get('a1'), 'tools'));
+    work.read(true, agentLogKey('a1', 'all'));
+    work.read(true, agentLogKey('a1', 'all'));
+    work.read(true, agentLogKey('a1', 'tools'));
     expect(builds).toBe(2);
   });
 
@@ -61,7 +78,7 @@ describe('the log work of an agent’s sheet', () => {
     const rows = sheet.slice(sheet.indexOf('const foldedWork = logWork('), sheet.indexOf('const folded = $derived(foldedWork.read('));
     expect(rows).toContain('store.events');
     expect(rows).not.toContain('store.rev');
-    expect(sheet).toMatch(/foldedWork\.read\(historyOpen, agentLogKey\(agent\.id, store\.revBy\.get\(agent\.id\)/);
+    expect(sheet).toMatch(/foldedWork\.read\(historyOpen, agentLogKey\(agent\.id, /);
     expect(source('AgentMcp.svelte')).toMatch(/logWork\(\(\) => startedWithoutFolderConfig\(store\.events/);
     expect(source('AgentControls.svelte')).toMatch(/logWork\(\(\) => compactionLine\(store\.events/);
   });

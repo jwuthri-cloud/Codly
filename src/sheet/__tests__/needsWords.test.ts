@@ -8,7 +8,9 @@ describe('whose request the keys answer, in the sheet’s “Needs you”', () =
 
   it('names the other agent when the keys answer a request the sheet does not show', () => {
     expect(keysAnswerOther({ id: 'ap-1', agent_id: 'ada' }, shown)).toBe('ada');
-    expect(keysAnswerOtherLine('Ada')).toBe('The keys answer the oldest request first (Ada’s). Use the buttons here.');
+    expect(keysAnswerOtherLine('Ada', false)).toBe('The keys answer the oldest request first (Ada’s). Use the buttons here.');
+    // The sheet shows only where the card is: its buttons are there.
+    expect(keysAnswerOtherLine('Ada', true)).toBe('The keys answer the oldest request first (Ada’s). Use the buttons on its card in the conversation.');
   });
 
   it('says nothing when the keys answer one of the requests shown, or none waits', () => {

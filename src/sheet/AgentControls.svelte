@@ -76,7 +76,7 @@
   /** The sign at the button that a compaction happened: what the live run last said about one. */
   const compactedWork = logWork(() => compactionLine(store.events, agent));
   // Only while its row shows, and again only when an event of this agent came (agentLog.ts).
-  const compacted = $derived(compactedWork.read((ui.sections.controls ?? true) && live && !killOff && canCompact(agent), agentLogKey(agent.id, store.revBy.get(agent.id), agent.run_id)));
+  const compacted = $derived(compactedWork.read((ui.sections.controls ?? true) && live && !killOff && canCompact(agent), agentLogKey(agent.id, agent.run_id)));
   async function compact() {
     if (compacting) return;
     compacting = true;

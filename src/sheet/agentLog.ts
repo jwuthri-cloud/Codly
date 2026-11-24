@@ -1,8 +1,10 @@
 // Work of the agent sheet that walks the event log (History's rows and facts, the Traces tab,
 // the MCP section's line, the compaction line of Controls). It is done only while the part that
 // shows it is open, and again only when its key changes: the key holds the agent's own version
-// (`store.revBy`), so an event of another agent costs it nothing.
-// Pure, so the sheet and the tests agree on when the work runs.
+// (`store.revBy`, within the snapshot it counts from), so an event of another agent costs it
+// nothing, and a snapshot that brought missed events builds it again.
+// One place, so the sheet and the tests agree on when the work runs.
+import { store } from '../lib/state/store.svelte';
 
 /** A value worked out from the log, kept until its key changes. */
 export type LogWork<T> = {
@@ -26,6 +28,11 @@ export function logWork<T>(build: () => T): LogWork<T> {
   };
 }
 
-/** The key of one agent's log work: the agent, its own version and what else the work reads (`more`: a filter, a run, a task). */
-export const agentLogKey = (agentId: string, rev: number | undefined, ...more: (string | number | null | undefined)[]): string =>
-  [agentId, rev ?? 0, ...more.map((m) => m ?? '')].join('\u0000');
+/**
+ * The key of one agent's log work: the agent, its own version and what else the work reads
+ * (`more`: a filter, a run, a task). A snapshot starts the per-agent counts at 0 again, so the
+ * count alone can repeat across one: the snapshot's number goes with it. Read inside a
+ * `$derived`, it runs again on this agent's events and on a snapshot, and on no other agent's.
+ */
+export const agentLogKey = (agentId: string, ...more: (string | number | null | undefined)[]): string =>
+  [agentId, store.snapshots, store.revBy.get(agentId) ?? 0, ...more.map((m) => m ?? '')].join('\u0000');

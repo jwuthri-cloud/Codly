@@ -230,7 +230,7 @@
     return null;
   });
   const factsWork = logWork(() => historyFacts(store.events, agent.id, agent.provider));
-  const facts = $derived(factsWork.read(historyOpen, agentLogKey(agent.id, store.revBy.get(agent.id), agent.provider)));
+  const facts = $derived(factsWork.read(historyOpen, agentLogKey(agent.id, agent.provider)));
   const foldedWork = logWork(() => {
     const fx = facts!;
     const out: EventRow[] = [];
@@ -261,7 +261,7 @@
     // one row: a send-back, a request and its answer, a tool call from its start to its end)
     return foldActs(withoutRepeatedTaskRows(out), fx.planCalls);
   });
-  const folded = $derived(foldedWork.read(historyOpen, agentLogKey(agent.id, store.revBy.get(agent.id), agent.provider, filter, task?.id, taskDecided)));
+  const folded = $derived(foldedWork.read(historyOpen, agentLogKey(agent.id, agent.provider, filter, task?.id, taskDecided)));
   const log = $derived(folded?.rows ?? []);
   const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
   /** A decision's summary keeps its first word when it is a task's key or an agent's name ("t1 …", "eli …"). */
@@ -513,7 +513,7 @@
         {:else}
           <div class="needs">{#each approvals as ap (ap.id)}<ApprovalCard approval={ap} showAgent={false} />{/each}</div>
         {/if}
-        {#if keysOther}<p class="keys-other">{keysAnswerOtherLine(clean(keysOther))}</p>{/if}
+        {#if keysOther}<p class="keys-other">{keysAnswerOtherLine(clean(keysOther), inConversation)}</p>{/if}
       </Section>
     {/if}
 

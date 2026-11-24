@@ -9,5 +9,9 @@ export function keysAnswerOther(target: Pick<Approval, 'id' | 'agent_id'> | null
   return target.agent_id;
 }
 
-/** What "Needs you" says then (`name`: the agent whose request the keys answer). */
-export const keysAnswerOtherLine = (name: string): string => `The keys answer the oldest request first (${name}’s). Use the buttons here.`;
+/**
+ * What "Needs you" says then (`name`: the agent whose request the keys answer). `inConversation`:
+ * the sheet shows no card, only where it is, so the buttons to use are on that card.
+ */
+export const keysAnswerOtherLine = (name: string, inConversation: boolean): string =>
+  `The keys answer the oldest request first (${name}’s). Use the buttons ${inConversation ? 'on its card in the conversation' : 'here'}.`;

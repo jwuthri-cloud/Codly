@@ -9,6 +9,17 @@ import { on } from 'svelte/events';
  *  `out:` transition inert while it goes, and takes that off again when it comes back mid-way. */
 export const CLOSING = '[inert]';
 
+/**
+ * Where Tab moves the focus so that it stays inside the dialog (`stops`: what Tab can reach in
+ * it, in order), or null when the browser's own move stays inside. A field inside that took the
+ * key (`defaultPrevented`: the IDE's editor indents with Tab) keeps it, and the focus stays.
+ */
+export function tabWrap<T>(key: Pick<KeyboardEvent, 'shiftKey' | 'defaultPrevented'>, at: unknown, stops: readonly T[], node: T): T | null {
+  if (key.defaultPrevented) return null;
+  if (at !== node && stops.length && at !== stops[key.shiftKey ? 0 : stops.length - 1]) return null;
+  return stops[key.shiftKey ? stops.length - 1 : 0] ?? node;
+}
+
 const TABBABLE = 'a[href], button, input, select, textarea, summary, [tabindex]';
 
 export function modal(node: HTMLElement, onclose: () => void) {
@@ -26,11 +37,10 @@ export function modal(node: HTMLElement, onclose: () => void) {
       e.stopPropagation();
       onclose();
     } else if (e.key === 'Tab') {
-      const s = stops();
-      const at = document.activeElement;
-      if (at === node || at === s[e.shiftKey ? 0 : s.length - 1] || !s.length) {
+      const to = tabWrap(e, document.activeElement, stops(), node);
+      if (to) {
         e.preventDefault();
-        (s[e.shiftKey ? s.length - 1 : 0] ?? node).focus();
+        to.focus();
       }
     }
   });

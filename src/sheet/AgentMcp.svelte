@@ -42,7 +42,7 @@
   // Looked for in the log only when an event of this agent came, and only while the line can
   // show: the section is open, or it has no server, so the line decides whether it shows at all.
   const configWork = logWork(() => startedWithoutFolderConfig(store.events, agent.id, agent.run_id));
-  const withoutFolderConfig = $derived(configWork.read((ui.sections.mcp ?? true) || !servers.length, agentLogKey(agent.id, store.revBy.get(agent.id), agent.run_id)) ?? false);
+  const withoutFolderConfig = $derived(configWork.read((ui.sections.mcp ?? true) || !servers.length, agentLogKey(agent.id, agent.run_id)) ?? false);
   /** A server of this run (the sheet shows one agent after another). */
   const key = (name: string) => `${agent.run_id}:${name}`;
   /** The last request about each server: until it is answered and its next status row came it is on its way (`mcpAskOnItsWay`). */
