@@ -519,7 +519,7 @@ async fn a_turn_that_reaches_its_runs_own_limit_ends_that_run() {
     fake.then(&[Turn { cost: 1.05, reaches: true }]);
     core.send_chat(&thread, "Run three commands").await.unwrap();
     ended(1).await;
-    let budget = "Budget reached: the team has used about $1.05, over the cost budget of $1.00. To go on, raise the budget or press Reset counters in Settings → Autonomy & Budgets.";
+    let budget = "Budget reached: the team has used about $1.05, over the cost budget of $1.00. To go on, raise the budget or press Reset counters in Settings → Autonomy & Budgets. The total can end a little above the budget: a request that was on its way is finished.";
     assert_eq!(errors_of(&core, &agent.id).await, [budget]);
 
     // You raise the budget. The next message starts a new run with what is left now. Its turn
