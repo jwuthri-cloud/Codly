@@ -236,7 +236,7 @@ export function agentDo(thread: () => string): AgentDo {
       ui.modelDialog = { provider: a.provider, agentId: a.id };
     },
     compact: (a) => void compactAgent(a.id, a.name),
-    context: (a) => void showContext(a.id, a.name),
+    context: (a) => void showContext(a.id),
     // Its checkpoints are in the Git tab of the sheet's last section: the sheet opens there.
     undo: (a) => openSheet(a, 'tabs'),
     terminal: (a) => void openInTerminal(a.id),

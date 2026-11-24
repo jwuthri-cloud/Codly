@@ -18,12 +18,13 @@ export function oldestWaiting(items: Item[]): string | null {
 export type Span = { top: number; bottom: number };
 
 /**
- * The scroll position that shows `box` whole inside `view` (each edge `pad` px inside), moving as
- * little as it can. A box taller than that room shows its top. `scrollTop`: the position now.
+ * The scroll position that shows `box` whole inside `view` (its top `pad` px inside, its bottom
+ * `padBottom` px), moving as little as it can. A box taller than that room shows its top.
+ * `scrollTop`: the position now.
  */
-export function revealTop(scrollTop: number, view: Span, box: Span, pad: number): number {
+export function revealTop(scrollTop: number, view: Span, box: Span, pad: number, padBottom = pad): number {
   const top = view.top + pad;
-  const bottom = view.bottom - pad;
+  const bottom = view.bottom - padBottom;
   if (box.top < top) return scrollTop - (top - box.top);
   if (box.bottom <= bottom) return scrollTop;
   return scrollTop + Math.min(box.bottom - bottom, box.top - top);
@@ -78,7 +79,7 @@ export type ScrollState = {
   inView: boolean;
   /** You are at the newest line. */
   atBottom: boolean;
-  /** You were at the newest line when the thread began to hold a card. */
+  /** You were at the newest line when the thread began to hold a card, and have not scrolled up yourself since. */
   followed: boolean;
   /** Rows came in below, or the newest one grows. */
   added: boolean;
@@ -89,11 +90,24 @@ export type ScrollState = {
  * newest line or at the card before it (while you read further up, it does not pull you down).
  * A held card stays where it is while it shows. With no card in view, the thread follows the
  * newest line while you are there; when the last card is answered, it goes back there if you
- * were there when the hold began.
+ * were there when the hold began and did not scroll up yourself since (`followed`, see
+ * `scrolledUpByHand`).
  */
 export function nextMove(s: ScrollState): Move {
   if (s.card && s.fresh) return s.atBottom || s.held ? 'reveal' : s.added ? 'mark' : 'none';
   if (s.card && s.inView) return 'hold';
   if (s.atBottom || (!s.card && s.held && s.followed)) return 'bottom';
   return s.added ? 'mark' : 'none';
+}
+
+/**
+ * Whether a scroll of the thread was yours and went up: it moved the view up from `before` to
+ * `now`, and it is not the scroll the thread made itself (`own`: where the thread last put the
+ * view, as the scroller took it; null when it put it nowhere since the last scroll). At the
+ * newest line (`atEnd`) it is not one: a row that shrank at the end pulls the view back there
+ * by itself.
+ */
+export function scrolledUpByHand(s: { before: number; now: number; own: number | null; atEnd: boolean }): boolean {
+  if (s.own != null && Math.abs(s.now - s.own) < 1) return false;
+  return !s.atEnd && s.now < s.before - 1;
 }

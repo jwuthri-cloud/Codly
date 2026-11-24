@@ -13,12 +13,28 @@
   A card that waits stays in view through a change of layout (a panel opens or closes, the
   window is resized): the thread brings it back once the layout is at rest. The "new below" pill
   never lies on a waiting card's buttons: it goes to the thread's edge, or above the buttons.
+  When you come back after 10 minutes or more (the page hidden, the window without the focus, or
+  a thread you open again), one row before the first new one says what came while you were away;
+  each of its facts takes you to its row (away.ts, AwayRow.svelte). What you did to the agent (a
+  compaction, its mode, its model, a context reading) is a quiet row too (controlRows.ts).
 -->
+<script module lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
+  import type { AwayWindow } from './away';
+  /** By office and thread (`awayKey`): when you left the thread and came back, while its summary row stays (× takes it away). */
+  const awayOf = new SvelteMap<string, AwayWindow>();
+  const awayKey = (office: string | null, thread: string) => `${office ?? ''}\n${thread}`;
+  /** The key of the summary's row. */
+  const AWAY_KEY = 'away';
+  /** How long a row the summary took you to stays marked, in ms. */
+  const MARK_MS = 1600;
+</script>
+
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { store } from '../lib/state/store.svelte';
   import { narrate } from '../lib/state/narration';
-  import { ui } from '../lib/state/ui.svelte';
+  import { ui, wallNow } from '../lib/state/ui.svelte';
   import { clock } from '../lib/util/format';
   import { COMPANY_LABEL, PROVIDER_LABEL, prettyModel } from '../lib/util/labels';
   import EmptyState from '../components/EmptyState.svelte';
@@ -35,13 +51,16 @@
   import TaskDoneCard from './cards/TaskDoneCard.svelte';
   import TroubleRow from './cards/TroubleRow.svelte';
   import WorkRow from './cards/WorkRow.svelte';
+  import AwayRow from './AwayRow.svelte';
+  import { awayKeys, awaySummary, wasAway, withAway, type AwayNames } from './away';
+  import { loadSeen, seenAt, stampSeen } from './lastSeen';
   import Composer from './Composer.svelte';
   import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
-  import { LAYOUT_REST_MS, meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, type Rect } from './threadScroll';
+  import { LAYOUT_REST_MS, meets, newBelow, nextMove, oldestWaiting, pillSpot, revealTop, scrolledUpByHand, type Rect } from './threadScroll';
   import { boxOf, partsOf } from './cards/cardParts';
-  import { workingTodo } from './todoLine';
+  import { todoNow } from './todoLine';
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
   import { busy, queued, queuedHint, sendNowTip, type Sent } from '../lib/state/queue';
   import { isRequestThread } from '../lib/state/ui.svelte';
@@ -59,11 +78,83 @@
   // Another agent's stream, and each new word of what this one writes, build nothing.
   const streams = $derived(owner ? openStreams(owner.id) : '');
   let rows: Item[] = [];
-  const items = $derived.by((): Item[] => {
+  const spine = $derived.by((): Item[] => {
     void streams;
     if (owner) void store.revBy.get(owner.id);
     return (rows = keepRows(rows, buildSpine(thread)));
   });
+
+  // ── what came while you were away: one row, before the first row newer than your leave ──
+  const office = $derived(store.workspace?.id ?? null);
+  /** Names for the summary, read without tracking: the rows change when what they name does. */
+  const names: AwayNames = {
+    agent: (id) => untrack(() => store.agentMap.get(id)?.name ?? 'An agent'),
+    task: (id) => untrack(() => {
+      const t = store.taskMap.get(id);
+      return t ? { key: t.key, assignee: t.assignee } : null;
+    }),
+    planMerged: (id) => untrack(() => !!store.mergeOf(id)),
+  };
+  const away = $derived.by(() => {
+    const w = awayOf.get(awayKey(office, thread));
+    const summary = w ? awaySummary(spine, w, names) : null;
+    return w && summary ? { w, summary } : null;
+  });
+  const items = $derived(away ? withAway(spine, { kind: 'away', key: AWAY_KEY, ts: away.w.since, summary: away.summary }) : spine);
+  /** The page shows and the window has the focus: the thread on screen is looked at. */
+  let present = false;
+  const isPresent = () => document.visibilityState === 'visible' && document.hasFocus();
+  /** You look at `t` again: it sums up what came if you were gone long enough. */
+  function cameBack(o: string, t: string) {
+    const left = seenAt(o, t);
+    const now = wallNow();
+    if (left != null && wasAway(left, now)) awayOf.set(awayKey(o, t), { since: left, back: now });
+  }
+  // The thread is on screen until you open another one (or leave Home): then it is stamped.
+  $effect(() => {
+    const t = thread;
+    const o = office;
+    if (!o) return;
+    untrack(() => {
+      loadSeen(o);
+      present = isPresent();
+      if (present) cameBack(o, t);
+    });
+    return () => untrack(() => present && stampSeen(o, t, wallNow()));
+  });
+  // The page hidden, or the window without the focus, is a leave too; the page going away as well.
+  $effect(() => {
+    const change = () => {
+      const now = isPresent();
+      if (now === present || !office) return;
+      present = now;
+      if (now) cameBack(office, thread);
+      else stampSeen(office, thread, wallNow());
+    };
+    const gone = () => present && office && stampSeen(office, thread, wallNow());
+    document.addEventListener('visibilitychange', change);
+    window.addEventListener('focus', change);
+    window.addEventListener('blur', change);
+    window.addEventListener('pagehide', gone);
+    return () => {
+      document.removeEventListener('visibilitychange', change);
+      window.removeEventListener('focus', change);
+      window.removeEventListener('blur', change);
+      window.removeEventListener('pagehide', gone);
+    };
+  });
+  /** A fact of the summary was pressed: its row comes into view, marked for a moment. */
+  let marked = $state<string | null>(null);
+  let markTimer: ReturnType<typeof setTimeout> | undefined;
+  function jumpTo(key: string) {
+    const el = rowEl(key);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' });
+    marked = key;
+    clearTimeout(markTimer);
+    markTimer = setTimeout(() => (marked = null), MARK_MS);
+  }
+  $effect(() => () => clearTimeout(markTimer));
 
   // ── your messages that the agent has not taken yet ──
   const waiting = $derived.by(() => {
@@ -121,7 +212,7 @@
   /** The card the thread holds now, and its top in the scroller's box (px from the box's top). */
   let heldKey: string | null = null;
   let heldAt = 0;
-  /** You were at the newest line when the thread began to hold a card: it goes back there after the last one. */
+  /** You were at the newest line when the thread began to hold a card, and did not scroll up since: it goes back there after the last one. */
   let followed = false;
   /** The rows there were when you were last at the newest line: the others below the view are counted. */
   let seen = new Set<string>();
@@ -134,6 +225,10 @@
   function countBelow() {
     if (!scroller || !list) return (below = 0);
     const rows = [...list.children].map((li) => ({ key: (li as HTMLElement).dataset.key ?? '', top: offsetOf(li as HTMLElement) }));
+    // The summary of your time away shows: the rows it speaks of are told, and not counted as new.
+    const summary = away ? rowEl(AWAY_KEY) : null;
+    if (away && summary && meets({ top: 0, bottom: scroller.clientHeight }, { top: offsetOf(summary), bottom: offsetOf(summary) + summary.offsetHeight }))
+      seen = new Set([...seen, ...awayKeys(spine, away.w)]);
     // The bottom padding fades out: a row that begins there is not in view yet.
     below = newBelow(rows, seen, scroller.clientHeight - parseFloat(getComputedStyle(scroller).paddingBottom));
     cancelAnimationFrame(pillFrame);
@@ -175,14 +270,24 @@
   function hold(el: HTMLElement) {
     if (!scroller) return;
     const moved = offsetOf(el) - heldAt;
-    if (moved) scroller.scrollTop += moved;
+    if (moved) scrollOwn(scroller.scrollTop + moved);
   }
   /** The card that became the oldest waiting one, whole in view: its command and its buttons. */
   function reveal(el: HTMLElement) {
     if (!scroller) return;
     const top = offsetOf(el);
     const box = { top, bottom: top + el.offsetHeight };
-    scroller.scrollTop = revealTop(scroller.scrollTop, { top: 0, bottom: scroller.clientHeight }, box, parseFloat(getComputedStyle(scroller).paddingTop));
+    const css = getComputedStyle(scroller);
+    // The thread's bottom padding is the room of the "new below" pill: the card stays above it.
+    scrollOwn(revealTop(scroller.scrollTop, { top: 0, bottom: scroller.clientHeight }, box, parseFloat(css.paddingTop), parseFloat(css.paddingBottom)));
+  }
+  /** Where the thread last scrolled itself to, as the scroller took it: the scroll event that
+   *  comes of it is not yours (see `scrolledUpByHand`). */
+  let ownTop: number | null = null;
+  function scrollOwn(top: number) {
+    if (!scroller) return;
+    scroller.scrollTop = top;
+    ownTop = scroller.scrollTop;
   }
   /** After the rows changed: hold the waiting card, or follow the newest line while you are there (see `nextMove`). */
   function settle(added: boolean) {
@@ -211,6 +316,10 @@
     // Any scroll up lets go of the newest line; coming back down within 60px takes it again.
     const d = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     atBottom = d < 2 || (scroller.scrollTop >= lastTop && d < 60);
+    // You scrolled up yourself while a card was held: the thread does not take you back to the
+    // newest line after the last answer.
+    if (scrolledUpByHand({ before: lastTop, now: scroller.scrollTop, own: ownTop, atEnd: d < 2 })) followed = false;
+    ownTop = null;
     lastTop = scroller.scrollTop;
     if (atBottom) {
       unseen = false;
@@ -224,6 +333,8 @@
   function toBottom(smooth = false) {
     if (!scroller) return;
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth && !ui.reducedMotion ? 'smooth' : 'auto' });
+    // A smooth scroll gets there in steps: each goes down, and only a scroll up can be yours.
+    ownTop = scroller.scrollHeight - scroller.clientHeight;
   }
   // A message or a thought being written grows its row without a change of the list: while the
   // thread's agent writes, the height of the list says when to follow, at most once per frame
@@ -311,11 +422,11 @@
   });
 
   const ownerNow = $derived(owner && !isRequest ? narrate(owner.id) : null);
-  /** Its own todo list while it works: "3 of 7 · <the step it is on>". */
+  /** Its own todo list while it works, and greyed while it waits for you: "Step 3 of 7 · <the step it is on>". */
   const ownerTodo = $derived.by(() => {
     if (!owner) return null;
     void store.revBy.get(owner.id);
-    return workingTodo(ownerNow?.tone, store.live[owner.id]?.todo ?? []);
+    return todoNow(ownerNow?.tone, store.live[owner.id]?.todo ?? []);
   });
   const backTo = $derived(ui.request);
   const EXAMPLES = [
@@ -331,7 +442,7 @@
       <Portrait agent={owner} size={26} />
       <div class="o-txt">
         <p class="o-name">1:1 with <b>{owner.name}</b><span class="o-prov">{PROVIDER_LABEL[owner.provider]} ({COMPANY_LABEL[owner.provider]}){owner.model ? ` · ${prettyModel(owner.model)}` : ''}</span></p>
-        {#if ownerNow}<p class="o-now truncate">{#if ownerTodo}<span class="o-todo num">{`${ownerTodo} · `}</span>{/if}<Say parts={ownerNow.parts} /></p>{/if}
+        {#if ownerNow}<p class="o-now truncate">{#if ownerTodo}<span class="o-todo num" class:waits={ownerTodo.waiting}>{`${ownerTodo.text} · `}</span>{/if}<Say parts={ownerNow.parts} /></p>{/if}
       </div>
       <RetryButton task={owner.task_id ? store.taskMap.get(owner.task_id) : null} />
       <button class="btn ghost sm" onclick={() => ui.selectAgent(owner.id)}>Details</button>
@@ -360,7 +471,7 @@
     {:else}
       <ol class="items" bind:this={list}>
         {#each items as it, i (it.key)}
-          <li class="it k-{it.kind}" data-key={it.key}>
+          <li class="it k-{it.kind}" class:marked={marked === it.key} data-key={it.key}>
             {#if it.kind === 'user'}
               {@const q = waiting.get(it.key)}
               {@const failed = it.outgoing?.error ?? null}
@@ -414,8 +525,10 @@
             {:else if it.kind === 'trouble'}
               {@const again = it.retry}
               <TroubleRow agentId={it.agentId} eventId={it.eventId} ts={it.ts} what={it.what} reason={it.reason} onretry={again && i > lastSaid && !isBusy ? () => sendChat(thread, again) : undefined} />
-            {:else if it.kind === 'notice'}
+            {:else if it.kind === 'notice' || it.kind === 'control'}
               <NoticeRow agentId={it.agentId} notes={it.notes} />
+            {:else if it.kind === 'away'}
+              <AwayRow summary={it.summary} onjump={jumpTo} ondismiss={() => awayOf.delete(awayKey(office, thread))} />
             {:else if it.kind === 'work'}
               <WorkRow segs={it.segs} thoughts={it.thoughts} thinking={thinkingText(it)} helpers={it.helpers} />
             {:else if it.kind === 'approval'}
@@ -458,7 +571,10 @@
   .one > .btn:last-child { margin-left: auto; }
   .o-now { font-size: var(--t-sm); color: var(--ink-3); }
   .o-todo { color: var(--ink-2); }
-  .scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 28px 0 28px; scroll-padding-bottom: 20px; mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 10px), transparent 100%); }
+  .o-todo.waits { color: var(--ink-3); }
+  /* The bottom padding is the room of the "new below" pill (a gap of 8, its 30, a gap of 8): the
+     last row, or a card brought into view, ends above it (round 7: the pill lay 10 px on a card). */
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; padding: 28px 0 46px; scroll-padding-bottom: 20px; mask-image: linear-gradient(180deg, transparent 0, #000 28px, #000 calc(100% - 10px), transparent 100%); }
   .hero { height: 100%; display: grid; place-items: center; }
   .ex { height: 32px; padding: 0 14px; border-radius: var(--r-full); background: var(--surface-2); color: var(--ink-2); font-size: var(--t-sm); }
   .ex:hover { background: var(--surface-3); color: var(--ink-1); }
@@ -467,6 +583,10 @@
   /* ponytail: only the newest item rises in, so a thread switch does not replay the whole history. Two items added at once animate only the last; animating each needs a "new since mount" flag per item. */
   .it:last-child { animation: rise-in var(--d-4) var(--spring) both; }
   .k-work { margin: -8px 0; }
+  /* A row the summary of your time away took you to, for a moment. */
+  .it.marked::after { content: ''; position: absolute; inset: -8px -12px; border-radius: var(--r-md); background: var(--surface-3); opacity: 0; pointer-events: none; z-index: -1; animation: marked 1.6s var(--ease-out); }
+  @keyframes marked { 15%, 60% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .it.marked::after { animation: none; opacity: 1; } }
   .user { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
   .user p { max-width: 82%; padding: 10px 16px 11px; border-radius: 20px 20px 6px 20px; background: var(--surface-3); font-size: var(--t-lg); line-height: var(--lh-lg); white-space: pre-wrap; overflow-wrap: anywhere; transition: background-color var(--d-3), box-shadow var(--d-3), color var(--d-3); }
   .user.queued p { background: transparent; box-shadow: inset 0 0 0 1px var(--line-3); color: var(--ink-2); }

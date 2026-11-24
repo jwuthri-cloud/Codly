@@ -169,6 +169,8 @@ class Ui {
   pinned = $state<string[]>(this.prefs.pinned ?? []);
   /** Plans whose branch you chose to keep instead of merging (hides the merge prompt). */
   keptPlans = $state<string[]>(this.prefs.keptPlans ?? []);
+  /** By office, then by thread: when you last had the thread on screen (ms). Read and written by home/lastSeen.ts. */
+  lastSeen = $state<Record<string, Record<string, number>>>({});
 
   /** Sheet sections: expanded state is remembered per section, not per agent. */
   sections = $state<Record<string, boolean>>({
