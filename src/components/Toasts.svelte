@@ -52,6 +52,7 @@
   import Icon from './Icon.svelte';
   import Kbd from './Kbd.svelte';
   import { RESUME_BAR_ROOM } from './ResumeWork.svelte';
+  import { connectionBarRoom } from '../shell/ConnectionBar.svelte';
 
   const ICON: Record<string, string> = { success: 'check-circle', error: 'x-circle', info: 'info', progress: 'refresh', attention: 'flag' };
 
@@ -294,7 +295,7 @@
       resizes,
       ui.sheetOpen, blockers.panel, ide.visible, ui.findOpen, resumeWork.offer, resumeWork.later,
       ui.railOpen, ui.mode, ui.room, ui.planLens, ui.changesLens, ui.knowledgeLens, ui.thread, ui.closedRev,
-      store.workspace?.id, ui.onboarded, ui.onboardingOpen, ui.layoutRev,
+      store.workspace?.id, ui.onboarded, ui.onboardingOpen, ui.layoutRev, connectionBarRoom(),
     ];
     untrack(() => look('layout'));
   });
@@ -404,7 +405,7 @@
   bind:this={stack}
   bind:clientHeight={height}
   style:gap="{GAP}px"
-  style:--bar-room="{barRoom(!!resumeWork.offer, ide.visible, RESUME_BAR_ROOM)}px"
+  style:--bar-room="{barRoom(!!resumeWork.offer, ide.visible, RESUME_BAR_ROOM) + connectionBarRoom()}px"
   style:transform="translateY({down}px)"
   aria-live="polite"
   aria-relevant="additions text"

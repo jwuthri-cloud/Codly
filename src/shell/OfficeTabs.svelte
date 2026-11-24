@@ -26,7 +26,7 @@
     });
   });
   onMount(() => {
-    const t = setInterval(() => document.hidden || void offices.refresh(), 5000);
+    const t = setInterval(() => document.hidden || store.offline || void offices.refresh(), 5000);
     return () => clearInterval(t);
   });
 

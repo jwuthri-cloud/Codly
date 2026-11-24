@@ -156,15 +156,39 @@ class TauriTransport implements Transport {
   }
 }
 
+/** A browser page lost its event stream from `codly serve` (src/lib/state/connection.ts tries
+ *  again). `signedOut`: Codly answers, but this page has no valid sign-in. */
+export class LinkLost extends Error {
+  constructor(readonly signedOut: boolean) {
+    super(signedOut ? 'This page is signed out of Codly. Open the link that `codly serve` printed.' : 'Can’t reach Codly. Is `codly serve` still running?');
+  }
+}
+
+/** An event stream does not say why it failed: one cheap command does. Codly answers 401 to
+ *  every path for a page without its sign-in cookie; no answer at all means it is down. */
+async function signedOut(): Promise<boolean> {
+  try {
+    const r = await fetch('/api/cmd/start_problem', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+    return r.status === 401;
+  } catch {
+    return false;
+  }
+}
+
 /** `codly serve`: the same commands over HTTP, the bus and terminals as server-sent events. */
 class WebTransport implements Transport {
   private events: EventSource | null = null;
+  /** Ends the wait of the last `subscribe`: a closed stream fires no event, so a newer
+   *  subscribe that closes it says so here (else that connect would wait for ever). */
+  private replaced: (() => void) | null = null;
   subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
     this.events?.close();
+    this.replaced?.();
     const es = (this.events = new EventSource('/api/events'));
     const data = (e: Event) => JSON.parse((e as MessageEvent<string>).data);
     return new Promise<Snapshot>((resolve, reject) => {
       let open = false;
+      this.replaced = () => reject(new Error('A newer connection to Codly took over.'));
       es.addEventListener('batch', (e) => onBatch(data(e)));
       es.addEventListener('snapshot', (e) => {
         open = true;
@@ -176,9 +200,9 @@ class WebTransport implements Transport {
       });
       es.onerror = () => {
         es.close();
-        // Codly stopped or restarted: take a fresh snapshot (the store retries via resync).
-        if (open) setTimeout(() => onBatch({ events: [], resync: true }), 1000);
-        else reject(new Error('Can’t reach Codly. Is `codly serve` still running?'));
+        // Codly stopped or restarted: take a fresh snapshot (the store tries again, and waits).
+        if (open) onBatch({ events: [], resync: true });
+        else void signedOut().then((out) => reject(new LinkLost(out)));
       };
     });
   }
