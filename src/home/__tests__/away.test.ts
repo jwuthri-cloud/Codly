@@ -2,7 +2,7 @@
 // things that need you first, each with the row it is about.
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
-import { AWAY_MS, awayFor, awayKeys, awaySummary, hasNews, wasAway, withAway, type AwayNames } from '../away';
+import { AWAY_MS, Presence, STAMP_EVERY_MS, awayFor, awayKeys, awaySummary, hasNews, wasAway, withAway, type AwayNames, type Spot } from '../away';
 import type { Item } from '../spine';
 
 const T = 1_760_000_000_000;
@@ -100,6 +100,11 @@ describe('awaySummary', () => {
     expect(awaySummary([mine('u1', 2), mine('u2', 3), mine('u3', 4), say('s1', 5)], w, names)).toBeNull();
     expect(awaySummary([say('s1', 2), say('s2', 3), say('s3', 50), say('s4', 51)], w, names)).toBeNull();
   });
+
+  it('a card that came after your return is not a fact: it did not come while you were away', () => {
+    const items = [say('s1', 2), say('s2', 3), say('s3', 4), card('a1', 60, 'bo')];
+    expect(texts(items)).toEqual(['3 more rows']);
+  });
 });
 
 describe('the row of the summary', () => {
@@ -131,5 +136,67 @@ describe('hasNews', () => {
   });
   it('the amber of a request that needs you wins over it', () => {
     expect(hasNews({ ...tab, needsYou: true })).toBe(false);
+  });
+});
+
+describe('Presence', () => {
+  const a: Spot = { office: 'o', thread: 'a' };
+  const b: Spot = { office: 'o', thread: 'b' };
+  /** The times kept, as the storage of lastSeen.ts keeps them across a restart. */
+  const kept = () => {
+    const times = new Map<string, number>();
+    const p = (stored = times) =>
+      new Presence(
+        (s) => stored.get(s.thread),
+        (s, t) => stored.set(s.thread, t),
+      );
+    return { times, p };
+  };
+
+  it('a thread you left 10 minutes ago or more sums up from your leave when you open it again', () => {
+    const { times, p } = kept();
+    const presence = p();
+    expect(presence.show(a, true, at(0))).toBeNull();
+    expect(presence.show(b, true, at(5))).toBeNull();
+    expect(times.get('a')).toBe(at(5));
+    expect(presence.show(a, true, at(14))).toBeNull();
+    presence.show(b, true, at(20));
+    expect(presence.show(a, true, at(30))).toEqual({ since: at(20), back: at(30) });
+  });
+
+  it('a page hidden or a window without the focus for 10 minutes is a time away', () => {
+    const { times, p } = kept();
+    const presence = p();
+    presence.show(a, true, at(0));
+    expect(presence.setPresent(false, at(3))).toBeNull();
+    expect(times.get('a')).toBe(at(3));
+    presence.tick(at(10));
+    expect(times.get('a')).toBe(at(3));
+    expect(presence.setPresent(true, at(13))).toEqual({ since: at(3), back: at(13) });
+    expect(presence.setPresent(true, at(14))).toBeNull();
+  });
+
+  it('a quit without a leave event loses at most a minute of your look', () => {
+    const { times, p } = kept();
+    const before = p();
+    before.show(a, true, at(0));
+    for (let m = 0; m <= 240; m++) before.tick(at(m) + 30_000);
+    expect(at(240) + 30_000 - (times.get('a') ?? 0)).toBeLessThanOrEqual(STAMP_EVERY_MS);
+    // Codly is gone: the next start opens the thread the next day.
+    const next = p().show(a, true, at(24 * 60));
+    expect(next?.since).toBeGreaterThanOrEqual(at(240) + 30_000 - STAMP_EVERY_MS);
+  });
+
+  it('does not stamp a thread you do not look at, nor more than once a minute', () => {
+    const { times, p } = kept();
+    const presence = p();
+    presence.show(a, false, at(0));
+    presence.tick(at(5));
+    expect(times.has('a')).toBe(false);
+    presence.setPresent(true, at(6));
+    presence.tick(at(6) + 30_000);
+    expect(times.get('a')).toBe(at(6));
+    presence.tick(at(7));
+    expect(times.get('a')).toBe(at(7));
   });
 });

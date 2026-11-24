@@ -1,7 +1,7 @@
 // When you last had each thread on screen (`ui.lastSeen`, by office), kept across a restart: one
-// localStorage key per office, with the 50 threads you left most recently. A thread is stamped
-// when it leaves the screen (you open another one, hide the page, the window loses the focus,
-// the page goes), never while you look at it. A request you close leaves the map.
+// localStorage key per office, with the 50 threads you left most recently. When a thread is
+// stamped is the rule of `Presence` (away.ts): when it leaves the screen, when you look at it
+// again, and once a minute while you look at it. A request you close leaves the map.
 import { ui } from '../lib/state/ui.svelte';
 
 /** How many threads an office keeps. */

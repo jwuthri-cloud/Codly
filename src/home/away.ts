@@ -31,6 +31,9 @@ export type AwayNames = {
   planMerged: (planId: string) => boolean;
 };
 
+/** How often the thread you look at is stamped: a quit or a crash with no leave event loses at most this much. */
+export const STAMP_EVERY_MS = 60_000;
+
 /** Whether being gone from `left` until `now` counts as away. */
 export const wasAway = (left: number | null | undefined, now: number): boolean => left != null && now - left >= AWAY_MS;
 
@@ -64,8 +67,8 @@ function waitWords(cards: Approval[]): string {
  * The summary of what came in a thread between `w.since` and `w.back`, from its rows (`items`:
  * in their order on screen), or null when there is nothing worth one: fewer than 3 new rows, or
  * less than 10 minutes gone. Your own messages are not news. At most five facts, the ones that
- * need you first: the cards that still wait for you (every card that waits, also one older than
- * your leave: it is the card the thread holds), trouble, requests answered without you (by a
+ * need you first: the cards that still wait for you (every card that came before your return and
+ * waits, also one older than your leave: it is the card the thread holds), trouble, requests answered without you (by a
  * saved rule or by the agent's mode), the tasks that finished, a plan that finished, and how many
  * other rows came. A fact that does not fit is counted with the other rows.
  */
@@ -78,7 +81,7 @@ export function awaySummary(items: readonly Item[], w: AwayWindow, names: AwayNa
   const drafts: Draft[] = [];
   const add = (rank: number, rows: Item[], text: string) => drafts.push({ key: rows[0].key, text, rank, ts: rows[0].ts, covers: rows.filter(fresh) });
 
-  const waiting = items.filter((it): it is Item & { kind: 'approval' } => it.kind === 'approval' && it.approval.status === 'pending');
+  const waiting = items.filter((it): it is Item & { kind: 'approval' } => it.kind === 'approval' && it.approval.status === 'pending' && it.ts <= w.back);
   if (waiting.length) {
     const cards = waiting.flatMap((it) => [it.approval, ...it.twins]);
     const who = [...new Set(cards.map((a) => names.agent(a.agent_id)))];
@@ -150,4 +153,67 @@ export function withAway(items: Item[], row: Item & { kind: 'away' }): Item[] {
  */
 export function hasNews(t: { onScreen: boolean; needsYou: boolean; seen: number | undefined; newest: number | null }): boolean {
   return !t.onScreen && !t.needsYou && t.seen != null && t.newest != null && t.newest > t.seen;
+}
+
+/** A thread of an office. */
+export type Spot = { office: string; thread: string };
+
+/**
+ * When you have the thread on screen and when you came back to it. The thread is stamped when it
+ * leaves the screen (another thread, no thread, the page hidden, the window without the focus),
+ * when you look at it again, and at most once a minute while you look at it (`tick`), so the time
+ * kept is never much older than your last look, also after a quit or a crash that gave no leave
+ * event. Each call that brings you back returns the time to sum up, if you were away long enough.
+ * Pure: the caller gives the clock, reads (`seen`) and keeps (`stamp`) the times.
+ */
+export class Presence {
+  private spot: Spot | null = null;
+  private present = false;
+  private stamped = -Infinity;
+
+  constructor(
+    private readonly seen: (spot: Spot) => number | undefined,
+    private readonly stamp: (spot: Spot, at: number) => void,
+  ) {}
+
+  /** `spot` is the thread on screen now (null: none); `present`: the page shows and the window has the focus. */
+  show(spot: Spot | null, present: boolean, now: number): AwayWindow | null {
+    this.leave(now);
+    this.spot = spot;
+    this.present = present;
+    return this.arrive(now);
+  }
+
+  /** The page was shown or hidden, the window got or lost the focus. */
+  setPresent(present: boolean, now: number): AwayWindow | null {
+    if (present === this.present) return null;
+    if (!present) {
+      this.leave(now);
+      this.present = false;
+      return null;
+    }
+    this.present = true;
+    return this.arrive(now);
+  }
+
+  /** Time passes: the thread you look at is stamped once a minute. */
+  tick(now: number) {
+    if (this.spot && this.present && now - this.stamped >= STAMP_EVERY_MS) this.put(this.spot, now);
+  }
+
+  private arrive(now: number): AwayWindow | null {
+    if (!this.spot || !this.present) return null;
+    const left = this.seen(this.spot);
+    this.put(this.spot, now);
+    return left != null && wasAway(left, now) ? { since: left, back: now } : null;
+  }
+
+  private leave(now: number) {
+    if (this.spot && this.present) this.put(this.spot, now);
+  }
+
+  private put(spot: Spot, now: number) {
+    this.stamp(spot, now);
+    this.stamped = now;
+  }
 }

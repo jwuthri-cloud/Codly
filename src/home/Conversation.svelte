@@ -52,7 +52,7 @@
   import TroubleRow from './cards/TroubleRow.svelte';
   import WorkRow from './cards/WorkRow.svelte';
   import AwayRow from './AwayRow.svelte';
-  import { awayKeys, awaySummary, wasAway, withAway, type AwayNames } from './away';
+  import { Presence, awayKeys, awaySummary, withAway, type AwayNames, type Spot } from './away';
   import { loadSeen, seenAt, stampSeen } from './lastSeen';
   import Composer from './Composer.svelte';
   import LoadEarlier from './LoadEarlier.svelte';
@@ -102,36 +102,38 @@
   });
   const items = $derived(away ? withAway(spine, { kind: 'away', key: AWAY_KEY, ts: away.w.since, summary: away.summary }) : spine);
   /** The page shows and the window has the focus: the thread on screen is looked at. */
-  let present = false;
   const isPresent = () => document.visibilityState === 'visible' && document.hasFocus();
-  /** You look at `t` again: it sums up what came if you were gone long enough. */
-  function cameBack(o: string, t: string) {
-    const left = seenAt(o, t);
-    const now = wallNow();
-    if (left != null && wasAway(left, now)) awayOf.set(awayKey(o, t), { since: left, back: now });
+  const presence = new Presence(
+    (s) => seenAt(s.office, s.thread),
+    (s, at) => stampSeen(s.office, s.thread, at),
+  );
+  /** You came back to the thread after `w`: its summary row stays until × or your next return. */
+  function cameBack(w: AwayWindow | null, s: Spot | null) {
+    if (w && s) awayOf.set(awayKey(s.office, s.thread), w);
   }
-  // The thread is on screen until you open another one (or leave Home): then it is stamped.
+  // The thread is on screen until you open another one (or leave Home).
   $effect(() => {
     const t = thread;
     const o = office;
-    if (!o) return;
     untrack(() => {
-      loadSeen(o);
-      present = isPresent();
-      if (present) cameBack(o, t);
+      if (o) loadSeen(o);
+      const s = o ? { office: o, thread: t } : null;
+      cameBack(presence.show(s, isPresent(), wallNow()), s);
     });
-    return () => untrack(() => present && stampSeen(o, t, wallNow()));
+    return () => untrack(() => presence.show(null, false, wallNow()));
+  });
+  // While you look, the thread is stamped once a minute (on the clock's tick).
+  $effect(() => {
+    void ui.now;
+    untrack(() => presence.tick(wallNow()));
   });
   // The page hidden, or the window without the focus, is a leave too; the page going away as well.
   $effect(() => {
     const change = () => {
-      const now = isPresent();
-      if (now === present || !office) return;
-      present = now;
-      if (now) cameBack(office, thread);
-      else stampSeen(office, thread, wallNow());
+      const s = office ? { office, thread } : null;
+      cameBack(presence.setPresent(isPresent(), wallNow()), s);
     };
-    const gone = () => present && office && stampSeen(office, thread, wallNow());
+    const gone = () => presence.setPresent(false, wallNow());
     document.addEventListener('visibilitychange', change);
     window.addEventListener('focus', change);
     window.addEventListener('blur', change);
