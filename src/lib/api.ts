@@ -157,7 +157,7 @@ class TauriTransport implements Transport {
 }
 
 /** `codly serve`: the same commands over HTTP, the bus and terminals as server-sent events. */
-class WebTransport implements Transport {
+export class WebTransport implements Transport {
   private events: EventSource | null = null;
   subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
     this.events?.close();
@@ -189,14 +189,27 @@ class WebTransport implements Transport {
     return post<string>(cmd, bytes, { 'content-type': 'application/octet-stream', 'x-name': encodeURIComponent(name) });
   }
   attachPty(ptyId: string, onData: (bytes: Uint8Array) => void): Promise<void> {
+    return this.ptyStream(ptyId, onData, false);
+  }
+  /** One terminal's stream; `again`: it replaces one that ended. */
+  private ptyStream(ptyId: string, onData: (bytes: Uint8Array) => void, again: boolean): Promise<void> {
     // ponytail: one connection per terminal; browsers allow 6 per host over HTTP/1.1.
     const es = new EventSource(`/api/pty/${encodeURIComponent(ptyId)}`);
     es.addEventListener('data', (e) => onData(Uint8Array.from(atob((e as MessageEvent<string>).data), (c) => c.charCodeAt(0))));
     return new Promise((resolve, reject) => {
-      es.onopen = () => resolve();
+      let open = false;
+      es.onopen = () => {
+        open = true;
+        // The stream starts with the terminal's scrollback: attached again, the screen starts clean (ESC c).
+        if (again) onData(new Uint8Array([0x1b, 0x63]));
+        resolve();
+      };
       es.onerror = () => {
-        es.close(); // the terminal closed, or Codly went away
-        reject(new Error('no such terminal'));
+        es.close();
+        // The stream ended: Codly let this tab go (it fell behind the output), the terminal
+        // closed, or Codly went away. Attach again; a terminal that is gone answers 404, and that ends it.
+        if (open) setTimeout(() => this.ptyStream(ptyId, onData, true).catch(() => {}), 1000);
+        else reject(new Error('no such terminal'));
       };
     });
   }

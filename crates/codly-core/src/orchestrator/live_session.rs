@@ -313,7 +313,7 @@ mod tests {
     }
 
     /// What Codly keeps in memory about an agent goes when the agent is let go: after ten
-    /// agents came and went, nothing is left.
+    /// agents came and went, and an event named each after it was let go, nothing is left.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn what_is_kept_about_an_agent_goes_when_it_is_let_go() {
         use crate::model::{Provider, Role, Workspace};
@@ -337,9 +337,12 @@ mod tests {
             let a = inner.create_agent(&ws.id, &format!("Ada {i}"), Provider::Claude, Role::Worker, 0, None).unwrap();
             // What its work left in memory: a server's row, its name, a file it announced.
             inner.session_row_seen(&a.id, &EventRow { agent_id: Some(a.id.clone()), ..row(1, server("docs", McpServerStatus::Connected)) });
-            lock(&inner.labels).insert(a.id.clone(), a.name.clone());
+            inner.emit(Some(&ws.id), crate::orchestrator::row(Some(&a.id), None, None, EventKind::Exited { code: Some(0) })).unwrap();
+            assert_eq!(lock(&inner.labels).get(&a.id), Some(&a.name), "its name is read for the event");
             lock(&inner.artifacts_seen).entry(Some(a.id.clone())).or_default().insert("/tmp/shot.png:10".into());
             inner.update_agent(&a.id, |a| a.archived = true).unwrap();
+            // An event after the agent was let go names it again.
+            inner.emit(Some(&ws.id), crate::orchestrator::row(Some(&a.id), None, None, EventKind::Exited { code: Some(0) })).unwrap();
         }
         assert!(lock(&inner.mcp_recorded).is_empty());
         assert!(lock(&inner.labels).is_empty());

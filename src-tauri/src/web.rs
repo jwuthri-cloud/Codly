@@ -403,7 +403,8 @@ async fn events(app: &AppHandle) -> Res {
 }
 
 /// One terminal's bytes (base64), scrollback first; ends when the terminal closes, or when the
-/// tab stopped reading them (`TabQueue`).
+/// tab stopped reading them (`TabQueue`): the page then attaches again, and the scrollback
+/// brings its screen back.
 fn pty(app: &AppHandle, id: &str) -> Res {
     let (tab, rx) = TabQueue::new();
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -421,8 +422,8 @@ const TAB_QUEUE: usize = 8192;
 
 /// The messages that wait for one tab's stream, at most `TAB_QUEUE`. A tab that is that far
 /// behind (it stopped reading: asleep, or on a network that stalls) is let go: its stream ends
-/// after what waits, which the page reads as an error, and the page takes a new snapshot. So
-/// such a tab cannot fill the memory of Codly.
+/// after what waits, which the page reads as an error, and the page takes a new snapshot (or
+/// attaches its terminal again). So such a tab cannot fill the memory of Codly.
 struct TabQueue(std::sync::Mutex<Option<mpsc::Sender<Bytes>>>);
 
 impl TabQueue {

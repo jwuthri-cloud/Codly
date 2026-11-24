@@ -251,8 +251,8 @@ mod tests {
     }
 
     /// What Codly keeps in memory about a plan goes when the plan closes, and a task's key
-    /// when the task is over: after nine plans and three tasks of no plan came and went,
-    /// nothing is left.
+    /// when the task is over: after nine plans and three tasks of no plan came and went, and
+    /// an event named each task after its end, nothing is left.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn what_is_kept_about_a_plan_goes_when_it_closes() {
         use crate::orchestrator::{Core, CoreConfig, StartOptions, row};
@@ -277,8 +277,8 @@ mod tests {
             inner.emit(Some(&ws.id), row(None, None, None, EventKind::PlanChanged { plan: p.clone() })).unwrap();
             let t = Task { id: format!("t{i}"), plan_id: Some(p.id.clone()), ..task("t1", "running", None) };
             inner.emit(Some(&ws.id), row(None, Some(&t.id), None, EventKind::TaskChanged { task: t.clone() })).unwrap();
-            // What the plan left in memory: its task's key, and that it was told stuck.
-            lock(&inner.labels).insert(t.id.clone(), format!("t1@p{i}"));
+            // What the plan left in memory: its task's key (read for the event), and that it was told stuck.
+            assert_eq!(lock(&inner.labels).get(&t.id).map(String::as_str), Some(format!("t1@p{i}").as_str()));
             lock(&inner.stuck_told).insert(p.id.clone(), t.id.clone());
             inner.store.kv_write(&[(told_key(&p.id), Some(t.id.clone()))]).unwrap();
             inner.update_plan(&p.id, |p| {
@@ -286,17 +286,20 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+            // The run's last event comes after the close and names the task again.
+            inner.emit(Some(&ws.id), row(None, Some(&t.id), None, EventKind::Exited { code: Some(0) })).unwrap();
         }
         for i in 0..3 {
             let t = Task { id: format!("quick{i}"), plan_id: None, ..task("q", "running", None) };
             inner.emit(Some(&ws.id), row(None, Some(&t.id), None, EventKind::TaskChanged { task: t.clone() })).unwrap();
-            lock(&inner.labels).insert(t.id.clone(), "q".into());
+            assert_eq!(lock(&inner.labels).get(&t.id).map(String::as_str), Some("q"));
             let end = if i == 0 { TaskStatus::Cancelled } else { TaskStatus::Done };
             inner.update_task(&t.id, |t| {
                 t.status = end;
                 Ok(())
             })
             .unwrap();
+            inner.emit(Some(&ws.id), row(None, Some(&t.id), None, EventKind::Exited { code: Some(0) })).unwrap();
         }
         assert!(lock(&inner.labels).is_empty());
         assert!(lock(&inner.stuck_told).is_empty());
