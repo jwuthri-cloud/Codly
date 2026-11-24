@@ -1,5 +1,5 @@
 // The browser demo keeps one id for its repo per browser profile (demo/workspaceId.ts): after a
-// reload it opens on the request you left, and the storage keeps no office look of the demo.
+// reload it opens on the request you left, and the office keeps its look under that id only.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { demoWorkspaceId } from '../demo/workspaceId';
 
@@ -29,7 +29,7 @@ describe('the demo repo’s id', () => {
     expect(kept.get('codly.demo.workspace')).toBe(first);
   });
 
-  it('takes away the office look of every load, its own id’s too, and keeps every other key', () => {
+  it('keeps the office look of its own id, takes away that of every other demo id, and keeps every other key', () => {
     const kept = fakeStorage({
       'codly.demo.workspace': 'ws-0198-7abc',
       'codly.sims.ws-0198-7abc': 'mine',
@@ -40,9 +40,10 @@ describe('the demo repo’s id', () => {
       'codly.theme': 'dark',
     });
     expect(demoWorkspaceId()).toBe('ws-0198-7abc');
-    // The demo's agents get new ids on each load: nothing of an earlier load's look applies,
-    // and a kept key would grow by each load's agents. The request you were on is kept.
-    expect([...kept.keys()].sort()).toEqual(['codly.demo.workspace', 'codly.request.ws-0198-7abc', 'codly.sims.demo', 'codly.theme']);
+    // The demo's agents keep their ids from one load to the next: the look is theirs again.
+    // The looks an older demo left under an id of each load go; the request you were on is kept.
+    expect([...kept.keys()].sort()).toEqual(['codly.demo.workspace', 'codly.request.ws-0198-7abc', 'codly.sims.demo', 'codly.sims.ws-0198-7abc', 'codly.theme']);
+    expect(kept.get('codly.sims.ws-0198-7abc')).toBe('mine');
   });
 
   it('is a new one for the page when the browser keeps nothing', () => {

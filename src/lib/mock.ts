@@ -199,14 +199,17 @@ function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
   const checks = new ChecksDemo(states.checksOn);
   const story = new Story(sim, {
     checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing,
-    resumeAsk: states.resumeAsk, background: states.background, failFirstTurn: states.turnFailed, twoRequests: states.twoRequests,
+    resumeAsk: states.resumeAsk, background: states.background, failFirstTurn: states.turnFailed, twoRequests: states.twoRequests, threeCards: states.threeCards,
   });
   const trouble = states.mergeConflict ? 'conflict' : states.mergeChecks ? 'checks' : null;
+  const workspaceTrust = new WorkspaceTrustDemo(states.trustAsk);
+  // Like the core: a Claude run leaves out the repo's own configuration while you have not trusted it, unless "Use my own CLI setup" is off.
+  sim.withoutFolderConfig = () => sim.settings.use_my_claude_setup && workspaceTrust.trust(null).state === 'without';
   return {
     sim, story, checks,
     ctl: new MockControls(sim), breaker: new MockBreaker(sim), askMe: new MockAskMe(sim, !billing),
     conflicts: new MergeConflictDemo(trouble, sim, story), previews: new PreviewDemo(states.previewRunning),
-    workspaceTrust: new WorkspaceTrustDemo(states.trustAsk), pullRequests: new PullRequestDemo(states.prOpen), checkpoints: new DemoCheckpoints((id) => sim.edited.has(id)),
+    workspaceTrust, pullRequests: new PullRequestDemo(states.prOpen), checkpoints: new DemoCheckpoints((id) => sim.edited.has(id)),
     takeovers: new DemoTakeovers(), worktrees: new WorktreeDemo(), hk: undefined, pushed: false, ahead: 0, closed: [], merge: null, mergeCommits: 0,
   };
 }
@@ -460,6 +463,8 @@ export class MockTransport implements Transport {
       }
       case 'merge_plan': {
         const planId = String(a.planId);
+        // Like the core: a plan that cannot be merged is refused before its checks run.
+        story.mergeable(planId);
         this.conflicts.refuse(planId, a.unchecked === true);
         const sha = story.mergePlan(planId);
         // The commit of each finished task, and the merge commit.
@@ -808,8 +813,12 @@ export class MockTransport implements Transport {
       }
       case 'agent_git':
         return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now(), sim.log);
-      case 'agent_diff':
-        return mockAgentDiff(sim.agents.get(String(a.agentId)), sim.log);
+      case 'agent_diff': {
+        // A worker on a task: the files it wrote for the task, with their text as the task's diff has it.
+        const agent = sim.agents.get(String(a.agentId));
+        const task = agent?.task_id ? sim.tasks.get(agent.task_id) : undefined;
+        return mockAgentDiff(agent, sim.log, task ? { key: task.key, files: story.taskFiles(task) } : null);
+      }
       case 'agent_checkpoints':
         return this.checkpoints.list(sim.agents.get(String(a.agentId)), sim.now());
       case 'restore_checkpoint':

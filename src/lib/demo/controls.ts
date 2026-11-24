@@ -23,6 +23,9 @@ export const DEMO_MCP: { name: string; status: McpServerStatus; error: string | 
   { name: 'postgres', status: 'failed', error: 'MCP error -32000: Connection closed' },
 ];
 
+/** The refusal of a stop for an id that names nothing running beside the agent (adapters/claude.rs `NOT_RUNNING`). */
+export const NOT_RUNNING = 'that work is not running any more';
+
 /** The name the agent panel gives each mode (the core's `PermissionMode::label`). */
 export const MODE_LABEL: Record<PermissionMode, string> = { ask: 'ask for edits', accept_edits: 'accept edits', plan: 'plan first' };
 
@@ -229,8 +232,8 @@ export class MockControls {
    *  A helper is stopped the same way, and the agent is then told in a turn of its own
    *  (demo/background.ts). `taskId`: the id the agent's list gives the one to stop, or the call
    *  id of a helper whose call waits for it (in no list): that helper ends, and the agent's turn
-   *  goes on. Like Claude Code, a stop of something that is over already answers and changes
-   *  nothing. */
+   *  goes on. Like the core, an id that names neither (or something that is over already) is
+   *  refused, and nothing reaches the CLI. */
   stopTask(id: string, taskId: string): null {
     const a = this.agent(id);
     if (!taskId.trim()) throw new Error('which background command?');
@@ -242,7 +245,7 @@ export class MockControls {
       return null;
     }
     const helper = background.waiting(id, taskId);
-    if (helper === null) return null;
+    if (helper === null) throw new Error(NOT_RUNNING);
     this.note(id, `asked ${a.name} to stop its helper: ${helper}`);
     background.stopWaited(id, taskId);
     return null;
