@@ -140,3 +140,21 @@ export class ControlReader {
     return rows;
   }
 }
+
+/** How far apart in time the core's own line of a model switch and the agent's change may be. */
+const SAID_MS = 10_000;
+
+/**
+ * The rows without the model notes that a line of the thread already says (`said`: the thread's
+ * lines from Codly). A switch of a live Claude session's model or effort posts its own line ("Ada
+ * now works with sonnet, in the same conversation: no restart was needed.", controls.rs) and then
+ * changes the agent, which makes a model note: one act, one sentence, and the line says more.
+ */
+export function withoutSaid(rows: Note[][], said: readonly { ts: number; text: string }[], name: string): Note[][] {
+  const prefix = `${name} now works with `;
+  const lines = said.filter((s) => s.text.startsWith(prefix));
+  if (!lines.length) return rows;
+  const told = (n: Note) => kindOf.get(n) === 'model' && lines.some((s) => Math.abs(s.ts - n.ts) <= SAID_MS);
+  if (!rows.some((r) => r.some(told))) return rows;
+  return rows.map((r) => (r.some(told) ? r.filter((n) => !told(n)) : r)).filter((r) => r.length);
+}

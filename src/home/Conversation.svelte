@@ -60,7 +60,7 @@
   import LoadEarlier from './LoadEarlier.svelte';
   import NextRow from './NextRow.svelte';
   import { buildSpine, keepRows, openStreams, streamText, thinkingText, type Item } from './spine';
-  import { LAYOUT_REST_MS, meets, newBelowSorted, nextMove, oldestWaiting, pageKey, pillSpot, revealTop, scrolledUpByHand, unseenFrom, type Rect } from './threadScroll';
+  import { LAYOUT_REST_MS, meets, newBelowSorted, nextMove, oldestWaiting, pageKey, pillSpot, revealTop, scrolledUpByHand, unseenFrom, wheelPass, type Rect } from './threadScroll';
   import { headRetry, retryNow, sentAgain } from './retryFold';
   import { sysMarks } from './sysMarks';
   import { boxOf, partsOf } from './cards/cardParts';
@@ -68,6 +68,7 @@
   import { copyText, resendChat, sendChat, sendQueuedNow } from '../lib/state/actions';
   import { busy, queued, queuedHint, sendNowTip, type Sent } from '../lib/state/queue';
   import { isRequestThread } from '../lib/state/ui.svelte';
+  import { openOne } from '../lib/state/esc';
 
   interface Props {
     thread: string;
@@ -176,7 +177,9 @@
     void store.threadAgent(thread);
     void store.rev;
     void store.chats;
-    const out = untrack(() => queued(thread, sent));
+    // What you sent is tracked: a message that enters the thread shows as queued at once.
+    const mine = sent;
+    const out = untrack(() => queued(thread, mine));
     if (out.size) void ui.now;
     return out;
   });
@@ -495,35 +498,43 @@
   });
 
   // PageDown, Space, PageUp, Home and End scroll the thread while the focus is on the page (on
-  // no field, button or card: those take their own keys).
+  // no field, button or card: those take their own keys), and no dialog is open over it (the
+  // same test as the app's keys). A held key moves at once: a smooth scroll that starts again on
+  // each repeat would crawl.
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!scroller || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.target !== document.body && e.target !== document.documentElement) return;
+      if (ui.paletteOpen || ui.settingsOpen || ui.shortcutsOpen || openOne(document.querySelectorAll('[aria-modal="true"]'))) return;
       const to = pageKey(e.key, e.shiftKey, scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
       if (to == null) return;
       e.preventDefault();
-      scroller.scrollTo({ top: to, behavior: ui.reducedMotion ? 'auto' : 'smooth' });
+      scroller.scrollTo({ top: to, behavior: ui.reducedMotion || e.repeat ? 'auto' : 'smooth' });
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
 
   /** The wheel over a box in a row that keeps the wheel (a card's body that scrolls) and is at
-   *  its end: the browser moves nothing, so the thread takes the wheel. */
-  function onWheel(e: WheelEvent) {
-    if (!scroller || e.ctrlKey || !e.deltaY) return;
-    for (let el = e.target as HTMLElement | null; el && el !== scroller; el = el.parentElement) {
-      if (el.scrollHeight <= el.clientHeight) continue;
-      const css = getComputedStyle(el);
-      if (!/auto|scroll/.test(css.overflowY)) continue;
-      // A box that passes the wheel on does so by itself.
-      if (css.overscrollBehaviorY === 'auto') return;
-      const atItsEnd = e.deltaY > 0 ? el.scrollTop + el.clientHeight >= el.scrollHeight - 1 : el.scrollTop <= 0;
-      if (atItsEnd) scroller.scrollTop += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * scroller.clientHeight : e.deltaY;
-      return;
-    }
-  }
+   *  its end: the browser moves nothing, so the thread takes the wheel (`wheelPass`). A passive
+   *  listener: the browser never waits for this page before it scrolls. */
+  $effect(() => {
+    const sc = scroller;
+    if (!sc) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || !e.deltaY) return;
+      for (let el = e.target as HTMLElement | null; el && el !== sc; el = el.parentElement) {
+        if (el.scrollHeight <= el.clientHeight) continue;
+        const css = getComputedStyle(el);
+        const by = wheelPass({ scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight, overflowY: css.overflowY, overscrollY: css.overscrollBehaviorY }, e.deltaY, e.deltaMode, sc.clientHeight);
+        if (by == null) continue;
+        if (by) sc.scrollTop += by;
+        return;
+      }
+    };
+    sc.addEventListener('wheel', onWheel, { passive: true });
+    return () => sc.removeEventListener('wheel', onWheel);
+  });
 
   const ownerNow = $derived(owner && !isRequest ? narrate(owner.id) : null);
   /** Its own todo list while it works, and greyed while it waits for you: "Step 3 of 7 · <the step it is on>". */
@@ -555,7 +566,7 @@
     </header>
   {/if}
 
-  <div class="scroll" bind:this={scroller} onscroll={onScroll} onwheel={onWheel}>
+  <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     <LoadEarlier {thread} {scroller} />
     {#if !items.length}
       {#if thread === 'lead'}

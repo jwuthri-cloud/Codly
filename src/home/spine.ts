@@ -26,7 +26,7 @@ import { killedAt, killLine, stoppedByYou, stoppedTurns } from '../lib/state/sto
 import { isRequestThread } from '../lib/state/ui.svelte';
 import { contextReads } from '../lib/state/control.svelte';
 import type { Away } from './away';
-import { ControlReader } from './controlRows';
+import { ControlReader, withoutSaid } from './controlRows';
 import { NoticeReader, type Note } from './notices';
 import { TroubleReader, canRetry, endedByKill, messageOf, reported, type TroubleKind } from './outcomes';
 
@@ -197,10 +197,16 @@ type LogRead = {
 };
 const logReads = new Map<string, LogRead>();
 
+/** How many threads' reads are kept (a test counts them). */
+export const logReadsKept = (): number => logReads.size;
+
 function readLog(thread: string, owner: Agent, cost?: SpineCost): LogRead {
   const log = store.events;
   let r = logReads.get(thread);
   if (!r || r.log !== log || r.next > log.length || r.agent !== owner.id || r.name !== owner.name) {
+    // A read of another log (one trimmed or replaced, another office's) is of no use any more,
+    // and it would keep that log alive.
+    for (const [key, other] of logReads) if (other.log !== log) logReads.delete(key);
     r = { log, next: 0, agent: owner.id, name: owner.name, troubles: new TroubleReader(owner.id), notices: new NoticeReader(owner.id), controls: new ControlReader({ id: owner.id, name: owner.name }, isName) };
     logReads.set(thread, r);
   }
@@ -349,7 +355,8 @@ export function buildSpine(thread: string, cost?: SpineCost): Item[] {
     }
 
     // ── what you did to it: a compaction, a mode, a model, a context reading ──
-    for (const notes of log.controls.rows(contextReads[owner.id] ?? null))
+    const said = chats.filter((c) => c.author === 'codly');
+    for (const notes of withoutSaid(log.controls.rows(contextReads[owner.id] ?? null), said, owner.name))
       items.push({ kind: 'control', key: `x:${notes[0].eventId}:${notes[0].ts}`, ts: notes[notes.length - 1].ts, agentId: owner.id, notes });
   }
 

@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Approval } from '../../lib/gen/Approval';
 import type { Item } from '../spine';
-import { meets, newBelow, newBelowSorted, nextMove, oldestWaiting, pageKey, pillSpot, revealTop, scrolledUpByHand, unseenFrom, type Rect, type ScrollState } from '../threadScroll';
+import { meets, newBelow, newBelowSorted, nextMove, oldestWaiting, pageKey, pillSpot, revealTop, scrolledUpByHand, unseenFrom, wheelPass, type Rect, type ScrollState, type WheelBox } from '../threadScroll';
 
 const card = (key: string, status: string): Item => ({ kind: 'approval', key, ts: 0, approval: { status } as unknown as Approval, twins: [] });
 const sys = (key: string): Item => ({ kind: 'system', key, ts: 0, text: 'x', card: null });
@@ -177,5 +177,37 @@ describe('pageKey', () => {
     expect(pageKey('End', false, 1000, 600, 5000)).toBe(5000);
     expect(pageKey('ArrowDown', false, 1000, 600, 5000)).toBeNull();
     expect(pageKey('Enter', false, 1000, 600, 5000)).toBeNull();
+  });
+});
+
+describe('wheelPass', () => {
+  // A card body of 300 px that holds 900 px and keeps the wheel.
+  const body = (scrollTop: number, more: Partial<WheelBox> = {}): WheelBox => ({ scrollTop, scrollHeight: 900, clientHeight: 300, overflowY: 'auto', overscrollY: 'contain', ...more });
+
+  it('a body at its end in the wheel’s direction gives the wheel to the thread', () => {
+    expect(wheelPass(body(600), 40, 0, 500)).toBe(40);
+    expect(wheelPass(body(599.5), 40, 0, 500)).toBe(40);
+    expect(wheelPass(body(0), -40, 0, 500)).toBe(-40);
+  });
+
+  it('a body that can still scroll that way keeps the wheel', () => {
+    expect(wheelPass(body(0), 40, 0, 500)).toBe(0);
+    expect(wheelPass(body(600), -40, 0, 500)).toBe(0);
+    expect(wheelPass(body(300), 40, 0, 500)).toBe(0);
+  });
+
+  it('a body that passes the wheel on by itself is left to the browser', () => {
+    expect(wheelPass(body(600, { overscrollY: 'auto' }), 40, 0, 500)).toBe(0);
+  });
+
+  it('a box that does not scroll lets a box further out decide', () => {
+    expect(wheelPass(body(0, { scrollHeight: 300 }), 40, 0, 500)).toBeNull();
+    expect(wheelPass(body(600, { overflowY: 'hidden' }), 40, 0, 500)).toBeNull();
+    expect(wheelPass(body(600, { overflowY: 'visible' }), 40, 0, 500)).toBeNull();
+  });
+
+  it('lines and pages are turned into pixels', () => {
+    expect(wheelPass(body(600), 3, 1, 500)).toBe(48);
+    expect(wheelPass(body(600), 1, 2, 500)).toBe(500);
   });
 });

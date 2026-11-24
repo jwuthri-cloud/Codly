@@ -150,3 +150,21 @@ export function pageKey(key: string, shift: boolean, top: number, page: number, 
   if (key === 'End') return height;
   return null;
 }
+
+/** A box under the pointer, as the wheel sees it. */
+export type WheelBox = { scrollTop: number; scrollHeight: number; clientHeight: number; overflowY: string; overscrollY: string };
+
+/**
+ * The wheel over a box in a row: how far the thread scrolls by itself. Null: the box does not
+ * scroll, so a box further out decides. A box that keeps the wheel (overscroll-behavior other than
+ * auto) and is at its end in the wheel's direction moves nothing, so the thread takes the wheel
+ * (0: the box scrolls, or passes the wheel on by itself). `deltaMode`: 0 pixels, 1 lines (16 px),
+ * 2 pages (`page`: the thread's view).
+ */
+export function wheelPass(box: WheelBox, deltaY: number, deltaMode: number, page: number): number | null {
+  if (box.scrollHeight <= box.clientHeight || !/auto|scroll/.test(box.overflowY)) return null;
+  if (box.overscrollY === 'auto') return 0;
+  const atItsEnd = deltaY > 0 ? box.scrollTop + box.clientHeight >= box.scrollHeight - 1 : box.scrollTop <= 0;
+  if (!atItsEnd) return 0;
+  return deltaMode === 1 ? deltaY * 16 : deltaMode === 2 ? deltaY * page : deltaY;
+}
