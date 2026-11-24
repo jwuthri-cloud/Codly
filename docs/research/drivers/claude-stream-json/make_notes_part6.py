@@ -165,7 +165,8 @@ plugin's server; a plugin can also bring hooks, not recorded) that the user had 
 Differences from the part 5 method:
 - `r5_lib.Procs` now matches the whole command text (`Procs("sleep 41")` no longer matches `sleep 410` or
   `sleep 41.5`), and every script uses it that way. Part 6 scripts give each scenario's `sleep` a duration no other
-  script uses.
+  script uses. Two runs that look for the same text must not run at the same time: at its end a run kills every new
+  match, also the other run's. One recording of section 5 was hurt that way and is not kept (section 5).
 - Plugins: section 1 installs a plugin of the scenario (`ping-plugin`, from a local marketplace folder) with the CLI's
   own `claude plugin` commands in a throw-away HOME. The sanitizer keeps that plugin (and its server
   `plugin:ping-plugin:ping-plugged`) in `init`, and removes every other plugin.
@@ -411,7 +412,8 @@ for v, ns in N4.items():
         w("| `%s` | %s | %s |" % (n, "; ".join(answers), ", ".join("`%s`" % t for t in texts)))
 FL = note(N4["env"][0], "rewind_files_flag")
 w("""
-After the exit of each `env` run: `claude -p --resume <session> --rewind-files <U2>` with the same variable answered
+After the exit of each `env` run: `claude -p --strict-mcp-config --setting-sources local --resume <session>
+--rewind-files <U2>` with the same variable answered
 `%s` (exit code %d) and `hello.txt` was `%s` again (n=2).
 
 What the adapter can rely on (n=2 per way):
@@ -434,7 +436,7 @@ w("## 5. `stop_task` in the last moment of a turn; `stop_task` on a background c
 w("Question: `stop_task` on a background helper during the turn's LAST model request: does a turn start by itself after the `result`? And "
   "`stop_task` on a background COMMAND while a turn runs: the lines, and whether a turn follows.\n")
 N5 = {v: named("r8-stop-%s-" % v) for v in ("helper-last-request", "command-last-request", "command-mid-turn")}
-check(len(N5["helper-last-request"]) == 2 and len(N5["command-last-request"]) == 2 and len(N5["command-mid-turn"]) >= 2, "the recordings of section 5")
+check(len(N5["helper-last-request"]) == 2 and len(N5["command-last-request"]) == 2 and len(N5["command-mid-turn"]) == 3, "the recordings of section 5")
 w("Fixtures: `r8-stop-helper-last-request-*` (turn 1 starts a helper in the background, its Bash call `echo begin; sleep 211; echo end`; "
   "turn 2 asks for a poem with no tool, one model request; `stop_task` with the helper's id at turn 2's first streamed text delta), "
   "`r8-stop-command-last-request-*` (turn 1 starts `echo bg; sleep 227` in the background; the same turn 2 and moment), "
@@ -472,27 +474,7 @@ MID5 = {n: [l for l in fx(n) if sub(l) == "task_notification" and l["tool_use_id
 for n in N5["command-mid-turn"]:
     q = note(n, "transcript")
     check(not SELF5[n] and (q["enqueued"], q["attached_to_a_running_turn"], q["removed"]) == (1, 1, 1), "the command's notification handed to the turn in " + n)
-FAILED5 = [n for n, ls in MID5.items() if [l["status"] for l in ls] == ["failed"]]
-check(len(FAILED5) == 1 and all([l["status"] for l in MID5[n]] == ["completed"] for n in MID5 if n not in FAILED5), "the turn's own call in the mid-turn runs")
-FAILED5_CALL = MID5[FAILED5[0]][0]["tool_use_id"]
-FAILED5_RESULT = next(b["content"] for l in fx(FAILED5[0]) if l.get("type") == "user" and is_cli(l) and isinstance(l["message"]["content"], list)
-                      for b in l["message"]["content"] if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == FAILED5_CALL)
-
-
-def stamp_of(name, pred):
-    """The time of the first line of a fixture that matches (the last time marker before it, or its own `_t`)."""
-    t = 0.0
-    for l in fx(name):
-        if "_t" in l:
-            t = l["_t"]
-        if pred(l):
-            return t
-    return None
-
-
-FAILED5_SECS = (stamp_of(FAILED5[0], lambda l: sub(l) == "task_notification" and l["tool_use_id"] == FAILED5_CALL)
-                - stamp_of(FAILED5[0], lambda l: has_tool_use(l) and any(b.get("id") == FAILED5_CALL for b in l["message"]["content"])))
-check(FAILED5_RESULT.startswith("Exit code 144") and FAILED5_SECS < 10, "the call that ended early in " + FAILED5[0])
+check(all([l["status"] for l in ls] == ["completed"] for ls in MID5.values()), "the turn's own call in the mid-turn runs")
 w("""
 What the adapter can rely on:
 - A helper stopped during the turn's LAST model request (n=2): the stop itself as always (`killed`, `stopped`, the
@@ -506,13 +488,12 @@ What the adapter can rely on:
   `{}`), and NO turn by itself, both during the turn's last model request (n=2) and during its tool call (n=%d). Its
   notification is put in the queue too: during a tool call it was handed to the turn's next model request (and taken
   out of the queue); during the last request it stayed in the queue until the exit (enqueued, not handed, not
-  removed) and started nothing in 25 s.
-- In 1 of the %d `command-mid-turn` runs (`%s`) the turn's own foreground call (`echo go; sleep 22.5`) ended %.2f s
-  after its `tool_use` line, not after 22.5 s, with the tool result `%s` and its `task_notification` `failed`; in the
-  other runs it ran to its end (`completed`). The cause was not found (no script of this part signals a `sleep 22.5`);
-  it is not taken as a rule.
-""" % (", ".join("%.2f" % note(n, "seconds_from_stop_task")["init_after_it"] for n in N5["helper-last-request"]), len(N5["command-mid-turn"]),
-       len(N5["command-mid-turn"]), FAILED5[0], FAILED5_SECS, FAILED5_RESULT.replace("\n", "\\n")))
+  removed) and started nothing in 25 s. In every `command-mid-turn` run the turn's own foreground call ran to its end
+  (`completed`).
+- A fourth `command-mid-turn` recording was not kept: the driver itself ended its foreground `sleep 22.5` (exit code
+  144). A `command-last-request` run that ran at the same time killed, at its end, every new process that matched
+  `sleep 22.5`, its own or not. The script now looks for that `sleep` only in the `command-mid-turn` variant.
+""" % (", ".join("%.2f" % note(n, "seconds_from_stop_task")["init_after_it"] for n in N5["helper-last-request"]), len(N5["command-mid-turn"])))
 
 # ================================================================= 6
 w("## 6. After a budget stop: the call that runs on, and a helper with requests left\n")
@@ -564,47 +545,77 @@ for v in ("interrupt", "stop-task"):
         w("| `%s` | %.6f | %.2f | %s | `%s` | %s | %s | %s |" % (n, r["budget_usd"], r["t_result"], "yes" if r["sleep_alive_at_the_result"] else "no", v.replace("-", "_"),
                                                          ", ".join("`%s`" % k for k in ar["lines"]), "yes" if ar["sleep_alive"] else "no",
                                                          ", ".join("`%s`" % k for k in ae["lines_after_stdin_was_closed"]) or "nothing"))
-HELPER6 = {}
 for n in PASS6["helper-goes-on"]:
     w("\n`%s`: the helper's lines, the results and stderr:\n" % n)
     w(block(tl(n, lambda l: (l.get("type") == "assistant" and l.get("parent_tool_use_id") and (has_tool_use(l) or has_text(l))) or task_or_list(l) or "_stderr" in l
                or (l.get("type") == "user" and is_cli(l) and l.get("parent_tool_use_id") and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in l["message"]["content"]))
                or kind(l) == "result" or (kind(l) == "meta" and ("forty_s_after_the_stop" in l["_meta"] or "after_the_exit" in l["_meta"])), text=320)))
-w("| try | budget (USD) | the helper's Bash calls before the stop | after it | the helper's end | stderr | results (subtype) | `total_cost_usd` at the end |")
-w("|---|---|---|---|---|---|---|---|")
+w("| try | budget (USD) | the helper's Bash calls before the stop | requests it began after its 2nd Bash result | from that result to the turn's `result` (s) | the helper's end | stderr | results (subtype) | `total_cost_usd` at the end (over the budget) | lines in the 40 s after the `result` |")
+w("|---|---|---|---|---|---|---|---|---|---|")
+
+
+def stamp_at(lines, i):
+    """The time of line i of a fixture: its own `_t`, or the last time marker before it."""
+    return next(l["_t"] for l in reversed(lines[:i + 1]) if "_t" in l)
+
+
+def helper_tool_result(l):
+    return (l.get("type") == "user" and is_cli(l) and l.get("parent_tool_use_id") and isinstance(l["message"]["content"], list)
+            and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in l["message"]["content"]))
+
+
+HELPER6 = {}
 for n in PASS6["helper-goes-on"]:
     r, f = whole(n, "run"), note(n, "forty_s_after_the_stop")
-    rs = results(n)
+    lines, rs = fx(n), results(n)
     calls = r["helper_bash_calls_at_the_result"]
-    hid = next(x for x in fx(n) if sub(x) == "task_started" and x.get("task_type") == "local_agent")["task_id"]
-    hend = [l for l in fx(n) if sub(l) == "task_notification" and l["task_id"] == hid]
-    err = [l["_stderr"] for l in fx(n) if "_stderr" in l]
-    check(r["result_subtype"] == "error_max_budget_usd" and len(calls) < 4 and f["helper_bash_calls_after_the_stop"] == [] and f["results"] == [], "the helper stops with the turn in " + n)
-    check([x["subtype"] for x in rs] == ["error_max_budget_usd"] * len(rs) and len({x["total_cost_usd"] for x in rs}) == 1, "no cost after the stop in " + n)
-    check(len(hend) == 1 and fx(n).index(hend[0]) < next(i for i, l in enumerate(fx(n)) if from_note("run")(l)), "the helper ends by the stop in " + n)
-    HELPER6[n] = (hend[0]["status"], err)
-    w("| `%s` | %.6f | %s | none | `%s` | %s | %s | %.6f |" % (n, r["budget_usd"], ", ".join("`%s`" % x for x in calls), hend[0]["status"], " ".join("`%s`" % e for e in err) or "none",
-                                                          ", ".join("`%s`" % x["subtype"] for x in rs), rs[-1]["total_cost_usd"]))
-ENDS6 = sorted(HELPER6.values(), key=lambda x: x[0])
-check([e[0] for e in ENDS6] == ["completed", "stopped"] and ENDS6[0][1] == [] and len(ENDS6[1][1]) == 1
-      and ENDS6[1][1][0].startswith("Budget limit reached (") and ENDS6[1][1][0].endswith("); stopping background agents."), "the two ends of the helper")
+    hid = next(x for x in lines if sub(x) == "task_started" and x.get("task_type") == "local_agent")["task_id"]
+    hend = [l for l in lines if sub(l) == "task_notification" and l["task_id"] == hid]
+    err = [l["_stderr"] for l in lines if "_stderr" in l]
+    second = [i for i, l in enumerate(lines) if helper_tool_result(l)][1]
+    first_result = next(i for i, l in enumerate(lines) if l.get("type") == "result")
+    later = {l["message"]["id"] for l in lines[second:first_result] if l.get("type") == "assistant" and l.get("parent_tool_use_id")}
+    t_result = stamp_at(lines, first_result)
+    gap = t_result - stamp_at(lines, second)
+    over = rs[-1]["total_cost_usd"] / r["budget_usd"] - 1
+    check(r["result_subtype"] == "error_max_budget_usd" and calls == ["echo h1", "echo h2"] and f["helper_bash_calls_after_the_stop"] == [] and f["results"] == [], "the helper's calls in " + n)
+    check([x["subtype"] for x in rs] == ["error_max_budget_usd"] * len(rs) and len(later) == 1 and over > 0.1, "one more request and the total over the budget in " + n)
+    check(f["lines"] == [], "no line in the 40 s after the result in " + n)
+    check(len(hend) == 1 and lines.index(hend[0]) < next(i for i, l in enumerate(lines) if from_note("run")(l)), "the helper ends by the stop in " + n)
+    HELPER6[n] = dict(status=hend[0]["status"], err=err, gap=gap, over=over, end_before=t_result - stamp_at(lines, lines.index(hend[0])) if lines.index(hend[0]) < first_result else None,
+                      text=next((text_of(l) for l in lines[second:first_result] if l.get("type") == "assistant" and l.get("parent_tool_use_id") and has_text(l)), None))
+    w("| `%s` | %.6f | %s | %d | %.2f | `%s` | %s | %s | %.6f (+%.0f%%) | %s |" % (n, r["budget_usd"], ", ".join("`%s`" % x for x in calls), len(later), gap, hend[0]["status"],
+                                                                           " ".join("`%s`" % e for e in err) or "none", ", ".join("`%s`" % x["subtype"] for x in rs),
+                                                                           rs[-1]["total_cost_usd"], 100 * over, len(f["lines"]) or "none"))
+DONE6 = [n for n, h in HELPER6.items() if h["status"] == "completed"]
+CUT6 = [n for n, h in HELPER6.items() if h["status"] == "stopped"]
+check(len(DONE6) == 1 and len(CUT6) == 1 and ", so " in HELPER6[DONE6[0]]["text"].strip().splitlines()[-1] and HELPER6[DONE6[0]]["err"] == [] and HELPER6[DONE6[0]]["end_before"] is not None and HELPER6[CUT6[0]]["end_before"] is None and HELPER6[DONE6[0]]["text"] and "budget" in HELPER6[DONE6[0]]["text"]
+      and len(HELPER6[CUT6[0]]["err"]) == 1 and HELPER6[CUT6[0]]["err"][0].startswith("Budget limit reached (")
+      and HELPER6[CUT6[0]]["err"][0].endswith("); stopping background agents."), "the two ends of the helper")
+OVER6 = sorted(h["over"] for h in HELPER6.values())
 w("""
-What the adapter can rely on (n=2 each):
+What the adapter can rely on (n=2 each, unless it says otherwise):
 - An `interrupt` after the budget stop does NOT end the call that runs on: the answer `{"still_queued":[]}` and nothing
   else; the `sleep` was still alive 5 s later. Only the close of stdin ended it (`killed`, `stopped`), as in part 5.
 - `stop_task` with the call's task id (the `task_id` of its `task_started` line, which a foreground call gets after
   about 3 s) ends it at once: `task_updated` `killed`, `task_notification` `stopped`, the answer `{}`; the `sleep` was
   gone. So after a budget stop the host can end such a call without ending the process: `stop_task` for every
   foreground call that has a `task_started` and no end yet.
-- A helper that still had calls to make when the limit passed made NO model request after the turn's stop (n=2): it
-  had made two of its four Bash calls, none came in the 40 s after the stop, and `total_cost_usd` did not grow. It
-  ended in one of two ways (n=1 each): the CLI STOPPED it at the turn's stop (stderr `%s`, then `task_updated`
-  `killed`, `task_notification` `stopped`, the helper's line `[Request interrupted by user]`); or its last request
-  came back first, with a text that says it stopped because the budget was used up, and it ended `completed` just
-  before the turn's `result`. The request that passed the limit was paid: the total ended above the budget.
-- So `run_limit_turn_end` (ending the run after a budget stop) is not needed to stop spending: the CLI spends nothing
-  more and stops its helpers. It is needed for the call that runs on, unless the host sends `stop_task` for it.
-""" % ENDS6[1][1][0])
+- A helper that still had calls to make DID GO ON for one model request after the limit was passed (n=2): it had
+  made two of its four Bash calls; the turn's `result` came %s s after the second one's result, and in that time the
+  helper began a third model request. That the helper's second request is the one that passed the budget is inferred
+  from the token counts of its requests, not said by the CLI. In `%s` the third request came back whole and was paid,
+  its text says `%s`, and the helper ended `completed` %.2f s before the `result`. In `%s` the CLI STOPPED the helper at
+  the turn's stop (stderr `%s`, then `task_updated` `killed`, `task_notification` `stopped`, the helper's line
+  `[Request interrupted by user]`). So "the CLI stops a helper that still works at the budget stop" rests on n=1.
+- After the `result` no line came in 40 s (n=2): no model request, no Bash call, no other `result`.
+- `--max-budget-usd` is not a hard cap: the total ended %s above the budget, by the requests that were under way when
+  the limit passed.
+- So `run_limit_turn_end` (ending the run after a budget stop) was not needed to stop spending AFTER the `result` in
+  these runs (nothing came in 40 s; a helper that still worked was stopped by the CLI, n=1). It is needed for the call
+  that runs on, unless the host sends `stop_task` for it. Any cap the host shows must allow for the overshoot.
+""" % (" / ".join("%.2f" % HELPER6[n]["gap"] for n in PASS6["helper-goes-on"]), DONE6[0], HELPER6[DONE6[0]]["text"].strip().splitlines()[-1].split(", so ")[0],
+       HELPER6[DONE6[0]]["end_before"], CUT6[0], HELPER6[CUT6[0]]["err"][0], " and ".join("%.0f%%" % (100 * o) for o in OVER6)))
 
 # ================================================================= 7
 w("## 7. A foreground Bash call that becomes a task and FAILS, and one cut by an `interrupt`\n")
@@ -919,14 +930,15 @@ w("""## Can the waiting code be built now? (as of the day of recording)
 | 3 | "Try again from here" and "branch this agent" | yes: `--resume <id> --fork-session` (with `--resume-session-at <uuid>` to cut) gives a new session id and leaves the old session as it was (n=2). Count cost from `model_usage_since_last_result`: the fork's `total_cost_usd` carries the old session's total |
 | 4 | Codly's restore note vs the CLI's own rewind (`with_restore_note`) | partly: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` turns `rewind_files` on (the setting does not); it puts Edit's files back to the state before the turn of a user message uuid of the host (n=2). Not recorded: files written by Bash, new files, helpers' edits |
 | 5 | `stopHint` (`session.ts`) and the gate's stop (`background.rs`) | yes: a helper stopped during the turn's last model request gets a turn by itself after the `result` (n=2); during a tool call of the turn it is told inside the turn (part 5). A stopped background COMMAND started no turn (n=%d) |
-| 6 | `run_limit_turn_end` (`breaker_run.rs`) and the comment at `SpawnSpec::max_budget_usd` | yes: after the stop the CLI spends nothing more (a helper with requests left stops, n=2); a call that runs on ends by `stop_task` with its task id (n=2) or by closing stdin, not by `interrupt` (n=2). Ending the run is needed only for that call |
+| 6 | `run_limit_turn_end` (`breaker_run.rs`) and the comment at `SpawnSpec::max_budget_usd` | partly: a call that runs on ends by `stop_task` with its task id (n=2) or by closing stdin, not by `interrupt` (n=2); after the `result` no line came in 40 s (n=2). Before the `result` a helper made one more model request past the limit (n=2) and the total ended %s above the budget; the CLI stopped a helper that still worked in one run (n=1). Ending the run is needed only for the call that runs on; the `max_budget_usd` comment must say the total can pass the budget |
 | 7 | `on_task` (a line that must end no helper and no background row) | yes: a foreground call that fails ends with `task_notification` `failed`, one cut by an interrupt with `stopped`, same keys, `output_file` `""` (n=2 each) |
 | 8 | "Turn off" while a turn runs (`AgentMcp.svelte`, `session.ts`) | no: the switch while a turn runs was not recorded (a throw-away HOME has no login). Recorded: a server that cannot start, off, then on in a new process: error `Connection closed`, the saved switch on again (n=2) |
 | 9 | One answer for "approve and accept edits" on any card (`grantable`) | yes: on a Bash card too, the request's `setMode` item alone switches to `acceptEdits` (n=2). Never send all suggestions back: `addRules` writes `.claude/settings.local.json`. Another mode (`plan`, `dontAsk`) is obeyed |
 | 10 | The `has_heartbeat` comment (`watchdog.rs`) and the sentence for an HTTP tool that ends at 60 s | yes: a streaming HTTP server is not cut at 60 s; the limit moves with `MCP_TOOL_TIMEOUT` or the server's `timeout` (n=2 each); progress notifications add no line, only the heartbeat |
 | 11 | `begin_shutdown` with a turn running (`claude.rs`) | yes: `interrupt`, the turn's `result`, `stop_task` for the command, close: exit in %s s, nothing left (n=2) |
 | 12 | An effort change while a turn runs (`live_model_switch`, `runs.rs`) | partly: the CLI takes it mid-turn and `get_settings` shows it at once (n=2 per variant); which level the turn's next model request uses is not visible |
-""" % (len(ALL1), len(N5["command-last-request"]) + len(N5["command-mid-turn"]), " / ".join("%.2f" % x for x in EXIT11)))
+""" % (len(ALL1), len(N5["command-last-request"]) + len(N5["command-mid-turn"]), " and ".join("%.0f%%" % (100 * o) for o in OVER6),
+       " / ".join("%.2f" % x for x in EXIT11)))
 
 # ================================================================= table
 w("""## Table: question -> answer -> fixture
@@ -938,7 +950,7 @@ w("""## Table: question -> answer -> fixture
 | 3 | Fork with `--fork-session` | New session id; knows the old conversation (or up to `--resume-session-at`); `total_cost_usd` = old total + own turn; the old session unchanged | 2 | `r8-fork-*` |
 | 4 | The CLI's own file rewind | On only with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`; puts files back to before the message's turn; off: "File rewinding is not enabled." | 2 per way | `r8-file-rewind-*` |
 | 5 | `stop_task` in the last moment; on a command mid-turn | Helper during the last request: a turn by itself follows; a command: no turn | 2, %d | `r8-stop-*` |
-| 6 | After a budget stop | `interrupt` leaves the running call; `stop_task` ends it; a helper with requests left makes no more | 2 each | `r8-after-budget-*` |
+| 6 | After a budget stop | `interrupt` leaves the running call; `stop_task` ends it; a helper made one more request past the limit, then nothing came after the `result` in 40 s; the total passed the budget | 2 each (the CLI stopping a working helper: 1) | `r8-after-budget-*` |
 | 7 | A Bash task that fails; one cut by an interrupt | `task_notification` `failed` / `stopped`, same keys, `output_file` `""` | 2 | `r8-bash-task-fails-*` |
 | 8 | MCP switch mid-turn; a failing server off and on in a new process | Mid-turn: not recorded. New process: `disabled`, not started; "on" fails with `Connection closed` and saves the switch on | 2 | `r8-mcp-cannot-start-saved-*` |
 | 9 | `setMode` on a Bash card | The `setMode` item alone switches to `acceptEdits`; all suggestions also write `settings.local.json`; `plan` and `dontAsk` obeyed | 2 per variant | `r8-bash-set-mode-*` |
@@ -966,7 +978,6 @@ Open after these recordings:
 - 2: a rewind to a user message's uuid; a rewind in a turn with tool calls or helpers; `--resume-drops-turn`.
 - 3: a fork of a session with a helper or a background command still running.
 - 4: a file written by Bash, a new file, a helper's edit; whether the agent is told of the rewind.
-- 5: the foreground call that ended with `Exit code 144` in one run of `command-mid-turn` (cause not found).
 - 6: a helper whose limit passes during a long single request (the story) while it still has more to do.
 - 8: `mcp_toggle` while a turn runs (needs a throw-away HOME with a login).
 - 10: an HTTP server whose event stream sends nothing for more than 5 minutes (bundle: an idle limit of 300 s for

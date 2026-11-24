@@ -24,7 +24,8 @@ from r7_lib import queued_notifications
 VARIANT = sys.argv[1] if len(sys.argv) > 1 else "helper-last-request"
 LABEL = sys.argv[2] if len(sys.argv) > 2 else "1"
 BG = {"helper-last-request": "sleep 211", "command-mid-turn": "sleep 223", "command-last-request": "sleep 227"}[VARIANT]
-bg, fg = Procs(BG), Procs("sleep 22.5")
+# Only the variant that starts `sleep 22.5` looks for it: kill_left() ends every new match, also one of another run.
+bg, fg = Procs(BG), Procs("sleep 22.5") if VARIANT == "command-mid-turn" else None
 s = Session("r8-stop-%s-%s" % (VARIANT, LABEL), extra=["--tools", "Bash,Agent"], hard_timeout=200)
 if VARIANT.startswith("helper"):
     s.user("Use the Agent tool with run_in_background set to true to have a subagent run the Bash command "
@@ -55,7 +56,7 @@ else:
     when = "2 s after the sleep of turn 2's Bash call was seen"
     print("the turn's Bash call began:", bool(tool_call(s, "Bash", helper=False, start=m)), "its sleep runs:", wait_alive(fg))
     time.sleep(2.0)
-alive = dict(bg_sleep_alive=bool(bg.alive()), fg_sleep_alive=bool(fg.alive()))
+alive = dict(bg_sleep_alive=bool(bg.alive()), fg_sleep_alive=bool(fg and fg.alive()))
 with s.cv:
     s.note(before_stop_task=dict(when=when, list=open_tasks(s), a_turn_runs=results(s) == 1, **alive))
 m, n = s.mark(), results(s)
@@ -63,7 +64,7 @@ ask(s, "stop_task", task_id=tid)
 stop_answer = answer_to(s)
 print("turn 2's result:", s.wait_results(n + 1, 90))
 time.sleep(25.0)
-alive = dict(bg_sleep_alive=bool(bg.alive()), fg_sleep_alive=bool(fg.alive()))
+alive = dict(bg_sleep_alive=bool(bg.alive()), fg_sleep_alive=bool(fg and fg.alive()))
 with s.cv:
     r = [e for e in s.events[m:] if e.get("type") == "result"]
     s.note(after_stop_task=dict(lines=kinds(s, m), results_since_the_request=len(r), result_origins=[e.get("origin") for e in r], list=open_tasks(s), **alive),
@@ -71,4 +72,4 @@ with s.cv:
                                          result=is_result, init_after_it=is_init))
 print("lines since stop_task:", kinds(s, m))
 print("results:", results(s), "cost:", s.cost(), "exit:", s.close(after_exit=lambda: dict(transcript=queued_notifications(s.sid))))
-print("killed leftovers:", bg.kill_left(), fg.kill_left())
+print("killed leftovers:", bg.kill_left(), fg and fg.kill_left())

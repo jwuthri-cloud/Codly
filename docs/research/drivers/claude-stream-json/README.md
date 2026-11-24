@@ -117,7 +117,8 @@ Part 6 (`r8_*.py`), what is new:
   `.claude/settings.local.json` into the scenario's WORK FOLDER.
 - `r8_f4_file_rewind.py env` sets `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` for the CLI it starts (the driver's
   `env`, on top of the cleaned environment); the CLI then keeps file snapshots under your `~/.claude/` (as for any
-  session with checkpoints). After the exit it runs `claude -p --resume <its session> --rewind-files <uuid>`, which
+  session with checkpoints). After the exit it runs `claude -p --strict-mcp-config --setting-sources local --resume
+  <its session> --rewind-files <uuid>` (with the same two flags as the session, so your own setup stays out), which
   puts the work folder's `hello.txt` back.
 - `r8_b10_http_slow_kinds.py json-env` sets `MCP_TOOL_TIMEOUT=120000` for the CLI it starts; the other variants use the
   new answer kinds of `mcp_http_ping_server.py` (`sse`, `progress`). Each run takes about 75 s.
@@ -126,7 +127,10 @@ Part 6 (`r8_*.py`), what is new:
   count lines of their own transcript there (`r8_lib.transcript`); nothing is copied.
 - Processes: `r8_b5`, `r8_b7`, `r8_a11`, `r8_c12` and `r8_f6` start `sleep`s through the CLI (`sleep 211`, `223`, `227`,
   `22.5`, `37`, `229`, `233`, `239`, `13.5`, `53.5`, `57.5`, `47.5`) and kill what is left of them, found by their whole
-  command text.
+  command text. Never run two runs at the same time that look for the same text (two labels of one variant, or two
+  variants that share a `sleep`): at its end each run kills every new match, also the other run's. A
+  `command-last-request` run of `r8_b5` once ended the `sleep 22.5` of a `command-mid-turn` run that way; `r8_b5` now
+  looks for that `sleep` only in `command-mid-turn`, and that recording is not kept.
 - `r8_f6_after_budget.py` tries budgets until one stops the turn as the scenario needs (at most 5 tries per label).
 
 ## Layout

@@ -13,8 +13,9 @@ argv[2]: a label for the recording (1, 2): the same scenario, recorded more than
 One process, `--tools Read,Edit`, mode acceptEdits. Turn 1 (user message uuid U1): an Edit of hello.txt from `hello`
 to `hello one`. Turn 2 (uuid U2): `hello one` -> `hello two`. Then, each followed by a note with the text of hello.txt:
 rewind_files U2 dry run, U2, U1 dry run, U1, a uuid that no message has (dry run). For `env`, after the exit:
-`claude -p --resume <session> --rewind-files <U2>` (the flag of `claude --help`, "Restore files ... and exit") with
-the same variable, its exit code and first line of output, and the text of hello.txt.
+`claude -p --strict-mcp-config --setting-sources local --resume <session> --rewind-files <U2>` (the flag of `claude
+--help`, "Restore files ... and exit"; the two other flags keep your own setup out, as in the session) with the same
+variable, its exit code and first line of output, and the text of hello.txt.
 """
 import json, os, sys, uuid
 from drv import Session
@@ -47,9 +48,9 @@ sid = s.sid
 def after_exit():
     if VARIANT != "env":
         return dict(hello_txt_at_the_end=text())
-    r = claude_cli(["-p", "--resume", sid, "--rewind-files", u2], s.cwd, ENV)
+    r = claude_cli(["-p", "--strict-mcp-config", "--setting-sources", "local", "--resume", sid, "--rewind-files", u2], s.cwd, ENV)
     out = (r.stdout.strip() or r.stderr.strip()).splitlines()
-    return dict(rewind_files_flag=dict(command="claude -p --resume <session> --rewind-files <U2>", exit_code=r.returncode,
+    return dict(rewind_files_flag=dict(command="claude -p --strict-mcp-config --setting-sources local --resume <session> --rewind-files <U2>", exit_code=r.returncode,
                                        first_line_of_its_output=out[0] if out else "", hello_txt=text()))
 
 

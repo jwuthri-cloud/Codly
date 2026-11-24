@@ -14,8 +14,8 @@ plugin's server; a plugin can also bring hooks, not recorded) that the user had 
 - Method, base command, fixture line format and sanitizing: as in part 1 ("Base command", "Files", "Sanitizing") with
   the additions of parts 2 to 5. Fixtures of this part are `fixtures/claude-2.1.311/r8-*.ndjson`; the scripts are
   `drivers/claude-stream-json/r8_*.py` (README there says how to record again).
-- Cost of the 102 recordings at list price: 0.1608 USD, the sum of each turn's own model requests
-  (`model_usage_since_last_result`). `cost.py` prints 0.1704: it sums each session's last `total_cost_usd` per
+- Cost of the 101 recordings at list price: 0.1586 USD, the sum of each turn's own model requests
+  (`model_usage_since_last_result`). `cost.py` prints 0.1681: it sums each session's last `total_cost_usd` per
   recording, and a resumed or forked session carries its earlier cost (sections 2 and 3). The runs in a throw-away HOME
   have no login and cost nothing.
 - Everything below was observed in these recordings. Each answer says how many runs it rests on (n) and says no more
@@ -26,7 +26,8 @@ plugin's server; a plugin can also bring hooks, not recorded) that the user had 
 Differences from the part 5 method:
 - `r5_lib.Procs` now matches the whole command text (`Procs("sleep 41")` no longer matches `sleep 410` or
   `sleep 41.5`), and every script uses it that way. Part 6 scripts give each scenario's `sleep` a duration no other
-  script uses.
+  script uses. Two runs that look for the same text must not run at the same time: at its end a run kills every new
+  match, also the other run's. One recording of section 5 was hurt that way and is not kept (section 5).
 - Plugins: section 1 installs a plugin of the scenario (`ping-plugin`, from a local marketplace folder) with the CLI's
   own `claude plugin` commands in a throw-away HOME. The sanitizer keeps that plugin (and its server
   `plugin:ping-plugin:ping-plugged`) in `init`, and removes every other plugin.
@@ -197,7 +198,7 @@ The five requests and answers of `r8-file-rewind-env-1`:
 {"type":"control_response","response":{"subtype":"success","request_id":"host-3","response":{"canRewind":true,"filesChanged":["/tmp/work/r8-file-rewind-env-1/hello.txt"],"insertions":1,"deletions":1}}}
 {"type":"control_request","request_id":"host-4","request":{"subtype":"rewind_files","user_message_id":"user-msg-1","dry_run":false}}
 {"type":"control_response","response":{"subtype":"success","request_id":"host-4","response":{"canRewind":true,"skippedLinks":0}}}
-{"type":"control_request","request_id":"host-5","request":{"subtype":"rewind_files","user_message_id":"uuid-116","dry_run":true}}
+{"type":"control_request","request_id":"host-5","request":{"subtype":"rewind_files","user_message_id":"uuid-121","dry_run":true}}
 {"type":"control_response","response":{"subtype":"success","request_id":"host-5","response":{"canRewind":false,"error":"No file checkpoint found for this message."}}}
 ```
 
@@ -219,7 +220,8 @@ The same requests of `r8-file-rewind-setting-1` (no variable), the first two:
 | `r8-file-rewind-off-1` | canRewind false, File rewinding is not enabled.; error: File rewinding is not enabled.; canRewind false, File rewinding is not enabled.; error: File rewinding is not enabled.; canRewind false, File rewinding is not enabled. | `hello two`, `hello two`, `hello two`, `hello two`, `hello two` |
 | `r8-file-rewind-off-2` | canRewind false, File rewinding is not enabled.; error: File rewinding is not enabled.; canRewind false, File rewinding is not enabled.; error: File rewinding is not enabled.; canRewind false, File rewinding is not enabled. | `hello two`, `hello two`, `hello two`, `hello two`, `hello two` |
 
-After the exit of each `env` run: `claude -p --resume <session> --rewind-files <U2>` with the same variable answered
+After the exit of each `env` run: `claude -p --strict-mcp-config --setting-sources local --resume <session>
+--rewind-files <U2>` with the same variable answered
 `Files rewound to state at message <U2>` (exit code 0) and `hello.txt` was `hello one` again (n=2).
 
 What the adapter can rely on (n=2 per way):
@@ -313,7 +315,6 @@ The same moment with a background command (`r8-stop-command-last-request-1`):
 | `r8-stop-command-last-request-1` | `system/task_updated "killed"`, `system/task_notification "stopped"`, `system/background_tasks_changed 0 listed`, `control_response success`, `assistant`, `result/success` | 1 (-) | none | 1 / 0 / 0 |
 | `r8-stop-command-last-request-2` | `system/task_updated "killed"`, `system/task_notification "stopped"`, `system/background_tasks_changed 0 listed`, `control_response success`, `assistant`, `result/success` | 1 (-) | none | 1 / 0 / 0 |
 | `r8-stop-command-mid-turn-1` | `system/task_updated "killed"`, `system/task_notification "stopped"`, `system/background_tasks_changed 0 listed`, `control_response success`, `system/task_started`, `system/task_notification "completed"`, `user`, `assistant`, `assistant`, `result/success` | 1 (-) | none | 1 / 1 / 1 |
-| `r8-stop-command-mid-turn-2` | `system/task_updated "killed"`, `system/task_notification "stopped"`, `system/background_tasks_changed 0 listed`, `control_response success`, `system/task_started`, `system/task_notification "failed"`, `user`, `assistant`, `assistant`, `result/success` | 1 (-) | none | 1 / 1 / 1 |
 | `r8-stop-command-mid-turn-3` | `system/task_updated "killed"`, `system/task_notification "stopped"`, `system/background_tasks_changed 0 listed`, `control_response success`, `system/task_started`, `system/task_notification "completed"`, `user`, `assistant`, `assistant`, `result/success` | 1 (-) | none | 1 / 1 / 1 |
 | `r8-stop-command-mid-turn-4` | `system/task_updated "killed"`, `system/task_notification "stopped"`, `system/background_tasks_changed 0 listed`, `control_response success`, `system/task_started`, `system/task_notification "completed"`, `user`, `assistant`, `assistant`, `result/success` | 1 (-) | none | 1 / 1 / 1 |
 
@@ -326,14 +327,14 @@ What the adapter can rely on:
   turn of its own after the result; a stop while a tool call of the turn runs is told inside the turn (part 5,
   section 11).
 - A background COMMAND stopped while a turn runs: the same four lines (`killed`, `stopped`, the list `[]`, the answer
-  `{}`), and NO turn by itself, both during the turn's last model request (n=2) and during its tool call (n=4). Its
+  `{}`), and NO turn by itself, both during the turn's last model request (n=2) and during its tool call (n=3). Its
   notification is put in the queue too: during a tool call it was handed to the turn's next model request (and taken
   out of the queue); during the last request it stayed in the queue until the exit (enqueued, not handed, not
-  removed) and started nothing in 25 s.
-- In 1 of the 4 `command-mid-turn` runs (`r8-stop-command-mid-turn-2`) the turn's own foreground call (`echo go; sleep 22.5`) ended 5.89 s
-  after its `tool_use` line, not after 22.5 s, with the tool result `Exit code 144\ngo` and its `task_notification` `failed`; in the
-  other runs it ran to its end (`completed`). The cause was not found (no script of this part signals a `sleep 22.5`);
-  it is not taken as a rule.
+  removed) and started nothing in 25 s. In every `command-mid-turn` run the turn's own foreground call ran to its end
+  (`completed`).
+- A fourth `command-mid-turn` recording was not kept: the driver itself ended its foreground `sleep 22.5` (exit code
+  144). A `command-last-request` run that ran at the same time killed, at its end, every new process that matched
+  `sleep 22.5`, its own or not. The script now looks for that `sleep` only in the `command-mid-turn` variant.
 
 ## 6. After a budget stop: the call that runs on, and a helper with requests left
 
@@ -469,26 +470,31 @@ Fixtures: `r8-after-budget-<variant>-<label>-calib`, `-t1` …. As in part 5 (se
 {"_meta":{"after_the_exit":{"lines_after_stdin_was_closed":["system/task_updated \"killed\"","system/task_notification \"stopped\""],"sleep_alive":false}},"_t":47.865}
 ```
 
-| try | budget (USD) | the helper's Bash calls before the stop | after it | the helper's end | stderr | results (subtype) | `total_cost_usd` at the end |
-|---|---|---|---|---|---|---|---|
-| `r8-after-budget-helper-goes-on-1-t3` | 0.000678 | `echo h1`, `echo h2` | none | `completed` | none | `error_max_budget_usd`, `error_max_budget_usd` | 0.000987 |
-| `r8-after-budget-helper-goes-on-2-t2` | 0.000701 | `echo h1`, `echo h2` | none | `stopped` | `Budget limit reached ($0.00 of $0.000701); stopping background agents.` | `error_max_budget_usd` | 0.000837 |
+| try | budget (USD) | the helper's Bash calls before the stop | requests it began after its 2nd Bash result | from that result to the turn's `result` (s) | the helper's end | stderr | results (subtype) | `total_cost_usd` at the end (over the budget) | lines in the 40 s after the `result` |
+|---|---|---|---|---|---|---|---|---|---|
+| `r8-after-budget-helper-goes-on-1-t3` | 0.000678 | `echo h1`, `echo h2` | 1 | 2.30 | `completed` | none | `error_max_budget_usd`, `error_max_budget_usd` | 0.000987 (+45%) | none |
+| `r8-after-budget-helper-goes-on-2-t2` | 0.000701 | `echo h1`, `echo h2` | 1 | 2.18 | `stopped` | `Budget limit reached ($0.00 of $0.000701); stopping background agents.` | `error_max_budget_usd` | 0.000837 (+19%) | none |
 
-What the adapter can rely on (n=2 each):
+What the adapter can rely on (n=2 each, unless it says otherwise):
 - An `interrupt` after the budget stop does NOT end the call that runs on: the answer `{"still_queued":[]}` and nothing
   else; the `sleep` was still alive 5 s later. Only the close of stdin ended it (`killed`, `stopped`), as in part 5.
 - `stop_task` with the call's task id (the `task_id` of its `task_started` line, which a foreground call gets after
   about 3 s) ends it at once: `task_updated` `killed`, `task_notification` `stopped`, the answer `{}`; the `sleep` was
   gone. So after a budget stop the host can end such a call without ending the process: `stop_task` for every
   foreground call that has a `task_started` and no end yet.
-- A helper that still had calls to make when the limit passed made NO model request after the turn's stop (n=2): it
-  had made two of its four Bash calls, none came in the 40 s after the stop, and `total_cost_usd` did not grow. It
-  ended in one of two ways (n=1 each): the CLI STOPPED it at the turn's stop (stderr `Budget limit reached ($0.00 of $0.000701); stopping background agents.`, then `task_updated`
-  `killed`, `task_notification` `stopped`, the helper's line `[Request interrupted by user]`); or its last request
-  came back first, with a text that says it stopped because the budget was used up, and it ended `completed` just
-  before the turn's `result`. The request that passed the limit was paid: the total ended above the budget.
-- So `run_limit_turn_end` (ending the run after a budget stop) is not needed to stop spending: the CLI spends nothing
-  more and stops its helpers. It is needed for the call that runs on, unless the host sends `stop_task` for it.
+- A helper that still had calls to make DID GO ON for one model request after the limit was passed (n=2): it had
+  made two of its four Bash calls; the turn's `result` came 2.30 / 2.18 s after the second one's result, and in that time the
+  helper began a third model request. That the helper's second request is the one that passed the budget is inferred
+  from the token counts of its requests, not said by the CLI. In `r8-after-budget-helper-goes-on-1-t3` the third request came back whole and was paid,
+  its text says `The budget was already exceeded after the second call`, and the helper ended `completed` 0.66 s before the `result`. In `r8-after-budget-helper-goes-on-2-t2` the CLI STOPPED the helper at
+  the turn's stop (stderr `Budget limit reached ($0.00 of $0.000701); stopping background agents.`, then `task_updated` `killed`, `task_notification` `stopped`, the helper's line
+  `[Request interrupted by user]`). So "the CLI stops a helper that still works at the budget stop" rests on n=1.
+- After the `result` no line came in 40 s (n=2): no model request, no Bash call, no other `result`.
+- `--max-budget-usd` is not a hard cap: the total ended 19% and 45% above the budget, by the requests that were under way when
+  the limit passed.
+- So `run_limit_turn_end` (ending the run after a budget stop) was not needed to stop spending AFTER the `result` in
+  these runs (nothing came in 40 s; a helper that still worked was stopped by the CLI, n=1). It is needed for the call
+  that runs on, unless the host sends `stop_task` for it. Any cap the host shows must allow for the overshoot.
 
 ## 7. A foreground Bash call that becomes a task and FAILS, and one cut by an `interrupt`
 
@@ -839,13 +845,12 @@ Each note of this part that lists lines is compared with the lines in the fixtur
 | `r8-stop-command-last-request-1` | `after_stop_task` | 6 | 6 | the `stop_task` request |
 | `r8-stop-command-last-request-2` | `after_stop_task` | 6 | 6 | the `stop_task` request |
 | `r8-stop-command-mid-turn-1` | `after_stop_task` | 10 | 10 | the `stop_task` request |
-| `r8-stop-command-mid-turn-2` | `after_stop_task` | 10 | 10 | the `stop_task` request |
 | `r8-stop-command-mid-turn-3` | `after_stop_task` | 10 | 10 | the `stop_task` request |
 | `r8-stop-command-mid-turn-4` | `after_stop_task` | 10 | 10 | the `stop_task` request |
 | `r8-stop-helper-last-request-1` | `after_stop_task` | 12 | 12 | the `stop_task` request |
 | `r8-stop-helper-last-request-2` | `after_stop_task` | 12 | 12 | the `stop_task` request |
 
-All 41 notes of this part that list lines list exactly the lines in their window: none is late.
+All 40 notes of this part that list lines list exactly the lines in their window: none is late.
 
 ## Can the waiting code be built now? (as of the day of recording)
 
@@ -855,8 +860,8 @@ All 41 notes of this part that list lines list exactly the lines in their window
 | 2 | "Undo a turn" for the conversation (`checkpoints.rs`; the rewind list of `rewind-from-thread`) | yes: `--resume <id> --resume-session-at <uuid of the kept turn's last assistant line>` drops the later turns (n=2), same session id, the old lines stay in the file; the uuid comes from the stream's assistant lines. A dropped part cannot be resumed again by its uuid once a new turn was added |
 | 3 | "Try again from here" and "branch this agent" | yes: `--resume <id> --fork-session` (with `--resume-session-at <uuid>` to cut) gives a new session id and leaves the old session as it was (n=2). Count cost from `model_usage_since_last_result`: the fork's `total_cost_usd` carries the old session's total |
 | 4 | Codly's restore note vs the CLI's own rewind (`with_restore_note`) | partly: `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` turns `rewind_files` on (the setting does not); it puts Edit's files back to the state before the turn of a user message uuid of the host (n=2). Not recorded: files written by Bash, new files, helpers' edits |
-| 5 | `stopHint` (`session.ts`) and the gate's stop (`background.rs`) | yes: a helper stopped during the turn's last model request gets a turn by itself after the `result` (n=2); during a tool call of the turn it is told inside the turn (part 5). A stopped background COMMAND started no turn (n=6) |
-| 6 | `run_limit_turn_end` (`breaker_run.rs`) and the comment at `SpawnSpec::max_budget_usd` | yes: after the stop the CLI spends nothing more (a helper with requests left stops, n=2); a call that runs on ends by `stop_task` with its task id (n=2) or by closing stdin, not by `interrupt` (n=2). Ending the run is needed only for that call |
+| 5 | `stopHint` (`session.ts`) and the gate's stop (`background.rs`) | yes: a helper stopped during the turn's last model request gets a turn by itself after the `result` (n=2); during a tool call of the turn it is told inside the turn (part 5). A stopped background COMMAND started no turn (n=5) |
+| 6 | `run_limit_turn_end` (`breaker_run.rs`) and the comment at `SpawnSpec::max_budget_usd` | partly: a call that runs on ends by `stop_task` with its task id (n=2) or by closing stdin, not by `interrupt` (n=2); after the `result` no line came in 40 s (n=2). Before the `result` a helper made one more model request past the limit (n=2) and the total ended 19% and 45% above the budget; the CLI stopped a helper that still worked in one run (n=1). Ending the run is needed only for the call that runs on; the `max_budget_usd` comment must say the total can pass the budget |
 | 7 | `on_task` (a line that must end no helper and no background row) | yes: a foreground call that fails ends with `task_notification` `failed`, one cut by an interrupt with `stopped`, same keys, `output_file` `""` (n=2 each) |
 | 8 | "Turn off" while a turn runs (`AgentMcp.svelte`, `session.ts`) | no: the switch while a turn runs was not recorded (a throw-away HOME has no login). Recorded: a server that cannot start, off, then on in a new process: error `Connection closed`, the saved switch on again (n=2) |
 | 9 | One answer for "approve and accept edits" on any card (`grantable`) | yes: on a Bash card too, the request's `setMode` item alone switches to `acceptEdits` (n=2). Never send all suggestions back: `addRules` writes `.claude/settings.local.json`. Another mode (`plan`, `dontAsk`) is obeyed |
@@ -872,8 +877,8 @@ All 41 notes of this part that list lines list exactly the lines in their window
 | 2 | Rewind with `--resume-session-at` | Later turns dropped, same session id, old lines kept; a plain resume follows the rewound branch; the dropped uuid is not found later | 2 | `r8-rewind-*` |
 | 3 | Fork with `--fork-session` | New session id; knows the old conversation (or up to `--resume-session-at`); `total_cost_usd` = old total + own turn; the old session unchanged | 2 | `r8-fork-*` |
 | 4 | The CLI's own file rewind | On only with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`; puts files back to before the message's turn; off: "File rewinding is not enabled." | 2 per way | `r8-file-rewind-*` |
-| 5 | `stop_task` in the last moment; on a command mid-turn | Helper during the last request: a turn by itself follows; a command: no turn | 2, 6 | `r8-stop-*` |
-| 6 | After a budget stop | `interrupt` leaves the running call; `stop_task` ends it; a helper with requests left makes no more | 2 each | `r8-after-budget-*` |
+| 5 | `stop_task` in the last moment; on a command mid-turn | Helper during the last request: a turn by itself follows; a command: no turn | 2, 5 | `r8-stop-*` |
+| 6 | After a budget stop | `interrupt` leaves the running call; `stop_task` ends it; a helper made one more request past the limit, then nothing came after the `result` in 40 s; the total passed the budget | 2 each (the CLI stopping a working helper: 1) | `r8-after-budget-*` |
 | 7 | A Bash task that fails; one cut by an interrupt | `task_notification` `failed` / `stopped`, same keys, `output_file` `""` | 2 | `r8-bash-task-fails-*` |
 | 8 | MCP switch mid-turn; a failing server off and on in a new process | Mid-turn: not recorded. New process: `disabled`, not started; "on" fails with `Connection closed` and saves the switch on | 2 | `r8-mcp-cannot-start-saved-*` |
 | 9 | `setMode` on a Bash card | The `setMode` item alone switches to `acceptEdits`; all suggestions also write `settings.local.json`; `plan` and `dontAsk` obeyed | 2 per variant | `r8-bash-set-mode-*` |
@@ -901,7 +906,6 @@ Open after these recordings:
 - 2: a rewind to a user message's uuid; a rewind in a turn with tool calls or helpers; `--resume-drops-turn`.
 - 3: a fork of a session with a helper or a background command still running.
 - 4: a file written by Bash, a new file, a helper's edit; whether the agent is told of the rewind.
-- 5: the foreground call that ended with `Exit code 144` in one run of `command-mid-turn` (cause not found).
 - 6: a helper whose limit passes during a long single request (the story) while it still has more to do.
 - 8: `mcp_toggle` while a turn runs (needs a throw-away HOME with a login).
 - 10: an HTTP server whose event stream sends nothing for more than 5 minutes (bundle: an idle limit of 300 s for
