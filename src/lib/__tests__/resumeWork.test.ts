@@ -4,7 +4,7 @@ import { api } from '../api';
 import type { ResumeOffer } from '../gen/ResumeOffer';
 import { REREAD_MS, resumeWork } from '../state/resumeWork.svelte';
 import { toasts } from '../state/toasts.svelte';
-import { asksNow, resumeQuestion } from '../util/resumeWork';
+import { BOTH_LINES, asksNow, resumeQuestion, showsBothLines } from '../util/resumeWork';
 
 describe('the launch question, in words', () => {
   it('says how many tasks were running', () => {
@@ -24,7 +24,39 @@ describe('the launch question, in words', () => {
   });
 });
 
+describe('the line under the bar’s text', () => {
+  it('shows where the bar has room for both lines: 1440 px with a sheet open', () => {
+    // 1440 less the labelled rail (184) and the sheet (404), each with its two gutters (14).
+    expect(showsBothLines(1440 - (184 + 28) - (404 + 28))).toBe(true);
+    expect(showsBothLines(BOTH_LINES)).toBe(true);
+  });
+
+  it('goes in less room, where the question takes two lines: 1024 px with a sheet open', () => {
+    expect(showsBothLines(1024 - (184 + 28) - (404 + 28))).toBe(false);
+    expect(showsBothLines(BOTH_LINES - 1)).toBe(false);
+  });
+});
+
 const bar = import.meta.glob<string>('/src/components/ResumeWork.svelte', { query: '?raw', import: 'default', eager: true });
+
+/** The text of each button in `source` whose tag has `handler`, whatever attributes or spaces
+ *  stand around it. A tag ends at the first ">" outside braces ("=>" is inside them). */
+function buttonTexts(source: string, handler: RegExp): string[] {
+  const texts: string[] = [];
+  for (const start of source.matchAll(/<button\b/g)) {
+    let end = start.index! + start[0].length;
+    for (let depth = 0; end < source.length; end++) {
+      const c = source[end];
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      else if (c === '>' && depth === 0) break;
+    }
+    if (!handler.test(source.slice(start.index!, end))) continue;
+    const text = source.slice(end + 1, source.indexOf('</button>', end));
+    texts.push(text.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim());
+  }
+  return texts;
+}
 
 describe('the button a waiting task names', () => {
   it('is on the bar under that label, with the question and without it', () => {
@@ -33,9 +65,15 @@ describe('the button a waiting task names', () => {
     const named = /press '([^']+)'/.exec(reason ?? '')?.[1];
     expect(named).toBe('Resume work');
     const [barSvelte] = Object.values(bar);
-    const labels = [...barSvelte.matchAll(/onclick=\{\(\) => resumeWork\.resume\(\)\}>([^<]+)<\/button>/g)].map((m) => m[1]);
+    const labels = buttonTexts(barSvelte, /onclick=\{\s*\(\)\s*=>\s*resumeWork\.resume\(\)\s*\}/);
     // One button with the question (Ask), one without it (after Not now, and with Never).
     expect(labels).toEqual([named, named]);
+    expect(buttonTexts(barSvelte, /onclick=\{\s*\(\)\s*=>\s*resumeWork\.notNow\(\)\s*\}/)).toEqual(['Not now']);
+  });
+
+  it('reads a button’s text whatever stands around it', () => {
+    const source = '<button\n  class="btn"\n  onclick={() => resumeWork.resume()}\n  disabled={a > b}\n>\n  Resume work\n</button>';
+    expect(buttonTexts(source, /resumeWork\.resume\(\)/)).toEqual(['Resume work']);
   });
 });
 

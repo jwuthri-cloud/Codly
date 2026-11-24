@@ -62,6 +62,14 @@ describe('where Settings opens', () => {
     expect(said).toHaveBeenCalledOnce();
     said.mockRestore();
   });
+
+  it('a name every object has is no section either: it takes the same way', () => {
+    const said = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(openAt('safety/toString')).toEqual({ tab: 'safety', page: 'approvals', section: null });
+    expect(openAt('safety/constructor')).toEqual({ tab: 'safety', page: 'approvals', section: null });
+    expect(said).toHaveBeenCalledTimes(2);
+    said.mockRestore();
+  });
 });
 
 describe('the line under each page', () => {

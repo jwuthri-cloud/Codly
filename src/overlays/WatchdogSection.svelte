@@ -25,7 +25,10 @@
   </MoreAbout>
   {#each WATCHDOG_LIMITS as l (l.key)}
     <div class="row">
-      <div class="r-text"><span class="r-title">{l.title}</span><span class="desc">{l.body}</span></div>
+      <div class="r-text">
+        <span class="r-title">{l.title}</span><span class="desc">{l.body}</span>
+        {#if l.more}<MoreAbout id="watchdog-{l.key}"><span class="desc">{l.more}</span></MoreAbout>{/if}
+      </div>
       <select class="field" value={String(w[l.key])} aria-label={l.title} onchange={(e) => set(l.key, Number(e.currentTarget.value))}>
         {#each limitChoices(l.choices, w[l.key]) as secs (secs)}<option value={String(secs)}>{limitLabel(secs)}</option>{/each}
       </select>

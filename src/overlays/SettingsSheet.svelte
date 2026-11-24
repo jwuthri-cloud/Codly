@@ -441,12 +441,14 @@
     {:else if page === 'sandbox'}
     <section data-section="sandbox">
       <h3 class="eyebrow">Sandbox</h3>
-      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
+      <!-- The name and the first paragraph are the switch's label; "More about this" is not: a press there opens the text. -->
       <div class="row">
         <div class="r-text">
-          <span class="r-title">Sandbox Claude’s shell</span>
-          <!-- What the switch does; then, one press away: what a sandboxed command may do, how it sits with the approval rules, what it does not cover. -->
-          <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox.</span>
+          <label class="r-label" for="claude-sandbox-switch">
+            <span class="r-title">Sandbox Claude’s shell</span>
+            <!-- What the switch does; then, one press away: what a sandboxed command may do, how it sits with the approval rules, what it does not cover. -->
+            <span class="desc">For Claude Code agents that have a shell: workers and 1:1 agents. Off: a shell command runs with your account’s rights, and Codly’s approval rules are the only check. On: Claude Code runs each shell command in its own OS sandbox.</span>
+          </label>
           <MoreAbout id="claude-sandbox">
             <span class="desc">A sandboxed command can write only in the agent’s folder, a temporary folder and the repository’s git data. It can still read your other files. It can reach only the hosts that your Claude Code settings allow: for another host Codly asks you, in every mode except Full access. {HOST_ALLOW_LASTS}</span>
             <span class="desc">Commands still go through Codly’s approval rules, as they do with the switch off: the sandbox is a second check under the rules, not a way around them. So a command can ask you once for itself and once more for a host. A command that Claude wants to run outside the sandbox asks you first, in every mode except Full access.</span>
@@ -454,7 +456,7 @@
             <span class="desc">Codex agents always run in Codex’s own sandbox. Gemini, OpenCode, Cursor and Copilot agents have no sandbox. Applies to agents started after the change.</span>
           </MoreAbout>
         </div>
-        <input type="checkbox" class="switch" checked={s.claude_sandbox} aria-label="Sandbox Claude’s shell" onchange={(e) => set({ claude_sandbox: e.currentTarget.checked })} />
+        <input id="claude-sandbox-switch" type="checkbox" class="switch" checked={s.claude_sandbox} aria-label="Sandbox Claude’s shell" onchange={(e) => set({ claude_sandbox: e.currentTarget.checked })} />
       </div>
       {@render toggles(SANDBOX_TOGGLES)}
     </section>
@@ -482,17 +484,19 @@
     </div>
     <section data-section="shell-auth">
       <h3 class="eyebrow">Claude sign-in</h3>
-      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
+      <!-- The name and the first paragraph are the switch's label; "More about this" is not: a press there opens the text. -->
       <div class="row">
         <div class="r-text">
-          <span class="r-title">Use my shell’s Claude sign-in</span>
-          <!-- Both sides show at once: with the switch on, another account pays. -->
-          <span class="desc">Off: Codly takes <code>CLAUDE_CODE_USE_BEDROCK</code>, <code>CLAUDE_CODE_USE_VERTEX</code> and <code>CLAUDE_CODE_OAUTH_TOKEN</code> out of an agent’s environment, so Claude agents use only the sign-in of <code>claude auth login</code>. On: Claude agents keep these variables from your login shell, as Claude Code does in your terminal, and that account pays: Amazon Bedrock, Google Vertex AI, or the subscription of the token.</span>
+          <label class="r-label" for="claude-shell-auth-switch">
+            <span class="r-title">Use my shell’s Claude sign-in</span>
+            <!-- Both sides show at once: with the switch on, another account pays. -->
+            <span class="desc">Off: Codly takes <code>CLAUDE_CODE_USE_BEDROCK</code>, <code>CLAUDE_CODE_USE_VERTEX</code> and <code>CLAUDE_CODE_OAUTH_TOKEN</code> out of an agent’s environment, so Claude agents use only the sign-in of <code>claude auth login</code>. On: Claude agents keep these variables from your login shell, as Claude Code does in your terminal, and that account pays: Amazon Bedrock, Google Vertex AI, or the subscription of the token.</span>
+          </label>
           <MoreAbout id="claude-shell-auth">
             <span class="desc">Codly does not store the token. For a token from <code>claude setup-token</code>, check Anthropic’s terms first: they may not allow another app to use it. Applies to agents started after the change.</span>
           </MoreAbout>
         </div>
-        <input type="checkbox" class="switch" checked={s.claude_shell_auth} aria-label="Use my shell’s Claude sign-in" onchange={(e) => setShellAuth(e.currentTarget.checked)} />
+        <input id="claude-shell-auth-switch" type="checkbox" class="switch" checked={s.claude_shell_auth} aria-label="Use my shell’s Claude sign-in" onchange={(e) => setShellAuth(e.currentTarget.checked)} />
       </div>
     </section>
     {:else if page === 'worktrees'}
@@ -555,6 +559,8 @@
   /* A help text in several paragraphs. */
   .r-text .desc + .desc { margin-top: 6px; }
   .r-title { font-weight: var(--w-med); }
+  /* The name and the first paragraph of a switch's row: a press there flips the switch. */
+  .r-label { display: flex; flex-direction: column; gap: 2px; }
   .field { width: 180px; font-size: var(--t-sm); }
   .stepper { display: inline-flex; align-items: center; gap: 4px; padding: 2px; border-radius: var(--r-full); background: var(--surface-1); }
   .stepper .num { min-width: 22px; text-align: center; font-weight: var(--w-semi); }

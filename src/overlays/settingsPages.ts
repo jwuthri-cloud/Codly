@@ -67,7 +67,8 @@ export function openAt(link: string | null): SettingsTarget {
   const [tab, section] = link.split('/', 2);
   if (tab !== 'safety') return { tab, page: null, section: null };
   if (section === undefined) return { tab, page: 'approvals', section: null };
-  if (!(section in SECTION_PAGE)) {
+  // Its own keys only: "toString" or "constructor" is no section.
+  if (!Object.hasOwn(SECTION_PAGE, section)) {
     // A link built without `safetyLink`: the sheet still opens, at the top of the tab.
     console.error(`[codly] Settings has no Safety section “${section}”`);
     return { tab, page: 'approvals', section: null };

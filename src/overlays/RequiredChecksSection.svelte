@@ -76,20 +76,22 @@
     </MoreAbout>
     {#if s}
       {@const can = setupChoices(s)}
-      <!-- Not a <label>: only the switch itself changes it, never a click on the text. -->
+      <!-- The name and the first paragraph are the switch's label; "More about this" is not: a press there opens the text. -->
       <div class="row">
         <div class="r-text">
-          <span class="r-title">Run the repo’s required checks</span>
-          <span class="desc">
-            {#if s.problem}
-              Codly does not read this repo’s checks file: {s.problem}.
-            {:else if s.text === null}
-              This repo has no <code>.codly/checks</code> with a command in it.
-            {:else}
-              Codly reads <code>.codly/checks</code> from your checkout and runs each command in the task’s worktree, after the task’s own checks, and again on
-              the finished plan. A command that fails goes back to the worker like any failed check.
-            {/if}
-          </span>
+          <label class="r-label" for="required-checks-switch">
+            <span class="r-title">Run the repo’s required checks</span>
+            <span class="desc">
+              {#if s.problem}
+                Codly does not read this repo’s checks file: {s.problem}.
+              {:else if s.text === null}
+                This repo has no <code>.codly/checks</code> with a command in it.
+              {:else}
+                Codly reads <code>.codly/checks</code> from your checkout and runs each command in the task’s worktree, after the task’s own checks, and again on
+                the finished plan. A command that fails goes back to the worker like any failed check.
+              {/if}
+            </span>
+          </label>
           {#if !s.problem && s.text !== null}
             <MoreAbout id="required-checks-run">
               <span class="desc">For an agent you chat with, its Git tab has Check the work. Each command has the time limit for checks above.</span>
@@ -98,6 +100,7 @@
         </div>
         {#if busy && !can.ask}<span class="busy" role="status">Saving…</span>{/if}
         <input
+          id="required-checks-switch"
           type="checkbox"
           class="switch"
           checked={s.on}
@@ -150,6 +153,8 @@
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
+  /* The name and the first paragraph of the switch's row: a press there flips the switch. */
+  .r-label { display: flex; flex-direction: column; gap: 2px; }
   .changed { display: flex; flex-direction: column; gap: 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--bad); }
   .choices { display: flex; align-items: center; gap: 8px; }
   .busy { flex: none; font-size: var(--t-sm); color: var(--ink-3); }

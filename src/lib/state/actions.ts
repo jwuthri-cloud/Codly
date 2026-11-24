@@ -29,7 +29,8 @@ import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../ho
 import { accounts } from './accounts.svelte';
 import { yourAnswers, yourChoice } from './answers';
 import { diffstats } from './diffstats.svelte';
-import { fileList, loadMergeState, resolveMergeConflict } from './mergeState.svelte';
+import { fileList, loadMergeState, mergeKey, mergeUi, resolveMergeConflict } from './mergeState.svelte';
+import { mergeOfferGone, type MergeRefusal } from '../util/mergeOffer';
 import { flushClosing } from './closing';
 import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
@@ -242,11 +243,14 @@ export async function closeRequest(thread: string): Promise<boolean> {
  *  (`unchecked`). */
 export async function mergePlan(planId: string, into: string | null = null, unchecked = false) {
   const plan = store.planMap.get(planId);
+  const source = { kind: 'plan' as const, id: planId };
+  // A toast that offers to go on goes once that is no longer true (a merge made, the cause gone).
+  const offerGone = (refusal: MergeRefusal) => () => mergeOfferGone(refusal, !!store.mergeOf(planId), mergeUi.states[mergeKey(source)]);
   if (!into) {
     const warning = await attempt('merge the plan', () => api.mergePlanWarning(planId));
     if (warning === undefined) return;
     if (warning) {
-      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, warning.target, unchecked) };
+      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, warning.target, unchecked), gone: offerGone('branch') };
       toast({ kind: 'attention', title: `Merge into ${warning.target}?`, body: warning.message, action: goOn, duration: 0 });
       return;
     }
@@ -259,16 +263,15 @@ export async function mergePlan(planId: string, into: string | null = null, unch
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${plan?.summary ?? 'Plan'} · ${shortSha(sha)}` });
   } catch (e) {
     // What stands in the way, as the core reads it now. Your branch did not move.
-    const source = { kind: 'plan' as const, id: planId };
     const state = await loadMergeState(source);
     if (state?.conflicts.length) {
       const body = `${state.target} and this plan both changed ${fileList(state.conflicts)}. ${state.target} is unchanged. An agent can resolve it in Codly’s own worktree, or you can do it yourself: see the plan’s card.`;
-      const resolve = { label: 'Have an agent resolve it', run: () => void resolveMergeConflict(source, null, into) };
+      const resolve = { label: 'Have an agent resolve it', run: () => void resolveMergeConflict(source, null, into), gone: offerGone('conflict') };
       toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${state.target}`, body, action: resolve, duration: 0 });
       return;
     }
     if (state?.failed_checks.length || state?.checks_not_run) {
-      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true) };
+      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true), gone: offerGone('checks') };
       // Checks that failed can go to an agent, like a conflict: the button is on the plan's card.
       const body = state.failed_checks.length ? `${msg(e)}. An agent can fix it: see the plan’s card.` : msg(e);
       toastsUpdate(id, { kind: 'error', title: `Not merged into ${state.target}`, body, action: goOn, duration: 0 });
