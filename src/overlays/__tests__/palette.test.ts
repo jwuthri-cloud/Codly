@@ -3,8 +3,9 @@ import type { AgentDo, SlashContext } from '../../home/composerActions';
 import type { Agent } from '../../lib/gen/Agent';
 import { mkAgent } from '../../office/demo/script';
 import {
-  ROOM_WORDS, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, okRow, press, rankRows, saidBy, saidOpens, saidWhere, seedOf, snippet, wants, type SaidNames,
+  ROOM_WORDS, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, okRow, paletteHint, press, rankRows, saidBy, saidOpens, saidWhere, searchSaid, seedOf, snippet, wants, type SaidKnown, type SaidNames, type SaidReads,
 } from '../palette';
+import type { ChatMessage } from '../../lib/gen/ChatMessage';
 
 describe('palette sections', () => {
   const row = (id: string, section: string) => ({ id, section });
@@ -164,6 +165,7 @@ describe('the group "Said in conversations"', () => {
   const names: SaidNames = {
     request: (t) => (t === 'lead:a' ? 'Fix the login page so that people who forgot their password can still get in' : null),
     closed: (t) => (t === 'closed:lead:b:900' ? 'Add a bye file' : null),
+    closedAuthor: (t, id) => (t === 'closed:lead:b:900' && id === 'l9' ? 'Lead of the bye file' : null),
     agent: (id) => (id === 'ada' ? 'Ada' : null),
   };
   /** The letters a snippet marks. */
@@ -192,7 +194,55 @@ describe('the group "Said in conversations"', () => {
   });
 
   it('says who said it', () => {
-    expect([saidBy('user', names), saidBy('codly', names), saidBy('ada', names), saidBy('l9', names)]).toEqual(['You', 'Codly', 'Ada', 'An agent']);
+    expect([saidBy('user', 'lead', names), saidBy('codly', 'lead', names), saidBy('ada', 'lead', names), saidBy('l9', 'lead', names)]).toEqual(['You', 'Codly', 'Ada', 'An agent']);
+  });
+
+  it('in a closed request, names the agent as that request’s transcript does: its Lead is archived', () => {
+    expect(saidBy('l9', 'closed:lead:b:900', names)).toBe('Lead of the bye file');
+    // Not named there: the office's name, else "An agent".
+    expect(saidBy('ada', 'closed:lead:b:900', names)).toBe('Ada');
+    expect(saidBy('l9', 'closed:lead:c:500', names)).toBe('An agent');
+  });
+
+  describe('the search', () => {
+    const msg = (id: string, thread: string): ChatMessage => ({ id, thread, author: 'l9', text: 'the needle', attachment: null, ts: 1 });
+    const none: SaidKnown = { titles: null, authors: new Map() };
+    const reads = (over: Partial<SaidReads> = {}): SaidReads => ({
+      searchChats: async () => [msg('m1', 'lead'), msg('m2', 'closed:lead:b:900'), msg('m3', 'closed:lead:b:900')],
+      closedRequests: async () => [{ thread: 'closed:lead:b:900', title: 'Add a bye file' }],
+      closedRequest: async () => ({ authors: { l9: 'Lead of the bye file' } }),
+      ...over,
+    });
+
+    it('reads the closed requests’ titles and who wrote in each, once', async () => {
+      let asked = 0;
+      const read = reads({
+        closedRequest: async () => {
+          asked++;
+          return { authors: { l9: 'Lead of the bye file' } };
+        },
+      });
+      const first = await searchSaid('needle', read, none);
+      expect(first.hits.map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+      expect(first.known.titles?.get('closed:lead:b:900')).toBe('Add a bye file');
+      expect(first.known.authors.get('closed:lead:b:900')).toEqual({ l9: 'Lead of the bye file' });
+      await searchSaid('needle', read, first.known);
+      expect(asked).toBe(1);
+    });
+
+    it('a failed read of the titles or the authors keeps the messages found', async () => {
+      const refuse = async () => {
+        throw new Error('no database');
+      };
+      const found = await searchSaid('needle', reads({ closedRequests: refuse, closedRequest: refuse }), none);
+      expect(found.hits.map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+      // Not kept as known: the next search asks again.
+      expect(found.known).toEqual(none);
+    });
+
+    it('a failed search still fails', async () => {
+      await expect(searchSaid('needle', reads({ searchChats: async () => Promise.reject(new Error('gone')) }), none)).rejects.toThrow('gone');
+    });
   });
 
   it('a hit at the start of a long message: its first words, cut at a word border', () => {
@@ -281,6 +331,18 @@ describe('palette keys', () => {
     expect(guard({ askFirst: askFirst(3) }, true, false)).toBeUndefined();
     // A row that cannot be taken back asks however it was taken.
     expect(guard({ confirm: 'Merge?' }, false, false)).toBe('Merge?');
+  });
+
+  it('once "Ask the Lead…" asks, rows that come in late do not take its question away', () => {
+    const asked = askFirst(0);
+    // ↵ armed the row; then a message found comes in above it.
+    expect(askFirst(1, true)).toBe(asked);
+    expect(guard({ askFirst: askFirst(1, true) }, true, false)).toBe(asked);
+  });
+
+  it('the field’s hint says it finds what was said, and offers the Lead only on a request', () => {
+    expect(paletteHint(true)).toBe('Search agents, tasks, conversations and commands, or ask the Lead…');
+    expect(paletteHint(false)).toBe('Search agents, tasks, conversations and commands…');
   });
 });
 

@@ -6,22 +6,22 @@
   webview has none, the paragraph of the current match gets an outline). History that is not
   loaded is not searched: the bar says so and offers to load it. Work folded into one line is
   searched by that line. With no match here, "Search all conversations" asks the palette; a
-  message found there opens its conversation with this bar on the same text.
+  message found there opens its conversation with this bar on the same text, at that message.
 -->
 <script module lang="ts">
   import { ui } from '../lib/state/ui.svelte';
 
-  /** The text the next find bar starts with (`findInConversation`). */
-  let seed: string | null = null;
+  /** The text the next find bar starts with, and the message it was found in (`findInConversation`). */
+  let seed: { text: string; message: string } | null = null;
 
-  /** Open the find bar on `text`, in the conversation on screen. It goes to the first match as
-   *  soon as one is on screen: the conversation may still be loading. */
-  export function findInConversation(text: string) {
-    seed = text;
+  /** Open the find bar on `text`, in the conversation on screen, at message `message`. It goes
+   *  there as soon as a match is on screen: the conversation may still be loading. */
+  export function findInConversation(text: string, message: string) {
+    seed = { text, message };
     ui.openFind();
   }
 
-  function takeSeed(): string | null {
+  function takeSeed(): { text: string; message: string } | null {
     const s = seed;
     seed = null;
     return s;
@@ -33,6 +33,8 @@
   import { store } from '../lib/state/store.svelte';
   import Icon from '../components/Icon.svelte';
   import { findMatches, stepMatch, type Piece } from './find';
+  import { afterSearch, messageRow, type Seek } from './findSeek';
+  import { LAYOUT_REST_MS } from './threadScroll';
   import { SAID_FROM } from '../overlays/palette';
 
   interface Props {
@@ -58,10 +60,12 @@
   const registry = typeof CSS !== 'undefined' && 'highlights' in CSS ? CSS.highlights : null;
 
   const first = takeSeed();
-  let query = $state(first ?? '');
-  /** The text came from the palette: go to its first match as soon as one is on screen, also
-   *  when the conversation shows only after the search (a closed request loads). */
-  let seeking = first !== null;
+  let query = $state(first?.text ?? '');
+  /** The text came from the palette: go to the picked message's match as soon as one is on
+   *  screen, also when the conversation shows only after the search (a closed request loads). */
+  let seeking: Seek | null = first && { query: first.text, key: messageRow(first.message, store.chatKeys) };
+  /** The conversation settles its own scroll after it shows: the match is brought back into view once it has. */
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
   let input: HTMLInputElement | undefined = $state();
   /** The matches, in the page's order (ranges follow the page as it changes). */
   let ranges: Range[] = [];
@@ -159,11 +163,20 @@
     }
     total = ranges.length;
     if (!total) more = false;
-    if (seeking && total) {
-      seeking = false;
+    const row = seeking?.key && root ? root.querySelector(`[data-key="${CSS.escape(seeking.key)}"]`) : null;
+    const sought = afterSearch(seeking, query, total, row ? ranges.findIndex((r) => row.contains(r.startContainer)) : -1);
+    seeking = sought.seek;
+    if (sought.go !== null && root) {
+      current = sought.go === 'view' ? firstInView(root) : sought.go;
+      const here = ranges[current];
+      clearTimeout(settleTimer);
+      // Only if you are still on that match (the page may have been searched again since).
+      settleTimer = setTimeout(() => {
+        const now = ranges[current];
+        if (here && now?.startContainer === here.startContainer && now.startOffset === here.startOffset) reveal(root);
+      }, LAYOUT_REST_MS);
       jump = true;
-    }
-    if (jump && root) current = firstInView(root);
+    } else if (jump && root) current = firstInView(root);
     else {
       const same = was ? ranges.findIndex((r) => r.startContainer === was.startContainer && r.startOffset === was.startOffset) : -1;
       current = same >= 0 ? same : Math.min(current, Math.max(0, total - 1));
@@ -225,8 +238,8 @@
     void ui.findFocus;
     const s = takeSeed();
     if (s !== null) {
-      query = s;
-      seeking = true;
+      query = s.text;
+      seeking = { query: s.text, key: messageRow(s.message, store.chatKeys) };
     }
     tick().then(() => {
       input?.focus();
@@ -235,6 +248,7 @@
   });
 
   onDestroy(() => {
+    clearTimeout(settleTimer);
     ranges = [];
     paint();
     ui.findOpen = false;

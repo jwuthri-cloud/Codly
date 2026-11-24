@@ -81,6 +81,18 @@ export function mayRewind(h: RewindHere): boolean {
   return h.oneToOne && writes && !!h.agent?.worktree && !h.turnRuns && !h.waits && !h.inTerminal && h.composerEmpty;
 }
 
+/**
+ * Esc Esc where "Undo a turn" would open but for what the composer holds (text or files): the
+ * list does not open over a draft that ↵ would send, and the composer says why in one quiet
+ * line (`REWIND_HELD_LINE`) instead of doing nothing.
+ */
+export function rewindHeldByDraft(h: RewindHere): boolean {
+  return !h.composerEmpty && mayRewind({ ...h, composerEmpty: true });
+}
+
+/** The composer's line when Esc Esc did not open "Undo a turn" over a draft. */
+export const REWIND_HELD_LINE = 'Undo a turn opens when the message field is empty';
+
 export type ComposerEscStep = 'close-menu' | 'dismiss-toast' | 'close-find' | 'stop';
 
 /**
@@ -121,4 +133,17 @@ export function escStop(asked: { thread: string; at: number } | null, thread: st
  */
 export function denyKeyInField(field: { composer: boolean; empty: boolean }): boolean {
   return field.composer && field.empty;
+}
+
+/** How long the composer's field must stay as it is before ⌫ on it may leave the chat. */
+export const BACKSPACE_REST = 600;
+
+/**
+ * ⌫ in a 1:1 chat's composer goes back to the request only when the field was already empty
+ * when the key went down, on a press that is not a held key's repeat, with no modifier (⌘⌫
+ * denies), and `sinceChange` ms after the field last changed: the presses that cleared a draft
+ * never leave the chat by running one press too far.
+ */
+export function backspaceLeaves(k: { empty: boolean; repeat: boolean; modifier: boolean; sinceChange: number }): boolean {
+  return k.empty && !k.repeat && !k.modifier && k.sinceChange >= BACKSPACE_REST;
 }

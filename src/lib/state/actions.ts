@@ -237,6 +237,8 @@ export async function closeRequest(thread: string): Promise<boolean> {
   // Review comments its composer held and did not send stay on their diff: a request that is
   // no tab any more holds none (`waitingRequest`), and its thread name is never given again.
   ui.draftRequests = ui.draftRequests.filter((d) => d.thread !== thread);
+  // Its composer's draft goes too, also the copy kept across a restart.
+  saveDraft(draftSlot(store.workspace?.id, thread), '', []);
   if (ui.request === thread) ui.openRequest((list[i + 1] ?? list[i - 1])?.thread ?? 'lead');
   await store.resync(); // its messages moved out of the thread without events
   return true;

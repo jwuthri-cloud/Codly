@@ -24,7 +24,7 @@
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { narrate } from '../lib/state/narration';
-  import { ROOMS, isClosedThread, isRequestThread, ui } from '../lib/state/ui.svelte';
+  import { ROOMS, isRequestThread, ui } from '../lib/state/ui.svelte';
   import { article } from '../lib/util/format';
   import { highlight } from '../lib/util/fuzzy';
   import { PROVIDER_LABEL, TASK_STATUS_LABEL, taskState } from '../lib/util/labels';
@@ -44,7 +44,7 @@
   import { MODES } from '../home/LeadControls.svelte';
   import { findInConversation } from '../home/FindBar.svelte';
   import {
-    ROOM_WORDS, SAID, SAID_FROM, SAID_MOST, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, offersAsk, okRow, press, rankRows, saidBy, saidOpens, saidWhere, seedOf, snippet, wants, type SaidNames,
+    ROOM_WORDS, SAID, SAID_FROM, SAID_MOST, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, offersAsk, okRow, paletteHint, press, rankRows, saidBy, saidOpens, saidWhere, searchSaid, seedOf, snippet, wants, type SaidNames,
   } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
@@ -254,8 +254,9 @@
   // the other groups never wait for it.
   let said = $state<ChatMessage[]>([]);
   let saidError = $state<string | null>(null);
-  /** The closed requests' titles, read once, when a message of a closed request is found. */
-  let closedTitles = $state<Map<string, string> | null>(null);
+  /** The closed requests' titles, read once, and who wrote in each, when a message of a closed request is found. */
+  let closedTitles = $state.raw<Map<string, string> | null>(null);
+  let closedAuthors = $state.raw<Map<string, Record<string, string>>>(new Map());
   let saidSeq = 0;
   $effect(() => {
     const q = query.trim();
@@ -269,9 +270,10 @@
     const my = ++saidSeq;
     const t = setTimeout(async () => {
       try {
-        const hits = await api.searchChats(q);
-        if (hits.some((m) => isClosedThread(m.thread)) && !closedTitles) closedTitles = new Map((await api.closedRequests()).map((c) => [c.thread, c.title]));
-        if (my === saidSeq) said = hits;
+        const found = await searchSaid(q, api, { titles: closedTitles, authors: closedAuthors });
+        closedTitles = found.known.titles;
+        closedAuthors = found.known.authors;
+        if (my === saidSeq) said = found.hits;
       } catch (e) {
         if (my === saidSeq) {
           said = [];
@@ -284,12 +286,13 @@
   const names: SaidNames = {
     request: (thread) => store.chats.find((c) => c.thread === thread && c.author === 'user')?.text ?? store.planOf(thread)?.request ?? null,
     closed: (thread) => closedTitles?.get(thread) || null,
+    closedAuthor: (thread, id) => closedAuthors.get(thread)?.[id] ?? null,
     agent: (id) => store.agentMap.get(id)?.name ?? null,
   };
-  /** Open the conversation a message was said in, with the find bar on `q`. */
-  function openSaid(thread: string, q: string) {
-    ui.openThread(thread);
-    findInConversation(q);
+  /** Open the conversation a message was said in, with the find bar on `q` at that message. */
+  function openSaid(m: ChatMessage, q: string) {
+    ui.openThread(m.thread);
+    findInConversation(q, m.id);
   }
   // A message found for an earlier query shows only while it still holds what you typed.
   const saidRows = $derived.by((): Scored[] => {
@@ -300,8 +303,8 @@
       .slice(0, SAID_MOST)
       .map(({ m, s }) => ({
         // Who first: a long place name is the part that may be cut.
-        id: `said:${m.id}`, section: SAID, title: s.line, hits: s.hits, sub: `${saidBy(m.author, names)} · ${saidWhere(m.thread, names)}`, icon: 'chat',
-        ...(saidOpens(m.thread, names) ? { hint: 'Open', run: () => openSaid(m.thread, q) } : {}),
+        id: `said:${m.id}`, section: SAID, title: s.line, hits: s.hits, sub: `${saidBy(m.author, m.thread, names)} · ${saidWhere(m.thread, names)}`, icon: 'chat',
+        ...(saidOpens(m.thread, names) ? { hint: 'Open', run: () => openSaid(m, q) } : {}),
       }));
   });
 
@@ -361,7 +364,7 @@
       ...found,
       {
         id: 'ask', section: 'Ask', title: `Ask the Lead: “${oneLine(q, 70)}”`, sub: 'Sends it to the request you are on', icon: 'chat', hits: [], hint: 'Send',
-        askFirst: askFirst(found.length),
+        askFirst: askFirst(found.length, armed === 'ask'),
         run: () => {
           sendChat(ui.request, q);
           ui.openRequest(ui.request);
@@ -467,7 +470,7 @@
     inputEl?.focus();
   });
 
-  const placeholder = $derived(scope ? SCOPES[scope].placeholder : 'Search agents, tasks, artifacts and commands — or ask the Lead…');
+  const placeholder = $derived(scope ? SCOPES[scope].placeholder : paletteHint(isRequestThread(ui.thread)));
   const activeRow = $derived(withAsk[active]);
 </script>
 

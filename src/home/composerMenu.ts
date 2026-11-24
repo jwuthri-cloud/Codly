@@ -11,17 +11,22 @@ export type Trigger = {
   query: string;
   /** Nothing but spaces before it ("@Ada" at the start talks to Ada 1:1). */
   atStart: boolean;
+  /** "/ model": spaces after the slash. Only the action of that very name is offered. */
+  exact?: true;
 };
 
 /**
  * The menu the caret is in, if any. `@` and `#` start a word anywhere; a file's path may hold
  * `/`, `.` and `-`. `/` opens the actions only when the message is nothing but that one word
  * (the whole word is the query, wherever the caret is in it): a path or a sentence that starts
- * with a slash stays plain text.
+ * with a slash stays plain text. "/ model" (spaces after the slash) is the action's name typed
+ * with a space too much: the menu offers that action only (`exact`).
  */
 export function triggerAt(text: string, caret: number): Trigger | null {
   const slash = /^\/([\w-]*)\s*$/.exec(text);
   if (slash) return caret > 0 ? { trigger: '/', start: 0, query: slash[1], atStart: true } : null;
+  const spaced = /^\/\s+([\w-]+)\s*$/.exec(text);
+  if (spaced) return caret > 0 ? { trigger: '/', start: 0, query: spaced[1], atStart: true, exact: true } : null;
   const before = text.slice(0, caret);
   const m = /(^|\s)([@#])([\w./-]*)$/.exec(before);
   if (!m) return null;
@@ -62,6 +67,14 @@ export function rankFiles(paths: string[], query: string, limit: number): string
  */
 export type SlashCommand = { name: string; label: string; icon: string } & ({ hint: string; run: () => void } | { off: string; wait?: true });
 
+/** What the `@` menu says in place of the repo's files, if anything: the list could not be read,
+ *  or it is still being read (on its way, or the code index has no file yet). */
+export function filesLine(s: { query: string; failed: boolean; reading: boolean; count: number }): string | null {
+  if (!s.query) return null;
+  if (s.failed) return 'Couldn’t list the repo’s files';
+  return s.reading || !s.count ? 'The file list is still being read' : null;
+}
+
 /**
  * The actions that match what is typed after `/`: those whose name starts with it first, in
  * the list's order, then those that hold it in their name or label. Nothing typed: all of them.
@@ -84,13 +97,14 @@ export function filterSlash<T extends { name: string; label: string; off?: strin
  * that follows the "/" up to a space; its name is the letters, digits, `-` and `_` it starts
  * with. It counts when it is a name that is not an action ("/review this"), a name with more
  * after it that is not a path ("/help?", "/model:opus", "/undo."), or a name with more slashes
- * after it that is not a path in the message's sense: one that starts with an action's name
- * ("/mcp/terminal …"), or one with nothing after it ("/mcp/terminal"). A path in front of more
- * words ("/usr/bin/env is missing"), "/" alone or in front of words ("/ is the root") and a slash
- * later in the text are plain text. `closest`: the action you most likely meant, null when none
- * is near.
+ * after it that starts with an action's name ("/mcp/terminal …"). An action's name alone after
+ * spaces ("/ model") is that action typed with a space too much. A path ("/usr/bin/env", alone
+ * or in front of more words), "/" alone or in front of words ("/ is the root") and a slash later
+ * in the text are plain text. `closest`: the action you most likely meant, null when none is near.
  */
 export function unknownSlash(text: string, names: readonly string[]): { word: string; closest: string | null } | null {
+  const spaced = /^\s*\/(\s+([\w-]+))\s*$/.exec(text);
+  if (spaced && names.includes(spaced[2].toLowerCase())) return { word: spaced[1], closest: spaced[2].toLowerCase() };
   const m = /^\s*\/(\S*)(.*)$/s.exec(text);
   if (!m || !m[1]) return null;
   const [, word, rest] = m;
@@ -100,7 +114,7 @@ export function unknownSlash(text: string, names: readonly string[]): { word: st
   const known = names.includes(name);
   const tail = word.slice(name.length);
   if (!tail) return known ? null : { word, closest: closestName(name, names) };
-  if (tail.includes('/') && !known && rest.trim()) return null;
+  if (tail.includes('/') && !known) return null;
   return { word, closest: known ? name : closestName(name, names) };
 }
 

@@ -14,21 +14,23 @@
   Esc on an empty line dismisses a toast that waits for you first; twice, it stops the running
   turn, or in a 1:1 chat with an agent that rests opens "Undo a turn" (RewindMenu, esc.ts). ↑ on
   an empty line brings back what you sent. A
-  draft (text and files) is kept when the composer leaves the screen, and Edit on an earlier
-  message does not replace it. A new request that holds a draft stays a tab when you leave it.
+  draft (text and files) is kept when the composer leaves the screen, and across a reload or a
+  restart (drafts.ts); Edit on an earlier message does not replace it. A new request that holds
+  a draft stays a tab when you leave it. A long paste is attached as a text file (attached.ts);
+  its chip can put the text in the field instead.
   The hint in the empty field is an element of its own, not the field's `placeholder`: a hint
   longer than the field ends in an ellipsis in every engine (a textarea's placeholder is cut
   mid-letter in Chromium).
 -->
 <script lang="ts">
-  import { onDestroy, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { Agent } from '../lib/gen/Agent';
   import { sendChat, setRequestPrefs, stopThreadByEsc } from '../lib/state/actions';
   import { setPermissionMode } from '../lib/state/control.svelte';
   import { giveBack, loadTakeover, takeovers } from '../lib/state/takeover.svelte';
   import { intakeUi } from '../lib/state/intake.svelte';
-  import { composerEsc } from '../lib/state/esc';
+  import { backspaceLeaves, composerEsc, escPair, escStep, openOne, REWIND_HELD_LINE, rewindHeldByDraft } from '../lib/state/esc';
   import { toast, toasts } from '../lib/state/toasts.svelte';
   import { busy, busyHint, stoppedHint, waitingHint } from '../lib/state/queue';
   import { store } from '../lib/state/store.svelte';
@@ -44,12 +46,12 @@
   import LeadControls, { MODES } from './LeadControls.svelte';
   import AgentControls from './AgentControls.svelte';
   import { nextWay, wayOf } from './agentPicker';
-  import { messageWithFiles } from './attached';
+  import { lineCount, messageWithFiles, pastedChip, pastedName, pastesAsFile } from './attached';
   import { draftSlot, loadDraft, nextAttId, saveDraft, seedDraft, type Att } from './drafts';
   import { recall, type Recalled } from './recall';
   import { agentTurns } from './agentTurns';
   import { agentDo, slashCommands, slashContext, type SlashDo } from './composerActions';
-  import { fileMention, filterSlash, MenuPointer, rankFiles, triggerAt, unknownSlash, unknownSlashLine, type Trigger } from './composerMenu';
+  import { fileMention, filesLine, filterSlash, MenuPointer, rankFiles, triggerAt, unknownSlash, unknownSlashLine, type Trigger } from './composerMenu';
   import { sendState } from './composerSend';
   import RewindMenu from './RewindMenu.svelte';
   import { rewindLayer } from './rewindLayer.svelte';
@@ -69,18 +71,19 @@
   const saving = $derived(files.some((f) => !f.path && !f.failed));
   const ready = $derived(files.filter((f) => f.path));
 
+  function addFile(f: File, pasted?: Att['pasted']) {
+    files.push({ id: nextAttId(), name: f.name || 'pasted file', path: null, url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null, failed: false, pasted });
+    const att = files[files.length - 1];
+    api.saveAttachment(f).then(
+      (p) => (att.path = p),
+      (e) => {
+        att.failed = true;
+        toast({ kind: 'error', title: `Couldn’t attach ${att.name}`, body: e instanceof Error ? e.message : String(e) });
+      },
+    );
+  }
   function addFiles(list: File[]) {
-    for (const f of list) {
-      files.push({ id: nextAttId(), name: f.name || 'pasted file', path: null, url: f.type.startsWith('image/') ? URL.createObjectURL(f) : null, failed: false });
-      const att = files[files.length - 1];
-      api.saveAttachment(f).then(
-        (p) => (att.path = p),
-        (e) => {
-          att.failed = true;
-          toast({ kind: 'error', title: `Couldn’t attach ${att.name}`, body: e instanceof Error ? e.message : String(e) });
-        },
-      );
-    }
+    for (const f of list) addFile(f);
   }
   function drop(a: Att) {
     if (a.url) URL.revokeObjectURL(a.url);
@@ -89,9 +92,30 @@
   const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes('Files');
   function paste(e: ClipboardEvent) {
     const list = [...(e.clipboardData?.files ?? [])];
-    if (!list.length) return;
+    if (list.length) {
+      e.preventDefault();
+      addFiles(list);
+      return;
+    }
+    // A long text goes in as a file: the field stays readable, and the agent reads the file.
+    const pasted = e.clipboardData?.getData('text/plain') ?? '';
+    if (!pastesAsFile(pasted)) return;
     e.preventDefault();
-    addFiles(list);
+    addFile(new File([pasted], pastedName(), { type: 'text/plain' }), { text: pasted, lines: lineCount(pasted) });
+  }
+  /** "Paste as text instead": the pasted text goes into the field where the caret is, and its file goes. */
+  function pasteAsText(a: Att) {
+    if (!a.pasted || !ta) return;
+    const from = ta.selectionStart ?? text.length;
+    const to = ta.selectionEnd ?? from;
+    const caret = from + a.pasted.text.length;
+    text = text.slice(0, from) + a.pasted.text + text.slice(to);
+    drop(a);
+    tick().then(() => {
+      resize();
+      ta?.focus();
+      ta?.setSelectionRange(caret, caret);
+    });
   }
   let ta: HTMLTextAreaElement | undefined = $state();
   const slot = $derived(draftSlot(store.workspace?.id, thread));
@@ -113,6 +137,23 @@
   onDestroy(() => {
     gone = true;
     if (lastSlot) saveDraft(lastSlot, text, files);
+  });
+  // The kept copy follows what you type, a moment after you stop, so a reload or a quit loses
+  // at most that moment (and the page going away keeps it at once).
+  const KEEP_AFTER_MS = 400;
+  $effect(() => {
+    const here = slot;
+    const now = text;
+    const held = files;
+    void held.map((f) => f.path);
+    if (here !== lastSlot) return;
+    const keep = () => saveDraft(here, now, held);
+    const t = setTimeout(keep, KEEP_AFTER_MS);
+    window.addEventListener('pagehide', keep);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener('pagehide', keep);
+    };
   });
   $effect(() => {
     const seed = ui.composerSeed;
@@ -191,16 +232,23 @@
   /** The repo's indexed files, asked for when `@` opens the menu. */
   let filePaths = $state.raw<string[]>([]);
   let filesFailed = $state(false);
+  /** The list was asked for and has not come yet. */
+  let filesReading = $state(false);
   function loadFiles() {
     const office = store.workspace?.id;
     if (!office) return;
+    filesReading = true;
     repoFiles(office).then(
       (paths) => {
         if (store.workspace?.id !== office) return;
         filePaths = paths;
         filesFailed = false;
+        filesReading = false;
       },
-      () => (filesFailed = true),
+      () => {
+        filesFailed = true;
+        filesReading = false;
+      },
     );
   }
 
@@ -255,7 +303,8 @@
   const options = $derived.by((): Opt[] => {
     const m = mention;
     if (!m) return [];
-    if (m.trigger === '/') return filterSlash(commands, m.query).map((c): Opt => ({ id: `/${c.name}`, kind: 'command', label: c.label, sub: `/${c.name}`, icon: c.icon, ...('off' in c ? { hint: c.off, run: null } : { hint: c.hint, run: c.run }) }));
+    // "/ model": only the action of that very name.
+    if (m.trigger === '/') return filterSlash(commands, m.query).filter((c) => !m.exact || c.name === m.query.toLowerCase()).map((c): Opt => ({ id: `/${c.name}`, kind: 'command', label: c.label, sub: `/${c.name}`, icon: c.icon, ...('off' in c ? { hint: c.off, run: null } : { hint: c.hint, run: c.run }) }));
     const best = (pool: Opt[]): Opt[] =>
       pool
         .map((o) => ({ o, m: fuzzy(m.query, o.label) }))
@@ -269,8 +318,8 @@
       ...rankFiles(filePaths, m.query, SHOWN).map((path): Opt => ({ id: `file:${path}`, kind: 'file', insert: fileMention(path), label: basename(path), sub: dirname(path) })),
     ];
   });
-  /** The files could not be listed: the menu says so instead of showing none. */
-  const noFiles = $derived(mention?.trigger === '@' && !!mention.query && filesFailed);
+  /** The files could not be listed, or not yet: the menu says so instead of showing none. */
+  const noFiles = $derived(mention?.trigger === '@' ? filesLine({ query: mention.query, failed: filesFailed, reading: filesReading, count: filePaths.length }) : null);
 
   function detect() {
     if (!ta) return;
@@ -369,6 +418,74 @@
     });
   }
 
+  /** When the field last changed (typed, emptied, or another draft loaded). */
+  let changedAt = 0;
+  $effect(() => {
+    void text;
+    changedAt = Date.now();
+  });
+
+  // ── Esc Esc over a draft: "Undo a turn" does not open, and the composer says why ──
+  let rewindHeld = $state(false);
+  /** The Esc that may begin such a pair, its thread and when. */
+  let escFirst: { thread: string; at: number } | null = null;
+  /** Seen before every other handler (capture), so what this Esc will do is read from the state
+   *  it finds: only an Esc with nothing else to do counts (no menu, toast, sheet, dialog or find bar). */
+  function escWatch(e: KeyboardEvent) {
+    if (e.key !== 'Escape') return;
+    const first = escFirst;
+    escFirst = null;
+    if (ui.thread !== thread || rewinding || (mention && options.length)) return;
+    const idle = escStep({
+      repeat: e.repeat,
+      artifactOpen: !!ui.artifactOpen,
+      selection: !!ui.selection,
+      mode: ui.mode,
+      room: ui.room,
+      popupOpen: openOne(document.querySelectorAll('[role="dialog"], [role="menu"]')),
+      inOffice: !!(e.target as HTMLElement | null)?.closest?.('[role="application"]'),
+      findOpen: ui.findOpen,
+      readingClosed: false,
+      toastWaits: toasts.waiting !== undefined,
+      rewind: false,
+      second: false,
+    }) === 'stop';
+    const held = idle && rewindHeldByDraft({
+      oneToOne,
+      agent,
+      turnRuns: isBusy,
+      waits: !!agent && store.pendingApprovals.some((a) => a.agent_id === agent.id),
+      inTerminal,
+      composerEmpty: !text.trim() && !files.length,
+    });
+    if (!held) return;
+    const now = Date.now();
+    if (escPair(first, thread, now)) showRewindHeld();
+    else escFirst = { thread, at: now };
+  }
+  onMount(() => {
+    window.addEventListener('keydown', escWatch, true);
+    return () => window.removeEventListener('keydown', escWatch, true);
+  });
+  /** How long the line stays when nothing else takes it away. */
+  const HELD_MS = 4000;
+  let heldTimer: ReturnType<typeof setTimeout> | undefined;
+  function showRewindHeld() {
+    rewindHeld = true;
+    clearTimeout(heldTimer);
+    heldTimer = setTimeout(() => (rewindHeld = false), HELD_MS);
+  }
+  // The line goes as soon as the draft changes.
+  $effect(() => {
+    void text;
+    void files.length;
+    untrack(() => {
+      rewindHeld = false;
+      clearTimeout(heldTimer);
+    });
+  });
+  onDestroy(() => clearTimeout(heldTimer));
+
   /** The message ↑ brought back (while the line still shows it untouched). */
   let recalled: Recalled | null = null;
   /** ↑ / ↓ on an empty line (or on a recalled message you have not edited) walk through what you sent here. */
@@ -433,7 +550,9 @@
       return;
     }
     // ⌫ alone: with a modifier it is another key (⌘⌫ denies), and it never leaves the conversation.
-    if (e.key === 'Backspace' && !text && oneToOne && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    // The press that emptied the field, and those right after it, stay here (`backspaceLeaves`).
+    const modifier = e.metaKey || e.ctrlKey || e.altKey || e.shiftKey;
+    if (e.key === 'Backspace' && oneToOne && backspaceLeaves({ empty: !text, repeat: e.repeat, modifier, sinceChange: Date.now() - changedAt })) {
       e.preventDefault();
       ui.openRequest(ui.request);
       return;
@@ -446,7 +565,8 @@
   }
 </script>
 
-<div class="wrap" class:dragging role="group" aria-label="Composer"
+<!-- `data-files`: the draft holds files, so Esc Esc reads the composer as not empty (keys.ts). -->
+<div class="wrap" class:dragging role="group" aria-label="Composer" data-files={files.length ? '' : undefined}
   ondragenter={(e) => { if (hasFiles(e)) { e.preventDefault(); dragging = true; } }}
   ondragover={(e) => { if (hasFiles(e)) { e.preventDefault(); dragging = true; } }}
   ondragleave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) dragging = false; }}
@@ -466,18 +586,21 @@
           </button>
         </li>
       {/each}
-      {#if noFiles}<li class="mh bad" role="alert">Couldn’t list the repo’s files</li>{/if}
+      {#if noFiles}<li class="mh" class:bad={filesFailed} role={filesFailed ? 'alert' : 'status'}>{noFiles}</li>{/if}
     </ul>
   {:else if unknown}
     <p class="nosuch" role="status">{unknownSlashLine(unknown)}</p>
+  {:else if rewindHeld}
+    <p class="nosuch" role="status">{REWIND_HELD_LINE}</p>
   {/if}
   {#if files.length}
     <ul class="atts" aria-label="Attachments">
       {#each files as f (f.id)}
         <li class="att" class:failed={f.failed} class:busy={!f.path && !f.failed}>
           {#if f.url}<img src={f.url} alt="" />{:else}<Icon name="file" size={14} />{/if}
-          <span class="an truncate">{f.name}</span>
-          <button class="ax" aria-label="Remove {f.name}" onclick={() => drop(f)}><Icon name="x" size={10} stroke={2} /></button>
+          <span class="an truncate">{f.pasted ? pastedChip(f.pasted.lines) : f.name}</span>
+          {#if f.pasted}<button class="as-text" onclick={() => pasteAsText(f)}>Paste as text instead</button>{/if}
+          <button class="ax" aria-label="Remove {f.pasted ? 'the pasted text' : f.name}" onclick={() => drop(f)}><Icon name="x" size={10} stroke={2} /></button>
         </li>
       {/each}
     </ul>
@@ -528,6 +651,9 @@
   .att.busy { opacity: 0.6; }
   .att.failed { color: var(--bad); }
   .an { min-width: 0; }
+  .att:has(.as-text) { max-width: 360px; }
+  .as-text { flex-shrink: 0; padding: 0 4px; font-size: var(--t-sm); color: var(--ink-3); text-decoration: underline; text-underline-offset: 2px; }
+  .as-text:hover { color: var(--ink-1); }
   .ax { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; color: var(--ink-3); flex-shrink: 0; }
   .ax:hover { background: var(--surface-3); color: var(--ink-1); }
   .attach { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: var(--ink-3); flex-shrink: 0; }

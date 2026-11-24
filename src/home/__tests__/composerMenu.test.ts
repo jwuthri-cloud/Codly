@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fileMention, filterSlash, MenuPointer, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine } from '../composerMenu';
+import { fileMention, filesLine, filterSlash, MenuPointer, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine } from '../composerMenu';
 
 /** The menu at the end of `text` (the caret is where typing left it). */
 const at = (text: string) => triggerAt(text, text.length);
@@ -194,10 +194,42 @@ describe('a first word with a second slash', () => {
     expect(unknownSlashLine({ word: 'mcp/terminal', closest: 'mcp' })).toBe('No such command: /mcp/terminal. Did you mean /mcp? ↵ sends nothing until you change it.');
   });
 
-  it('alone on the line is a mistyped command too; in front of more words it is a path', () => {
-    expect(unknownSlash('/usr/bin/env', names)).toEqual({ word: 'usr/bin/env', closest: null });
+  it('that starts with no action’s name is a path: a message, sent as written, alone or not', () => {
+    expect(unknownSlash('/usr/bin/env', names)).toBeNull();
+    expect(unknownSlash('/etc/hosts', names)).toBeNull();
     expect(unknownSlash('/usr/bin/env is missing', names)).toBeNull();
     expect(unknownSlash('/etc/hosts\nhas a typo', names)).toBeNull();
+  });
+});
+
+describe('an action’s name after a slash and spaces', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'clear', 'undo', 'terminal', 'mcp'];
+
+  it('is that action typed with a space too much: it is not sent, and the menu offers the action', () => {
+    expect(unknownSlash('/ model', names)).toEqual({ word: ' model', closest: 'model' });
+    expect(unknownSlash('/   Compact ', names)).toEqual({ word: '   Compact', closest: 'compact' });
+    expect(unknownSlashLine({ word: ' model', closest: 'model' })).toBe('No such command: / model. Did you mean /model? ↵ sends nothing until you change it.');
+    expect(at('/ model')).toEqual({ trigger: '/', start: 0, query: 'model', atStart: true, exact: true });
+  });
+
+  it('another word, or more words, after the spaces stay a message', () => {
+    expect(unknownSlash('/ is the root', names)).toBeNull();
+    expect(unknownSlash('/ review', names)).toBeNull();
+    expect(unknownSlash('/ model please', names)).toBeNull();
+    expect(at('/ model please')).toBeNull();
+  });
+});
+
+describe('the file menu with no file to show', () => {
+  it('says the list is still being read while it comes, or while the code index has none yet', () => {
+    expect(filesLine({ query: 'api', failed: false, reading: true, count: 0 })).toBe('The file list is still being read');
+    expect(filesLine({ query: 'api', failed: false, reading: false, count: 0 })).toBe('The file list is still being read');
+  });
+
+  it('says a failed read, and nothing once the list is there or nothing is typed', () => {
+    expect(filesLine({ query: 'api', failed: true, reading: false, count: 0 })).toBe('Couldn’t list the repo’s files');
+    expect(filesLine({ query: 'api', failed: false, reading: false, count: 12 })).toBeNull();
+    expect(filesLine({ query: '', failed: false, reading: true, count: 0 })).toBeNull();
   });
 });
 
