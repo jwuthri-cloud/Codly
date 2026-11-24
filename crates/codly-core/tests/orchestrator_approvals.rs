@@ -1376,3 +1376,21 @@ mod what_you_said {
         shut_down(&core).await;
     }
 }
+
+/// The floor for your own folder reads a line handed to env, and the commands a runner
+/// starts: in your folder they ask, in a Codly worktree they are allowed as before.
+#[test]
+fn full_access_reads_a_line_handed_to_env_in_your_own_folder() {
+    for (c, why) in [
+        ("env -S 'git reset --hard'", "discards uncommitted work"),
+        ("timeout 60 env --split-string='rm -rf src'", "deletes folders"),
+        ("uv run env -S 'git push -f'", "force push"),
+        ("npx git rebase main", "rewrites git history"),
+        ("env -uSECRET git clean -fd", "discards uncommitted work"),
+    ] {
+        let r = reason(full(c, true));
+        assert!(r.contains(why) && r.contains("your project folder itself"), "{c}: {r}");
+        assert!(allowed(&full(c, false)), "a Codly worktree keeps full access: {c}");
+    }
+    assert!(allowed(&full("env FOO=1 git status", true)));
+}
