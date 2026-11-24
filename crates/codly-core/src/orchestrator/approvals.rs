@@ -1094,13 +1094,14 @@ const RUNNER_SWITCHES: &[&str] = &["-y", "--yes", "--no", "--no-install", "-q", 
 /// `/` is the option's value (`uv run --directory sub/web pytest`), or an argument of the
 /// program tried before it (`uv run --frozen pytest tests/docker`).
 ///
-/// With `shell_line`, what the runner starts is a line for a shell, not a program, and a `-c`
-/// only says so (pnpm's `--shell-mode`).
+/// With `shell_line`, what the runner starts is a line for a shell, not a program, and each
+/// of those two is tried as the line, whatever it holds. `shell_switches` are the runner's
+/// options that only turn that on and take no value (pnpm's `-c` and `--shell-mode`).
 ///
 /// Also says how many of the words can be the runner's own: its options and their values, up
 /// to the `--` or to the first word that can only be the program. The words behind that
 /// belong to the program (`pnpm exec eslint -c x.json`: `-c` is eslint's).
-fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> (Vec<Started<'a>>, usize) {
+fn runner_starts<'a>(words: &'a [String], shell_line: bool, shell_switches: &[&str]) -> (Vec<Started<'a>>, usize) {
     let start = |command: &'a [String]| if shell_line { Started::ShellLine(command.join(" ")) } else { Started::Program(command) };
     // `tried`: a word was tried as the program already.
     let (mut found, mut i, mut may_be_value, mut tried) = (vec![], 0, false, false);
@@ -1114,7 +1115,7 @@ fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> (Vec<Started<'a>>
                 break;
             }
             "-p" | "--package" => (i, may_be_value) = (i + 1, false),
-            "-c" if shell_line => may_be_value = false,
+            _ if shell_switches.contains(&word) => may_be_value = false,
             "-c" | "--call" => {
                 found.extend(words.get(i).map(|line| Started::ShellLine(line.clone())));
                 (i, may_be_value) = (i + 1, false);
@@ -1125,7 +1126,7 @@ fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> (Vec<Started<'a>>
             }
             _ if word.starts_with('-') => may_be_value = !word.contains('=') && !RUNNER_SWITCHES.contains(&word),
             _ => {
-                if !(may_be_value || tried) || may_name_a_program(word) {
+                if shell_line || !(may_be_value || tried) || may_name_a_program(word) {
                     found.push(start(&words[i - 1..]));
                     tried = true;
                 }
@@ -1153,15 +1154,17 @@ fn may_name_a_program(word: &str) -> bool {
 /// arguments into that line (`pnpm exec -c npm publish`). From pnpm's documentation of
 /// `exec`, not from a recording.
 fn runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<Started<'a>> {
-    let shell_mode = |own: &[String]| options(own).any(|option| option == "-c" || option == "--shell-mode");
+    const PNPM_SHELL_SWITCHES: &[&str] = &["-c", "--shell-mode"];
+    let shell_mode = |own: &[String]| options(own).any(|option| PNPM_SHELL_SWITCHES.contains(&option));
     match prog {
-        "npx" | "bunx" => runner_starts(args, false).0,
+        "npx" | "bunx" => runner_starts(args, false, &[]).0,
         "npm" | "pnpm" | "yarn" | "bun" => pm_subs(prog, args)
             .into_iter()
             .filter(|(sub, _)| matches!(*sub, "exec" | "x" | "dlx"))
             .flat_map(|(sub, rest)| {
-                let shell_line = sub == "exec" && (prog == "bun" || (prog == "pnpm" && shell_mode(exec_options(prog, args, rest))));
-                runner_starts(rest, shell_line).0
+                let pnpm_shell = sub == "exec" && prog == "pnpm" && shell_mode(exec_options(prog, args, rest));
+                let shell_line = pnpm_shell || (sub == "exec" && prog == "bun");
+                runner_starts(rest, shell_line, if pnpm_shell { PNPM_SHELL_SWITCHES } else { &[] }).0
             })
             .collect(),
         _ => vec![],
@@ -1185,7 +1188,7 @@ fn exec_options<'a>(prog: &str, args: &'a [String], rest: &'a [String]) -> &'a [
     if prog == "npm" {
         return args;
     }
-    let own = runner_starts(rest, false).1;
+    let own = runner_starts(rest, false, &[]).1;
     let before = &args[..args.len() - rest.len()];
     if prog == "yarn" && before.windows(2).any(|w| w[0] == "workspaces" && w[1] == "foreach") {
         return &rest[..own];
@@ -1229,7 +1232,7 @@ fn env_runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a [String]> 
     }
     let runs = |word: &String| matches!(word.as_str(), "run" | "exec") || (prog == "mise" && word == "x");
     let Some(run) = args.iter().position(runs) else { return vec![] };
-    let mut starts: Vec<usize> = runner_starts(&args[run + 1..], false)
+    let mut starts: Vec<usize> = runner_starts(&args[run + 1..], false, &[])
         .0
         .into_iter()
         .filter_map(|started| match started {
@@ -1493,8 +1496,8 @@ fn split_line(words: &[String]) -> Option<String> {
 }
 
 /// What `env -S` runs (`split_line`): "runs dynamic code", and the risks of its line, read as a
-/// line inside the line (within the depth and `MAX_STARTED`). env's own escapes and `${…}` in
-/// that line are not the shell's, so the line keeps "runs dynamic code".
+/// line inside the line (within the depth and `MAX_STARTED`). env splits the line by its own
+/// rules, so the line keeps "runs dynamic code".
 fn split_line_risks(words: &[String], cwd: Option<&Path>, worktree: Option<&Path>, depth: u8, reading: &mut LineReading) -> Vec<String> {
     let mut risks = vec!["runs dynamic code".to_string()];
     if let Some(line) = split_line(words)
@@ -4060,9 +4063,14 @@ mod tests {
         // A script named like a subcommand, in each workspace, behind an option of `foreach`.
         assert!(risks("yarn workspaces foreach -A run install").iter().any(|r| r == PACKAGE_INSTALL));
         // pnpm's shell mode joins what follows into one line for a shell.
-        for c in ["pnpm exec --shell-mode 'npm publish'", "pnpm exec -c npm publish"] {
+        for c in ["pnpm exec --shell-mode 'npm publish'", "pnpm exec --shell-mode 'ls src/ && npm publish'", "pnpm exec -c npm publish"] {
             let found = risks(c);
             assert!(found.iter().any(|r| r == "publish") && found.iter().any(|r| r == "runs dynamic code"), "{c}: {found:?}");
+        }
+        // bun's `exec` takes a line for a shell behind its own options, whatever the line holds;
+        // its `-c` takes a file, and the line behind that file is read too.
+        for c in ["bun exec --cwd web 'rm -rf src/old'", "bun exec --smol 'rm -rf src/old'", "bun exec -c bunfig.toml 'rm -rf src'"] {
+            assert!(risks(c).iter().any(|r| r == "deletes files"), "{c}: {:?}", risks(c));
         }
         // pnpm's `--reporter` takes a value: the `exec` behind it is the subcommand.
         let c = "pnpm --reporter exec exec -c x eslint";

@@ -1162,12 +1162,12 @@ async fn after_a_compaction_the_next_prompt_carries_the_task_again() {
 }
 
 /// Full access runs a risky check as it does a worker's command, but not one that reads Codly's
-/// own data. A check whose commands start more than 24 others (past the count the approval
-/// rules read to the end) is still read for that floor.
+/// own data. A check whose first command starts more than 24 others (past the count the
+/// approval rules read to the end) is still read for that floor in the command behind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_check_past_the_count_that_reads_codly_data_waits_for_you_in_full_access() {
     let dir = tempfile::tempdir().unwrap();
-    let check = format!("{}cat {}", "uv run ".repeat(26), dir.path().join("data").join("codly.db").display());
+    let check = format!("{}true; cat {}", "uv run ".repeat(26), dir.path().join("data").join("codly.db").display());
     let plan = json!({ "summary": "Add a hello file", "tasks": [task("t1", "hello.txt", &check)] });
     let spawner = FakeSpawner { lead: lead_with(plan), worker: hello_worker(), turns: Turns::default() };
     let core = start(dir.path(), spawner, Settings { approval_mode: ApprovalMode::Full, ..auto() }).await;
