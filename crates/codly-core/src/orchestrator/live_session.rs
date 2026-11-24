@@ -8,10 +8,13 @@
 //!   CLI where its servers stand, so the agent's `McpServer` events follow.
 //! - **Turn off** and **Turn on** an MCP server (`mcp_toggle`). The server's state follows as
 //!   after a reconnect, and the act is on record once the CLI answered: a switch the CLI
-//!   refused is on record as what you asked, with its reason. Not recorded: whether the CLI
-//!   saves the switch (`r5-mcp-reconnect-toggle` is one process; none was started after an
-//!   "off"), so nothing here says how the agent's next run starts that server. Codly's own
-//!   server stays on: the agent reports through it.
+//!   refused is on record as what you asked, with its reason. The CLI saves the switch in
+//!   `~/.claude.json`, under the folder the run works in: off holds for every later Claude Code
+//!   process in that folder, new or resumed, until "Turn on" (part 5 §1,
+//!   `r7-mcp-toggle-saved-*`, n=2, in a throw-away HOME, in a plain folder), so the record
+//!   says it is for the folder the agent works in. Not recorded for a git worktree (each of
+//!   Codly's worktrees is one): which folder's entry gets the switch there, so the record names
+//!   no more than that folder. Codly's own server stays on: the agent reports through it.
 //! - **Stop** a background command or helper (`stop_task`), or a helper whose agent still
 //!   waits for it, by the id of its call: the agent's turn goes on (recorded, part 4 §2). The
 //!   CLI answers the same whether or not something ended; its next list of background tasks
@@ -140,7 +143,7 @@ impl Inner {
         // asked and what came back.
         match Self::session_answer_within(answer, RECONNECT_ANSWER_LIMIT).await {
             Ok(_) => {
-                self.control_decision(agent_id, format!("you turned {server} {switched} for {}'s run", agent.name));
+                self.control_decision(agent_id, switch_record(server, on, &agent.name));
                 Ok(())
             }
             Err(e) => {
@@ -174,6 +177,20 @@ impl Inner {
     }
 }
 
+/// The record of a switch the CLI took. Claude Code saves it for the folder the run works in,
+/// not for the run (`r7-mcp-toggle-saved-*`): off holds for every later process there until
+/// "Turn on" (recorded in a plain folder). Not recorded for a git worktree, as each of Codly's
+/// worktrees is: which folder's entry gets the switch there (the worktree's, or its main
+/// repository's, which would also hold for that repository's other worktrees). So the words
+/// name the folder the agent works in and say nothing of other folders.
+fn switch_record(server: &str, on: bool, agent: &str) -> String {
+    if on {
+        format!("you turned {server} on for Claude Code in the folder {agent} works in")
+    } else {
+        format!("you turned {server} off for Claude Code in the folder {agent} works in (this run and every later one there, until you turn it on)")
+    }
+}
+
 impl super::Core {
     /// Try again to connect one MCP server of a live Claude agent's session. Err = the server
     /// still does not connect, with Claude Code's own reason; the agent's `McpServer` events
@@ -185,8 +202,8 @@ impl super::Core {
 
     /// Turn one MCP server of a live Claude agent's session off or on. The agent's
     /// `McpServer` events say where the server stands then. Err = what Claude Code answered
-    /// (or that it did not answer), or a refusal: Codly's own server stays on. Not recorded:
-    /// whether the CLI saves the switch for the agent's later runs.
+    /// (or that it did not answer), or a refusal: Codly's own server stays on. Claude Code
+    /// saves the switch for the folder the run works in: off holds for its later runs there.
     pub async fn set_agent_mcp_enabled(&self, agent_id: &str, server: &str, enabled: bool) -> Result<()> {
         self.inner.set_mcp_enabled(agent_id, server, enabled).await
     }
@@ -271,5 +288,18 @@ mod tests {
         assert!(matches!(&rows[0].kind, EventKind::Unknown { raw_type } if raw_type == "background_command"), "{:?}", rows[0].kind);
         assert!(matches!(&rows[1].kind, EventKind::BackgroundTasks { tasks, ended } if tasks.len() == 1 && ended.is_empty()), "{:?}", rows[1].kind);
         assert!(matches!(&rows[2].kind, EventKind::McpServer { name, .. } if name == "docs"), "{:?}", rows[2].kind);
+    }
+
+    /// Recorded (part 5 §1, `r7-mcp-toggle-saved-*`, n=2): Claude Code saves "off" for the
+    /// folder, and every later process there starts that server off. Before, the record said
+    /// the switch was "for Ada's run". Not recorded in a git worktree, so the words say nothing
+    /// of other folders.
+    #[test]
+    fn a_switch_is_on_record_for_the_folder_the_run_works_in() {
+        assert_eq!(
+            switch_record("linear", false, "Ada"),
+            "you turned linear off for Claude Code in the folder Ada works in (this run and every later one there, until you turn it on)"
+        );
+        assert_eq!(switch_record("linear", true, "Ada"), "you turned linear on for Claude Code in the folder Ada works in");
     }
 }

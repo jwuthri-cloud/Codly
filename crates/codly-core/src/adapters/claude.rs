@@ -124,10 +124,16 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(8);
 /// which it ends them itself. Short, so that both fit in the time the app waits at exit.
 const STOP_TASKS_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How long the interrupt that starts the stop of an agent has to do its work: end the running
-/// turn (its `result`), or, with no turn running, end the background helpers (the list without
-/// them). Recorded: 0.02 to 0.09 s for both (part 4 §1 and §2).
+/// How long the interrupt that starts the stop of an agent has to end the running turn (its
+/// `result`). Recorded: 0.02 to 0.09 s (part 4 §1 and §2).
 const STOP_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the interrupt that starts the stop of an agent with NO turn running has to end its
+/// background helpers (the list without them). Recorded: 0.02 to 0.09 s (part 4 §2), at once
+/// beside a background command (part 5 §5, `r7-shutdown-helper-and-command-*`, n=2). Short, so
+/// that it and the stop of the commands after it (`STOP_TASKS_TIMEOUT`) end before the app
+/// gives up on the process at exit (`RUNS_GRACE`, 4 s, workspace.rs).
+const STOP_HELPERS_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn tools_for(spec: &SpawnSpec) -> Vec<&'static str> {
     let mut t = if spec.read_only { READ_ONLY_TOOLS } else { WORKER_TOOLS }.to_vec();
@@ -389,11 +395,22 @@ pub fn build_args(spec: &SpawnSpec, session_id: &str, mcp_config_path: Option<&P
     a
 }
 
-/// Why a turn failed that reached the limit its run started with (`SpawnSpec::max_budget_usd`).
+/// Why a turn failed that reached the limit its run started with (`SpawnSpec::max_budget_usd`):
+/// the adapter's own words, which ask you to send your message again. Codly knows such a turn
+/// by these words (`is_run_limit_reached`) and may say what comes next in their place
+/// (`run_limit_reached_then`).
 pub fn run_limit_reached(agent: &str, limit_usd: f64) -> String {
-    format!(
-        "This run of {agent} reached the limit it started with ({limit_usd:.2} USD of your budget were left then). Send your message again: the next run starts with what is left now."
-    )
+    run_limit_reached_then(agent, limit_usd, "Send your message again: the next run starts with what is left now.")
+}
+
+/// The same words with `next`, what comes next for that run, as their last sentence.
+pub fn run_limit_reached_then(agent: &str, limit_usd: f64, next: &str) -> String {
+    format!("This run of {agent} reached the limit it started with ({limit_usd:.2} USD of your budget were left then). {next}")
+}
+
+/// Does `said` (a failed turn's reason) say that the run of `agent` reached its limit?
+pub fn is_run_limit_reached(said: &str, agent: &str, limit_usd: f64) -> bool {
+    said == run_limit_reached(agent, limit_usd)
 }
 
 pub async fn spawn(spec: SpawnSpec, events: mpsc::UnboundedSender<AdapterEvent>) -> anyhow::Result<AgentHandle> {
@@ -1100,8 +1117,8 @@ impl Actor {
         }
     }
 
-    /// Shutdown ladder: interrupt (≤ 5 s for the result, or with no turn running for the end
-    /// of the background helpers) → stop the background commands (≤ 2 s) → close stdin (≤ 3 s)
+    /// Shutdown ladder: interrupt (≤ 5 s for the result, or with no turn running ≤ 1 s for the
+    /// end of the background helpers) → stop the background commands (≤ 2 s) → close stdin (≤ 3 s)
     /// → SIGTERM → SIGKILL. With a prompt that still waits in the CLI, or a background command
     /// it did not report as stopped, the CLI would not exit when stdin closes: there SIGTERM
     /// comes at once.
@@ -1127,7 +1144,7 @@ impl Actor {
                 return self.wind_down().await; // (it did not reach the CLI: no list will come)
             }
             self.stage = Stage::StoppingHelpers;
-            self.deadline = Some(tokio::time::Instant::now() + STOP_INTERRUPT_TIMEOUT);
+            self.deadline = Some(tokio::time::Instant::now() + STOP_HELPERS_TIMEOUT);
             return;
         }
         self.norm.interrupt_requested = true;
@@ -1148,8 +1165,10 @@ impl Actor {
     /// steps are recorded as one run (part 3 §4, `r5-stop-sequence`, n=1): the interrupt,
     /// `stop_task` right after the stopped turn's `result`, stdin closed once the list is
     /// empty, and the exit a second later with nothing left running. The commands are the ones
-    /// of the CLI's last list. (A helper and a command at work at once at a stop is not
-    /// recorded as one run.)
+    /// of the CLI's last list. With a helper AND a command in the background and no turn
+    /// running (part 5 §5, `r7-shutdown-helper-and-command-*`, n=2): the interrupt ends the
+    /// helper and leaves the command listed, `stop_task` ends the command, and the process
+    /// exits 0.70 s after stdin is closed, with nothing left in its process group.
     async fn wind_down(&mut self) {
         self.drop_unsent();
         let commands = self.norm.commands_in_background();
@@ -1550,7 +1569,10 @@ impl ClaudeNormalizer {
     fn failure_reason(&self, v: &Value, retried: Option<ApiFailure>) -> Option<String> {
         // The spending limit of the process (`--max-budget-usd`, 2.1.311 §6): every later
         // turn of this run ends the same way, at once. Codly gave it what was left of your
-        // budget, and ends the run on this turn (`breaker_run.rs`, `run_limit_turn_end`).
+        // budget, and ends the run on this turn (`breaker_run.rs`, `run_limit_turn_end`): the
+        // process can do no more work, and a command of this turn can still be running there,
+        // in no list, until the process ends (part 5 §10, `r7-budget-during-call-*`, n=2: a
+        // Bash call cut off with no result ran on until stdin was closed).
         if v["subtype"] == "error_max_budget_usd" {
             if let Some(reached) = &self.run_limit {
                 return Some(reached.clone());
@@ -1963,10 +1985,13 @@ impl ClaudeNormalizer {
     /// SIGKILL (part 4 §3, `r6-fails-signal-term` and `-kill`, n=1 each: there is no word for
     /// a signal) and for a subagent that fails by itself (part 4 §3, `r6-fails-helper-*`, n=1
     /// each); "stopped" after `stop_task`, for a command (part 2 §6) and for a subagent (part
-    /// 3 §1, part 4 §2), and after an interrupt for every subagent (part 4 §1). A command the
-    /// agent waits for that has run a while is a task too (`local_bash`, `is_backgrounded`
-    /// false): its `task_notification` (its own task id, an empty `output_file`) ends no
-    /// subagent and no listed task (part 4 §1).
+    /// 3 §1, part 4 §2), and after an interrupt for every subagent (part 4 §1, part 5 §4). A
+    /// command the agent waits for becomes a task about 3 s after its call starts (`local_bash`,
+    /// `is_backgrounded` false, the call's `tool_use_id`): its `task_notification` (its own task
+    /// id, an empty `output_file`; "completed" when it ends by itself, written just before the
+    /// call's result, with no `task_updated` and no list line: part 5 §12,
+    /// `r7-bash-becomes-task-*`, n=2 per duration; "stopped" at an interrupt: part 4 §1) ends no
+    /// subagent and no listed task. The call's own result ends it.
     fn on_task(&mut self, subtype: &str, v: &Value, out: &mut Vec<EventKind>) {
         if subtype == "task_notification"
             && let (Some(task_id), Some(word)) = (v["task_id"].as_str(), v["status"].as_str())
@@ -2529,9 +2554,13 @@ impl ClaudeNormalizer {
         // An interrupted turn takes every subagent with it, background ones too, and the stream
         // says so itself before the turn's `result` (`task_notification` "stopped", the list
         // without them: part 4 §1, 6 of 6 recordings, each with ONE subagent in the middle of a
-        // Bash call), so none is left here. Not recorded: a turn that FAILS by itself (an API
-        // error, a limit) while a background subagent works; such a subagent stays here, as
-        // after a completed turn.
+        // Bash call; an interrupt with no turn running ends two helpers, and one that waits for
+        // its model answer, the same way: part 5 §4, n=2 each), so none is left here. A turn that
+        // fails by a limit (`error_max_turns`) ends no background subagent: it stays listed,
+        // ends by its own `task_notification`, and the CLI then starts a turn by itself (part 5
+        // §3, `r7-failed-turn-helper-*`, n=2); so it stays here, as after a completed turn. Not
+        // recorded: a turn that fails by an API error, or by the budget while a subagent still
+        // has requests to make.
         self.helpers.retain(|id, h| {
             if !h.done && !h.background {
                 out.push(EventKind::SubAgent { call_id: id.clone(), description: h.description.clone(), status: "stopped".into() });
@@ -2812,7 +2841,8 @@ fn written_by_the_cli(v: &Value) -> bool {
 /// The permission suggestions of a request that "for this session" and "always" may send
 /// back: allow rules for the tool that asked, and directories inside the agent's own folder.
 /// Never `setMode`: sent back, it puts the whole session in another permission mode
-/// (recorded, cli-claude-stream-json-2.1.311 §10), which is more than the request you
+/// (recorded, cli-claude-stream-json-2.1.311 §10; for an Edit request's own and only
+/// suggestion too, part 5 §7, `r7-allow-set-mode-*`, n=2), which is more than the request you
 /// approved. A directory outside `cwd` would let later edits there pass without a question.
 fn grantable(tool: &str, suggestions: &Value, cwd: &Path) -> Vec<Value> {
     let keep = |s: &&Value| match s["type"].as_str() {
@@ -6315,5 +6345,186 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         let again = starts(norm.on_message(&list_line(json!([task("tid-1")]))));
         assert!(again[0].1.is_some_and(|t| t > started), "{again:?}");
+    }
+
+    // ───── part 5 of the 2.1.311 recordings (`r7-*`) ─────
+
+    /// Recordings `r7-shutdown-helper-and-command-1` and `-2` (part 5 §5, n=2; the first is
+    /// played here): a helper AND a command in the background, no turn running, then the stop.
+    /// The interrupt ends the helper (its row ends as "stopped") and the list still names the
+    /// command: its `stop_task` goes out at once, stdin is closed when the list is empty, and
+    /// the recorded process exits 0.70 s later with nothing left in its group. Before, the
+    /// comment said this was not recorded as one run.
+    #[tokio::test]
+    async fn a_stop_with_a_helper_and_a_command_and_no_turn_is_interrupt_then_stop_task_as_recorded() {
+        let mut cli = Replay::of("r7-shutdown-helper-and-command-1");
+        let kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "interrupt").await;
+        assert_eq!(turns(&kinds), ["start:Do", "end:Completed"]);
+        assert!(!cli.actor.turn_active && cli.actor.norm.helpers_in_background());
+        assert_eq!(cli.actor.norm.commands_in_background(), ["tid-2"]);
+
+        cli.in_place_of_the_drivers_request(AgentCmd::Shutdown).await;
+        assert_eq!(cli.actor.stage, Stage::StoppingHelpers);
+        let kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "stop_task").await;
+        assert_eq!(subagent_ends(&kinds), ["toolu-2 stopped: Run background sleep 199 command"]);
+        assert_eq!(background_lines(&kinds), ["tid-2 command: Run background echo and sleep 197 | tid-1 helper stopped: Run background sleep 199 command"]);
+        assert!(turns(&kinds).is_empty(), "no turn: {kinds:?}");
+        // Codly wrote the driver's `stop_task` as soon as the list had no helper.
+        let recorded = cli.drivers_request.take().expect("the driver's stop_task");
+        assert_eq!(last_sent(cli.dir.path())["request"], recorded["request"]);
+        assert_eq!(cli.actor.stage, Stage::StoppingTasks);
+
+        // The command's end, then the helper's rejected call: not shown as this agent's work.
+        let rest = cli.play(|_| false).await;
+        assert!(rest.is_empty(), "{rest:?}");
+        assert!(cli.actor.norm.background.is_empty(), "the CLI's last list is empty");
+        assert!(cli.actor.stage == Stage::Closing && cli.actor.stdin.is_none(), "{:?}", cli.actor.stage);
+        assert_eq!(requests_sent(cli.dir.path()), ["interrupt", "stop_task"]);
+    }
+
+    /// The stop of an idle agent whose helper does not leave the list: its background command
+    /// is stopped 1 s after the interrupt, not 5, so the interrupt and the stop of the commands
+    /// end before the app gives up on the process at exit (4 s, `RUNS_GRACE` in workspace.rs).
+    /// Before, the command's stop waited 5 s behind the helper, the app killed the process
+    /// group first, and the command ran on. (The list is written here in the shape of
+    /// `r7-shutdown-helper-and-command-1`; no recorded helper ignored the interrupt. The
+    /// deadline is read, not waited for: tokio's paused clock is not among the workspace's
+    /// features.)
+    #[tokio::test]
+    async fn an_idle_agents_commands_are_stopped_one_second_after_the_interrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _events, _child) = silent_actor(dir.path());
+        let listed = list_line(json!([
+            { "task_id": "tid-1", "run_id": "run-1", "task_type": "local_agent", "subagent_type": "general-purpose", "description": "Run background sleep 199 command" },
+            { "task_id": "tid-2", "run_id": "run-2", "task_type": "local_bash", "description": "npm run dev" },
+        ]));
+        actor.on_json(listed, "codly-0", &mut None).await;
+        let before = tokio::time::Instant::now();
+        actor.on_cmd(AgentCmd::Shutdown).await;
+        let after = tokio::time::Instant::now();
+        assert_eq!((interrupts_sent(dir.path()), actor.stage), (1, Stage::StoppingHelpers));
+        let deadline = actor.deadline.expect("the helpers' wait has an end");
+        assert!(before + STOP_HELPERS_TIMEOUT <= deadline && deadline <= after + STOP_HELPERS_TIMEOUT, "1 s");
+
+        // The helper is still listed at that deadline: the command's stop goes out.
+        actor.on_deadline().await;
+        assert_eq!(requests_sent(dir.path()), ["interrupt", "stop_task"]);
+        assert_eq!(last_sent(dir.path())["request"], json!({ "subtype": "stop_task", "task_id": "tid-2" }));
+        assert_eq!(actor.stage, Stage::StoppingTasks);
+        let deadline = actor.deadline.expect("the commands' wait has an end");
+        assert!(deadline <= tokio::time::Instant::now() + STOP_TASKS_TIMEOUT);
+        assert_eq!((STOP_HELPERS_TIMEOUT + STOP_TASKS_TIMEOUT).as_secs(), 3, "inside the app's wait at exit (4 s)");
+    }
+
+    /// Recordings `r7-failed-turn-helper-1` and `-2` (part 5 §3, n=2; the first is played
+    /// here): a helper in the background, then a turn that fails by the turn limit. The failed
+    /// turn ends no helper: its row and its list entry stay through it, its own Bash call
+    /// completes after it, and the helper ends "completed" at its own line. Then the CLI starts
+    /// a turn by itself, which is a turn of the run.
+    #[tokio::test]
+    async fn a_turn_that_fails_by_a_limit_ends_no_background_helper_as_recorded() {
+        let mut cli = Replay::of("r7-failed-turn-helper-1");
+        let mut kinds = cli.play(|l| l["type"] == "result" && l["subtype"] == "error_max_turns").await;
+        assert_eq!(turns(&kinds), ["start:Use", "end:Completed", "start:Run", "end:MaxTurns"]);
+        assert!(subagent_ends(&kinds).is_empty(), "{kinds:?}");
+        assert!(cli.actor.norm.helpers.get("toolu-1").is_some_and(|h| h.background && !h.done), "the helper still works");
+        assert!(cli.actor.norm.helpers_in_background());
+
+        kinds.extend(cli.play(|_| false).await);
+        assert_eq!(turns(&kinds), ["start:Use", "end:Completed", "start:Run", "end:MaxTurns", "start", "end:Completed"]);
+        assert_eq!(subagent_ends(&kinds), ["toolu-1 completed: Run delayed echo command"]);
+        assert_eq!(background_lines(&kinds), ["tid-1 helper: Run delayed echo command | -", "- | tid-1 helper completed: Run delayed echo command"]);
+        let own_call = kinds.iter().filter(|k| matches!(k, EventKind::ToolCompleted { call_id, ok: true, .. } if call_id == "toolu-2")).count();
+        assert_eq!(own_call, 1, "the helper's own Bash call completes once, after the failed turn");
+        assert!(!kinds.iter().any(|k| matches!(k, EventKind::Unknown { .. })), "{kinds:?}");
+        assert!(cli.actor.norm.helpers.is_empty() && cli.actor.norm.background.is_empty());
+    }
+
+    /// Recordings `r7-interrupt-two-helpers-1` and `r7-interrupt-helper-model-1` (part 5 §4;
+    /// with the `-2` runs n=2 each): an interrupt with no turn running ends TWO background
+    /// helpers, each in the middle of a Bash call, and one helper that waits for its model
+    /// answer. Each row ends once, as "stopped", the list empties, and no turn starts by
+    /// itself: the next turn is the next message's.
+    #[tokio::test]
+    async fn an_interrupt_ends_two_helpers_and_one_that_waits_for_its_model_as_recorded() {
+        let cases = [
+            (
+                "r7-interrupt-two-helpers-1",
+                vec!["toolu-1 stopped: Run echo a sleep 181 command", "toolu-2 stopped: Run echo b sleep 191 command"],
+                vec![
+                    "tid-2 helper: Run echo b sleep 191 command | tid-1 helper stopped: Run echo a sleep 181 command",
+                    "- | tid-2 helper stopped: Run echo b sleep 191 command",
+                ],
+            ),
+            ("r7-interrupt-helper-model-1", vec!["toolu-1 stopped: Write lighthouse keeper story"], vec!["- | tid-1 helper stopped: Write lighthouse keeper story"]),
+        ];
+        for (name, ends, listed) in cases {
+            let mut cli = Replay::of(name);
+            let mut kinds = cli.play(|l| l["_sent"]["request"]["subtype"] == "interrupt").await;
+            assert!(subagent_ends(&kinds).is_empty(), "{name}");
+            assert!(!cli.actor.turn_active, "{name}: no turn runs");
+            cli.in_place_of_the_drivers_request(AgentCmd::Interrupt).await;
+            let after = cli.play(|l| l["type"] == "control_response").await;
+            assert_eq!(subagent_ends(&after), ends, "{name}: each before the interrupt's answer");
+            assert_eq!(background_lines(&after), listed, "{name}");
+            kinds.extend(after);
+            kinds.extend(cli.play(|_| false).await);
+            assert_eq!(subagent_ends(&kinds), ends, "{name}: once each");
+            assert_eq!(turns(&kinds), ["start:Use", "end:Completed", "start:Reply", "end:Completed"], "{name}");
+            assert!(cli.actor.norm.background.is_empty() && cli.actor.norm.helpers.is_empty(), "{name}: nothing is left open");
+            assert!(!kinds.iter().any(|k| matches!(k, EventKind::Unknown { .. })), "{name}: {kinds:?}");
+            assert_eq!(cli.actor.stage, Stage::Running, "{name}");
+        }
+    }
+
+    /// Recording `r7-bash-becomes-task-1` (part 5 §12, n=2 per duration with `-2`): foreground
+    /// Bash calls of 1 to 14 s. Each call of 3 s or more becomes a task about 3 s after it
+    /// starts, and its end by itself is one `task_notification` "completed" with an empty
+    /// `output_file`. Those lines start and end no helper row and no background row: each call
+    /// completes once, by its own result.
+    #[tokio::test]
+    async fn a_command_the_agent_waits_for_that_becomes_a_task_ends_nothing_as_recorded() {
+        let lines = recorded("r7-bash-becomes-task-1");
+        let ends = lines.iter().filter(|l| l["subtype"] == "task_notification" && l["status"] == "completed" && l["output_file"] == "").count();
+        assert_eq!(ends, 5, "the calls of 3, 4, 6, 9 and 14 s");
+        let mut cli = Replay::of("r7-bash-becomes-task-1");
+        let kinds = cli.play(|_| false).await;
+        assert_eq!(turns(&kinds), ["start:Run", "end:Completed"].repeat(7));
+        assert!(subagent_lines(&kinds).is_empty(), "{kinds:?}");
+        assert!(background_lines(&kinds).is_empty(), "{kinds:?}");
+        for n in 1..=7 {
+            let call = format!("toolu-{n}");
+            let completed = kinds.iter().filter(|k| matches!(k, EventKind::ToolCompleted { call_id, ok: true, .. } if *call_id == call)).count();
+            assert_eq!(completed, 1, "{call}");
+        }
+        assert!(!kinds.iter().any(|k| matches!(k, EventKind::Unknown { .. })), "{kinds:?}");
+        assert!(cli.actor.norm.background.is_empty() && cli.actor.norm.helpers.is_empty());
+    }
+
+    /// Recording `r7-budget-during-call-1-t1` (part 5 §10, n=2 with `-2-t1`): the run's own
+    /// limit is passed by a helper's request while the turn's Bash call (`sleep 61.5`) runs.
+    /// The helper ends "completed" first; the turn fails with the run's own reason, which is
+    /// the text Codly knows such a turn by (`is_run_limit_reached`, which
+    /// `breaker_run.rs::run_limit_words` asks); the call gets no result and is in no list (it
+    /// runs on until stdin is closed, as the end of the run does); the turn the CLI starts by
+    /// itself and the next message fail the same way.
+    #[test]
+    fn a_limit_passed_during_a_long_call_fails_the_turn_with_the_runs_own_reason_as_recorded() {
+        let limited = SpawnSpec { max_budget_usd: Some(0.01), ..spec(Role::Solo, false) };
+        let mut norm = ClaudeNormalizer::new(&limited, "sess-1".into());
+        let mut events = norm.turn_started("Do these steps in order");
+        events.extend(replay(&mut norm, &recorded("r7-budget-during-call-1-t1")));
+        let reason = run_limit_reached("Ada", 0.01);
+        assert_eq!(turn_ends(&events), [(TurnStatus::Failed, Some(reason.as_str())); 3]);
+        assert!(is_run_limit_reached(&reason, "Ada", 0.01), "the words Codly ends the run by");
+        assert!(!is_run_limit_reached("Claude Code reached its spending limit, so it does no more work in this run", "Ada", 0.01));
+
+        let helper_end = events.iter().position(|e| matches!(e, EventKind::SubAgent { status, .. } if status == "completed")).expect("the helper's end");
+        let first_end = events.iter().position(|e| matches!(e, EventKind::TurnCompleted { .. })).unwrap();
+        assert!(helper_end < first_end, "the helper had completed before the stop");
+        assert!(!events.iter().any(|e| matches!(e, EventKind::ToolCompleted { call_id, .. } if call_id == "toolu-2")), "the cut-off call has no result");
+        let helper = "Write lighthouse keeper story";
+        assert_eq!(background_lines(&events), [format!("tid-1 helper: {helper} | -"), format!("- | tid-1 helper completed: {helper}")], "the call is in no list");
+        assert!(!events.iter().any(|e| matches!(e, EventKind::Unknown { .. })), "{events:?}");
     }
 }

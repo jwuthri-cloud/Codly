@@ -126,10 +126,12 @@ pub struct SpawnSpec {
     /// (`breaker::rest_usd`). Claude Code counts this process alone and stops a turn right
     /// after the model request that passes it: the tool call that request asked for does not
     /// run, and every later turn of the process fails at once (2.1.311 part 4, section 10), so
-    /// Codly ends the run there. Not recorded: a limit reached while a helper works, or during
-    /// a long tool call. Several Claude agents at once each hold the whole rest, so together
-    /// they can pass the budget until their turns end (the check between turns stays). None:
-    /// no limit of its own.
+    /// Codly ends the run there. Reached during a long tool call (a helper's request passed
+    /// it: part 5, section 10, n=2): the turn ends, not the call, which runs on in no list
+    /// until stdin is closed, as the end of the run does. Not recorded: a limit reached while
+    /// a helper still has requests to make. Several Claude agents at once each hold the whole
+    /// rest, so together they can pass the budget until their turns end (the check between
+    /// turns stays). None: no limit of its own.
     pub max_budget_usd: Option<f64>,
 }
 

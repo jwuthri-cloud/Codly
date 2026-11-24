@@ -92,8 +92,11 @@ impl Flag {
 /// Does Claude Code say every 30 s that a call of this tool still runs (its `tool_progress`
 /// line, `ToolProgress`)? Recorded on 2.1.311 for a Bash call, a tool of an MCP server and
 /// the `Agent` call that waits for a helper (listed as `Task` by the CLI), once each
-/// (docs/research/cli-claude-stream-json-2.1.311-part2.md §8 and -part3.md §3). Not recorded,
-/// so not counted on: WebFetch, WebSearch and every other tool.
+/// (docs/research/cli-claude-stream-json-2.1.311-part2.md §8 and -part3.md §3), and for a tool
+/// of an HTTP MCP server as for a stdio one (-part5.md §6, `r7-tool-progress-http-70-*`, n=2).
+/// Such an HTTP call that got no byte back ended by itself at 60 s ("The operation timed out.");
+/// that end is not counted on: a server that streams its answer was not recorded. Not
+/// recorded, so not counted on: WebFetch, WebSearch and every other tool.
 fn has_heartbeat(tool: &str) -> bool {
     matches!(tool, "Bash" | "Agent" | "Task") || tool.starts_with("mcp__")
 }
@@ -805,5 +808,16 @@ mod tests {
         // A part of it only: the rest keeps its default.
         let partial: WatchdogSettings = serde_json::from_value(json!({ "quiet_secs": 60 })).unwrap();
         assert_eq!(partial, WatchdogSettings { quiet_secs: 60, ..Default::default() });
+    }
+
+    /// A tool of an HTTP MCP server gives the same heartbeat as a stdio one (recorded:
+    /// `r7-tool-progress-http-70-*`, the tool `mcp__ping-http__ping`): its open call keeps the
+    /// plain limit, as an open call of a stdio server does.
+    #[test]
+    fn an_open_call_of_an_http_mcp_server_keeps_the_plain_limit() {
+        let start = Instant::now();
+        let w = with_open(start, &[("toolu-1", "mcp__ping-http__ping")]);
+        assert_eq!(limit(&w, Provider::Claude), PLAIN);
+        assert_eq!(step(PLAIN, limit(&w, Provider::Claude), false, None), Step::Flag);
     }
 }

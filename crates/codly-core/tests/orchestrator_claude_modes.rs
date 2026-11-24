@@ -994,7 +994,11 @@ async fn an_mcp_server_is_turned_off_and_on_through_the_live_session() {
     assert_eq!(last_seen(&seen), "mcp-off:docs");
     core.set_agent_mcp_enabled(&id, "docs", true).await.unwrap();
     assert_eq!(last_seen(&seen), "mcp-on:docs");
-    assert_eq!(your_acts(&core, &id).await, [format!("you turned docs off for {name}'s run"), format!("you turned docs on for {name}'s run")]);
+    // Claude Code saves the switch for the folder the run works in: this agent's own worktree.
+    let worktree = agent(&core, &id).await.worktree.expect("a hired 1:1 agent's worktree");
+    assert!(Path::new(&worktree).starts_with(dir.path().join("data").join("worktrees")), "{worktree}");
+    let off = format!("you turned docs off for Claude Code in {name}'s worktree ({name}'s run and every later one there, until you turn it on)");
+    assert_eq!(your_acts(&core, &id).await, [off, format!("you turned docs on for Claude Code in {name}'s worktree")]);
 
     // Claude Code refuses a switch: its reason is yours, and the record says what you asked
     // and what came back. It does not say "you turned": the server was not turned on.
@@ -1135,5 +1139,50 @@ async fn a_new_run_with_the_same_servers_writes_no_rows_and_still_shows_them() {
     turn(&core, &id, "DOCS-FAILS").await;
     assert_eq!(server_rows().await.len(), 4);
     stop(&core, &id).await;
+    core.shutdown().await;
+}
+
+/// Recorded (part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2 each; part 4 §4 for `high`):
+/// `effortLevel: null` gives "medium" at once, whatever level the process had. Before, Codly did
+/// not read the settings back after it: a session that kept its level would have left the
+/// agent's row with no effort while the session still worked with the old one. Now the settings
+/// are read: "medium" is the switch done; the old level still there is the switch not taken,
+/// the same way as for a level the session drops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taking_an_effort_away_reads_the_level_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = hired_agent(dir.path(), &seen).await;
+    core.set_agent_model(&id, Some("opus:max".into())).await.unwrap();
+    turn(&core, &id, "hello").await;
+    let run = agent(&core, &id).await.run_id;
+    assert!(run.is_some());
+
+    // The session answers "medium" after the null: the level is gone, in the same run.
+    let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus"));
+    assert_eq!(last_seen(&seen), "effort:none");
+    assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+
+    // The session still answers "max" after the null, with another model: the model changed,
+    // the effort did not, the agent says so, and its row keeps the effort.
+    core.set_agent_model(&id, Some("opus:max".into())).await.unwrap();
+    seen.lock().unwrap().drops_effort = true;
+    let e = format!("{:#}", core.set_agent_model(&id, Some("sonnet".into())).await.unwrap_err());
+    assert!(e.contains("changed its model, but not its thinking effort"), "{e}");
+    assert!(e.contains("Claude Code did not take the effort away: it still works with \"max\""), "{e}");
+    assert_eq!(agent(&core, &id).await.model.as_deref(), Some("sonnet:max"));
+    assert_eq!(agent(&core, &id).await.run_id, run);
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+
+    // The null alone, not taken: as for a level the session drops, the agent restarts, and its
+    // next run starts with no effort.
+    let a = core.set_agent_model(&id, Some("sonnet".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("sonnet"));
+    assert_eq!(seen.lock().unwrap().shutdowns, 1);
+    seen.lock().unwrap().drops_effort = false;
+    turn(&core, &id, "again").await;
+    assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("sonnet".to_string())));
     core.shutdown().await;
 }
