@@ -56,7 +56,7 @@ describe('the “Stop” of a helper’s row', () => {
       hint: 'Stops this helper. Eli is told and goes on with a turn of its own.',
     });
     // While a turn of the agent runs, it is told in that turn.
-    expect(alone(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests')], true)?.hint).toBe('Stops this helper. Eli is told in the turn that runs.');
+    expect(alone(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests')], true)?.hint).toBe('Stops this helper. Eli is told in the turn that runs, or in a turn of its own right after it.');
     // An entry of the list that ended, or a command of the same words, is not this helper.
     expect(alone(helper('toolu_2', 'Run the tests'), [listed('task-9', 'Run the tests', 'stopped'), { ...listed('cmd', 'Run the tests'), kind: 'command' }])?.id).toBe('toolu_2');
   });
@@ -77,7 +77,12 @@ describe('the “Stop” of a helper’s row', () => {
     const inList = helper('toolu_6', 'Look at the docs');
     const waited = helper('toolu_7', 'Look at the docs');
     const both = [inList, waited];
-    for (const h of both) expect(helperStop(h, both, [listed('task-1', 'Look at the docs')], 'Eli', false)).toEqual({ id: null, hint: SAME_DESCRIPTION });
+    // (the waited one is not in “In the background”: the row says it ends with Eli's turn)
+    for (const h of both)
+      expect(helperStop(h, both, [listed('task-1', 'Look at the docs')], 'Eli', false)).toEqual({
+        id: null,
+        hint: 'Two helpers have this description: stop the one in the background in “In the background”, and the one Eli waits for by stopping its turn in the conversation.',
+      });
     // None listed: each is stopped by its own call id, as today.
     for (const h of both) expect(helperStop(h, both, [], 'Eli', false)?.id).toBe(h.callId);
     // One running helper of the description and one entry: the entry is that helper.

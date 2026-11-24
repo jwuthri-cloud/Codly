@@ -595,7 +595,7 @@
 {:else}
   <article class="card" data-waiting-card class:key={isKeyTarget} bind:this={el} style:--hue={idVar(agent?.color ?? 0)} style:max-height={fit ? `${fit}px` : null} style:--answer-max={answerMax ? `${answerMax}px` : null} aria-label={headline}>
     <header data-asks={asksInHeader || undefined}>
-      {#if showAgent && agent}<button class="who" onclick={() => ui.selectAgent(agent.id)}><Portrait {agent} size={24} /></button>{/if}
+      {#if showAgent && agent}<button class="who" aria-label="Open {agent.name}" onclick={() => ui.selectAgent(agent.id)}><Portrait {agent} size={24} /></button>{/if}
       <h3>{headline}{#if subject.kind === 'question' && questions[0]?.header}<span class="qh">{questions[0].header}</span>{/if}</h3>
       <span class="since num" data-tip="Waiting since {clock(approval.created_at)}">{timer(ui.now - approval.created_at)}</span>
     </header>
@@ -724,7 +724,7 @@
       </footer>
     {:else if noteOpen}
       <form class="note" data-answers onsubmit={(e) => { e.preventDefault(); sendNote(); }}>
-        <input bind:this={noteEl} class="input" placeholder="Tell {agent?.name ?? 'the agent'} what to do instead…" bind:value={note} spellcheck="true"
+        <input bind:this={noteEl} class="input" placeholder="Tell {agent?.name ?? 'the agent'} what to do instead…" aria-label="Your note to {agent?.name ?? 'the agent'}" bind:value={note} spellcheck="true"
           onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (noteOpen = false))} />
         <button class="btn" type="submit" disabled={busy || (plan !== null && !note.trim())}>{plan !== null ? 'Send the plan back' : 'Deny with note'}</button>
         <button class="btn ghost" type="button" disabled={busy} onclick={() => (noteOpen = false)}>Cancel</button>

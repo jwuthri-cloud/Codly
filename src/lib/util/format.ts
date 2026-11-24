@@ -27,7 +27,9 @@ export function ago(ts: number, now = Date.now()): string {
 /** Compact duration: "0.4 s", "41 s", "4m 12s", "1h 03m". */
 export function dur(ms: number | null | undefined): string {
   if (ms == null || !isFinite(ms)) return '–';
-  if (ms < 1000) return `${Math.max(0, ms / 1000).toFixed(1)} s`;
+  // (a time that rounds to a whole second reads as one: "1 s", never "1.0 s" beside it)
+  if (ms < 950) return `${Math.max(0, ms / 1000).toFixed(1)} s`;
+  if (ms < 1000) return '1 s';
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s} s`;
   const m = Math.floor(s / 60);

@@ -394,7 +394,7 @@
               <button type="button" class="choice" role="radio" aria-checked={picked.name === option.id} class:on={picked.name === option.id} onclick={() => pickModel(option.id)}><span class="radio"></span>{optionLabel(option)}</button>
             {/each}
           </div>
-          <input value={picked.name} oninput={(e) => pickModel(e.currentTarget.value)} placeholder="Other model name" spellcheck="false" autocomplete="off" />
+          <input value={picked.name} oninput={(e) => pickModel(e.currentTarget.value)} placeholder="Other model name" aria-label="Other model name" spellcheck="false" autocomplete="off" />
           {#if modelNote}<span class="muted small">{modelNote}</span>{/if}
         </div>
         {#if efforts.length}

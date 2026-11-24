@@ -243,8 +243,8 @@ export function toolDoneLine(k: Pick<ToolStarted, 'name' | 'activity' | 'target'
   return `${label ? `${verb} ${label}` : verb}${by}`;
 }
 
-/** The changes of an agent's state that its turn's and its calls' rows already say: History shows no row of their own for them. */
-const QUIET_STATUS = new Set(['idle', 'starting', 'thinking', 'working']);
+/** The changes of an agent's state that its turn's, its calls' and its requests' rows already say: History shows no row of their own for them. */
+const QUIET_STATUS = new Set(['idle', 'starting', 'thinking', 'working', 'waiting_approval']);
 
 /** Whether a `status_changed` row says nothing the rows around it do not ("Status → idle"). */
 export const quietStatus = (status: string): boolean => QUIET_STATUS.has(status);

@@ -1,5 +1,7 @@
 <!--
-  Anchored menu (popover). Keyboard: ↑/↓ (or J/K), ↵ runs, Esc closes. An item with `stay` keeps
+  Anchored menu (popover). Keyboard: ↑/↓ (or J/K), ↵ runs, Esc closes. Closed by Esc or by a
+  press outside, it gives the focus back to the button that opened it (a press on something that
+  takes the focus itself keeps it there). An item with `stay` keeps
   the menu open (a picker you may change several times); the menu follows its new items. Positions under the anchor,
   flips above when there's no room. Rendered fixed so it escapes clipping containers. With `wrap`, a
   row whose hint does not fit beside its label puts the hint on a second line under the label,
@@ -79,7 +81,14 @@
 
   function outside(e: PointerEvent) {
     const t = e.target as Node;
-    if (el && !el.contains(t) && !anchor.contains(t)) onclose();
+    if (!el || el.contains(t) || anchor.contains(t)) return;
+    onclose();
+    // After the press has moved the focus: it went nowhere (the menu is gone, the place pressed
+    // takes no focus), so it goes back to the button, as after Esc.
+    setTimeout(() => {
+      const at = document.activeElement;
+      if (anchor.isConnected && (!at || at === document.body || !at.isConnected || el?.contains(at))) anchor.focus();
+    });
   }
 
   // New items can change its height: an upward menu keeps its bottom on the anchor.
@@ -129,7 +138,7 @@
   out:fade={{ duration: ui.reducedMotion ? 0 : 90 }}
 >
   {#if search !== null}
-    <input class="search" bind:this={input} bind:value={search} placeholder={searchPlaceholder} spellcheck="false" autocomplete="off" oninput={() => (active = -1)} />
+    <input class="search" bind:this={input} bind:value={search} placeholder={searchPlaceholder} aria-label={searchPlaceholder} spellcheck="false" autocomplete="off" oninput={() => (active = -1)} />
   {/if}
   {#each items as it, i (i)}
     {#if it.kind === 'separator'}

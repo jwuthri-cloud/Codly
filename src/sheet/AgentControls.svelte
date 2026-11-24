@@ -30,6 +30,7 @@
   import { tokens } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
   import Section from '../components/Section.svelte';
+  import { agentLogKey, logWork } from './agentLog';
 
   interface Props {
     agent: Agent;
@@ -41,6 +42,8 @@
 
   const c = $derived(controls.of(agent.id));
   const live = $derived(!!agent.run_id && agent.status !== 'offline');
+  /** Why it cannot be killed (it is in your terminal), else null. Then the controls are this alone. */
+  const killOff = $derived(killRefusal(agent.name, takeovers.has(agent.id)));
   const isLead = $derived(agent.role === 'lead');
   const claude = $derived(agent.provider === 'claude');
   /** Only a 1:1 Claude agent has a mode to switch. */
@@ -71,10 +74,9 @@
   }
   const compactWhy = $derived(compactWait(agent));
   /** The sign at the button that a compaction happened: what the live run last said about one. */
-  const compacted = $derived.by(() => {
-    void store.revBy.get(agent.id);
-    return compactionLine(store.events, agent);
-  });
+  const compactedWork = logWork(() => compactionLine(store.events, agent));
+  // Only while its row shows, and again only when an event of this agent came (agentLog.ts).
+  const compacted = $derived(compactedWork.read((ui.sections.controls ?? true) && live && !killOff && canCompact(agent), agentLogKey(agent.id, agent.run_id)));
   async function compact() {
     if (compacting) return;
     compacting = true;
@@ -86,7 +88,6 @@
   let sending = $state(false);
   let confirmKill = $state(false);
   let killBtn: HTMLButtonElement | undefined = $state();
-  const killOff = $derived(killRefusal(agent.name, takeovers.has(agent.id)));
   let givingBack = $state(false);
   async function back() {
     givingBack = true;
@@ -129,7 +130,14 @@
       </select>
     </label>
   {/if}
-  {#if !live}
+  {#if killOff}
+    <!-- A take-over ends the run: this shows whenever the agent is in your terminal, with or without one. -->
+    <div class="kill-off">
+      <button class="btn sm danger" disabled aria-describedby="kill-off-{agent.id}"><Icon name="stop" size={12} />Kill agent…</button>
+      <button class="btn sm" disabled={givingBack} onclick={back}>Give it back</button>
+      <span class="sub" id="kill-off-{agent.id}">{killOff}</span>
+    </div>
+  {:else if !live}
     <p class="small">{agent.name} isn’t running. {hasMode ? 'The other controls' : 'Controls'} appear while it has a live process.</p>
   {:else}
     <div class="ctl">
@@ -196,13 +204,7 @@
         </div>
       </div>
 
-      {#if killOff}
-        <div class="kill-off">
-          <button class="btn sm danger" disabled aria-describedby="kill-off-{agent.id}"><Icon name="stop" size={12} />Kill agent…</button>
-          <button class="btn sm" disabled={givingBack} onclick={back}>Give it back</button>
-          <span class="sub" id="kill-off-{agent.id}">{killOff}</span>
-        </div>
-      {:else if confirmKill}
+      {#if confirmKill}
         <div class="kill-confirm">
           <span>Kill {agent.name}? The process ends now; its worktree is kept.</span>
           <button class="btn sm danger" onclick={() => { confirmKill = false; stopAgent(agent.id); }}>Kill</button>

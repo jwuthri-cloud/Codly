@@ -68,7 +68,7 @@
     {#if arts.length}
       <div class="arts">
         {#each arts as a (a.id)}
-          <button class="art" onclick={() => ui.openArtifact(a.id)} data-tip={a.title}>
+          <button class="art" aria-label="Open {a.title}" onclick={() => ui.openArtifact(a.id)} data-tip={a.title}>
             <ArtifactThumb artifact={a} />
           </button>
         {/each}

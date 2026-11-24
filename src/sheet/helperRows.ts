@@ -15,6 +15,13 @@ export type HelperStop = { id: string | null; hint: string };
 export const SAME_DESCRIPTION = 'Two helpers have this description: stop them in “In the background”.';
 
 /**
+ * The same, when one of them is a helper its agent waits for: that one is not in "In the
+ * background" at all, and ends when you stop the agent's turn in the conversation.
+ */
+export const sameDescriptionWaited = (agent: string): string =>
+  `Two helpers have this description: stop the one in the background in “In the background”, and the one ${agent} waits for by stopping its turn in the conversation.`;
+
+/**
  * The "Stop" of a helper's row, for a helper that runs (none for one that is over). The
  * background list (`background`: the agent's live run's) names a helper by its description
  * only, so a row is stopped by the id there only when that is sure: exactly one helper that
@@ -25,7 +32,7 @@ export const SAME_DESCRIPTION = 'Two helpers have this description: stop them in
  * goes on (recorded: docs/research/cli-claude-stream-json-2.1.311-part4.md, section 2). In any
  * other case which entry is which helper is not known (two helpers of one description, one of
  * them listed and one waited for, or both listed): the row has no "Stop", and says where to stop
- * them.
+ * them (`sameDescriptionWaited` when one of them is waited for).
  */
 export function helperStop(
   h: Pick<SubAgent, 'callId' | 'description' | 'status'>,
@@ -39,7 +46,7 @@ export function helperStop(
   if (!listed.length) return { id: h.callId, hint: waitedHelperStopHint(agent) };
   const alike = helpers.filter((x) => x.status === 'running' && x.description === h.description).length;
   if (listed.length === 1 && alike === 1) return { id: listed[0].id, hint: stopHint(listed[0], agent, turnRuns)! };
-  return { id: null, hint: SAME_DESCRIPTION };
+  return { id: null, hint: alike > listed.length ? sameDescriptionWaited(agent) : SAME_DESCRIPTION };
 }
 
 /**

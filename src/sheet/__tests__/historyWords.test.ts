@@ -355,8 +355,9 @@ describe('History is one row per act', () => {
   });
 
   it('a state its turn and its calls already say is no row', () => {
-    for (const s of ['idle', 'working', 'thinking', 'starting']) expect(quietStatus(s)).toBe(true);
-    for (const s of ['waiting_approval', 'blocked', 'rate_limited', 'failed', 'offline']) expect(quietStatus(s)).toBe(false);
+    // (a request's own row says that it waits for you: "Status → waiting approval" says it again)
+    for (const s of ['idle', 'working', 'thinking', 'starting', 'waiting_approval']) expect(quietStatus(s)).toBe(true);
+    for (const s of ['blocked', 'rate_limited', 'failed', 'offline']) expect(quietStatus(s)).toBe(false);
   });
 
   it('a reconnect of a connected server is a restart, and says so', () => {

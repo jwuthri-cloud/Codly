@@ -330,6 +330,8 @@ class CodlyStore {
   liveRevBy = new SvelteMap<string, number>();
   /** Bumped when state is replaced wholesale (snapshot): imperative consumers re-derive. */
   epoch = $state(0);
+  /** Counts the snapshots taken in: each starts `revBy` again, so with it a version never repeats. */
+  snapshots = 0;
 
   // log-derived (plain; see rules above)
   events: EventRow[] = [];
@@ -660,6 +662,7 @@ class CodlyStore {
   /** A snapshot took the place of what the per-agent versions count: they start again, and
    *  every panel that read one runs again. */
   private resetRevs() {
+    this.snapshots++;
     this.revBy.clear();
     this.liveRevBy.clear();
     for (const a of this.agents) this.seedRevs(a.id);

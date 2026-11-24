@@ -55,10 +55,8 @@ describe('the MCP servers of an agent', () => {
   });
 
   it('a server that needs a sign-in says where to sign in, by its name, and what to do then', () => {
-    expect(signInSteps('linear')).toBe(
-      'Open Claude Code in a terminal and sign in to linear in Claude Code’s own MCP settings. Then press Reconnect here. If this server uses an API key, check the key in its settings instead.',
-    );
-    expect(MCP_HINT.needs_sign_in).toBe('The agent works without this server’s tools until you sign in to it in Claude Code’s own MCP settings. Then press Reconnect.');
+    expect(signInSteps('linear')).toBe('Open Claude Code in a terminal in this folder, type /mcp, choose linear and sign in. Then press Reconnect here.');
+    expect(MCP_HINT.needs_sign_in).toBe('The agent works without this server’s tools until you sign in to it with /mcp in Claude Code. Then press Reconnect.');
   });
 
   it('belong to one run: an earlier run\'s servers are gone with its process', () => {
@@ -404,14 +402,16 @@ describe('what an agent left at work in the background', () => {
   });
 
   // Recorded: with no turn running the agent takes a turn of its own (part 3, section 1); a stop
-  // while a turn runs is told within that turn, and no turn follows (part 5, section 11, n=2).
+  // while a turn runs is told within that turn (part 5, section 11, n=2), or in a turn of its own
+  // right after it when it came during the turn's last model request (part 6, section 5, n=2). A
+  // stopped command starts no turn (part 6, section 5, n=5).
   it('the "Stop" of a helper says what follows, by whether a turn of its agent runs', () => {
     apply(ev(10, 'r2', { type: 'background_tasks', tasks: [task('tid-1'), task('tid-3', 'helper')], ended: [] }));
     const [command, helper] = live().background;
     expect(stopHint(helper, 'Bo', false)).toBe('Stops this helper. Bo is told and goes on with a turn of its own.');
-    expect(stopHint(helper, 'Bo', true)).toBe('Stops this helper. Bo is told in the turn that runs.');
-    expect(stopHint(command, 'Bo', false)).toBeNull();
-    expect(stopHint(command, 'Bo', true)).toBeNull();
+    expect(stopHint(helper, 'Bo', true)).toBe('Stops this helper. Bo is told in the turn that runs, or in a turn of its own right after it.');
+    expect(stopHint(command, 'Bo', false)).toBe('Stops this command. No turn follows.');
+    expect(stopHint(command, 'Bo', true)).toBe('Stops this command. No turn follows.');
     // A helper its agent still waits for: its turn goes on.
     expect(waitedHelperStopHint('Bo')).toBe('Stops this helper. Bo’s turn goes on.');
   });

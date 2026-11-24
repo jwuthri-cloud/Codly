@@ -10,6 +10,7 @@
   import { tildify } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
   import { catalog } from './catalog';
+  import { crewReady } from './quest';
 
   interface Props {
     finish: () => void;
@@ -52,6 +53,7 @@
     </button>
   {/each}
 </div>
+{#if !crewReady(store.clis)}<p class="warn">No agent is ready yet: the repository opens, but no one can work on your request. Install or sign in to one on level 1 first.</p>{/if}
 <p class="fine">Nothing is sent: the request waits in the Lead's composer for you to read and press ↵. On macOS, a repository in Documents may ask for folder access the first time.</p>
 
 <style>
@@ -69,4 +71,5 @@
   .r-path { flex: 1; font-family: var(--font-mono); font-size: 11.5px; }
   .r-when { font-size: var(--t-sm); white-space: nowrap; }
   .fine { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
+  .warn { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--amber-ink); }
 </style>
