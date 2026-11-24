@@ -17,7 +17,7 @@ from r5_lib import Procs, ask, open_tasks, results, task_started
 from r6_lib import answer_to, is_init, is_result, kinds, sent_at, stamps, system, tool_call, wait_alive
 from r7_lib import queued_notifications
 run = sys.argv[1] if len(sys.argv) > 1 else "1"
-helper, fg = Procs("[s]leep 173"), Procs("[s]leep 21.5")
+helper, fg = Procs("sleep 173"), Procs("sleep 21.5")
 s = Session("r7-stop-helper-mid-turn-%s" % run, extra=["--tools", "Bash,Agent"], hard_timeout=200)
 s.user("Use the Agent tool with run_in_background set to true to have a subagent run the Bash command "
        "`echo begin; sleep 173; echo end` and report its output. Do not wait for the subagent: right after starting it, "

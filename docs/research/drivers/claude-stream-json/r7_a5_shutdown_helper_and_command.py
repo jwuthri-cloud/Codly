@@ -18,7 +18,7 @@ from drv import Session
 from r5_lib import Procs, ask, open_tasks, results, task_started
 from r6_lib import answer_to, kinds, note_exit, sent_at, stamps, system, wait_alive
 run = sys.argv[1] if len(sys.argv) > 1 else "1"
-cmd, helper = Procs("[s]leep 197"), Procs("[s]leep 199")
+cmd, helper = Procs("sleep 197"), Procs("sleep 199")
 s = Session("r7-shutdown-helper-and-command-%s" % run, extra=["--tools", "Bash,Agent"], hard_timeout=200, own_group=True)
 s.user("Do two things in one message, then reply with the single word: started. 1) Run the Bash command `echo bg; sleep 197` "
        "with run_in_background set to true. 2) Use the Agent tool with run_in_background set to true to have a subagent run the "

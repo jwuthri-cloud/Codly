@@ -81,9 +81,11 @@ What the adapter can rely on (n=2, the two labels agree step for step):
   the user's own `~/.claude.json`). The folder's entry there (under `projects`, keyed by the folder's path) gets
   `"disabledMcpServers":["ping-live"]`. The entry's MCP keys: `disabledMcpServers`, `disabledMcpjsonServers`, `enabledMcpjsonServers`, `mcpContextUris`, `mcpServers`.
 - It holds for EVERY later process in that folder that reads that HOME: a new session (b) and a resumed one (c) both
-  report the server `disabled` in `mcp_status` and in `init.mcp_servers` (`"source":"dynamic"`), its tool is not in
-  `init.tools`, and the server is NOT started (no new line in `started.txt`). The saved list is read with
-  `--strict-mcp-config --setting-sources local` (all six processes; other setting sources were not tried).
+  report the server `disabled` in `mcp_status` at their start, and the server is NOT started (no new line in
+  `started.txt`). The new session's `init.mcp_servers` says `disabled` too (`"source":"dynamic"`), and its tool is not
+  in `init.tools`. The resumed process's only `init` comes after the switch back on, and says `connected`. The saved
+  list is read with `--strict-mcp-config --setting-sources local` (all six processes; other setting sources were not
+  tried).
 - The switch goes by the server's NAME in that folder: the server came from `--mcp-config` (Codly's way), so any
   server of that name in that folder stays off, also one that Codly passes in a later run.
 - Only `mcp_toggle` on undoes it: the list is `[]` again in the same step, and the server starts (`connected`).

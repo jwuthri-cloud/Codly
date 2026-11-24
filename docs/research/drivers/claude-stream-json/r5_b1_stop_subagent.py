@@ -10,7 +10,7 @@ import sys, time
 from drv import Session
 from r5_lib import Procs, ask, next_turn, open_tasks, results, task_started
 run = sys.argv[1] if len(sys.argv) > 1 else "1"
-sleeps = Procs("[s]leep 113")
+sleeps = Procs("sleep 113")
 s = Session("r5-stop-subagent-" + run, extra=["--tools", "Bash,Agent"], hard_timeout=200)
 
 s.user("Use the Agent tool with run_in_background set to true to have a subagent run the Bash command "

@@ -166,9 +166,11 @@ w("""What the adapter can rely on (n=2, the two labels agree step for step):
   the user's own `~/.claude.json`). The folder's entry there (under `projects`, keyed by the folder's path) gets
   `"disabledMcpServers":["ping-live"]`. The entry's MCP keys: %s.
 - It holds for EVERY later process in that folder that reads that HOME: a new session (b) and a resumed one (c) both
-  report the server `disabled` in `mcp_status` and in `init.mcp_servers` (`"source":"dynamic"`), its tool is not in
-  `init.tools`, and the server is NOT started (no new line in `started.txt`). The saved list is read with
-  `--strict-mcp-config --setting-sources local` (all six processes; other setting sources were not tried).
+  report the server `disabled` in `mcp_status` at their start, and the server is NOT started (no new line in
+  `started.txt`). The new session's `init.mcp_servers` says `disabled` too (`"source":"dynamic"`), and its tool is not
+  in `init.tools`. The resumed process's only `init` comes after the switch back on, and says `connected`. The saved
+  list is read with `--strict-mcp-config --setting-sources local` (all six processes; other setting sources were not
+  tried).
 - The switch goes by the server's NAME in that folder: the server came from `--mcp-config` (Codly's way), so any
   server of that name in that folder stays off, also one that Codly passes in a later run.
 - Only `mcp_toggle` on undoes it: the list is `[]` again in the same step, and the server starts (`connected`).
@@ -540,8 +542,8 @@ for lab in L10:
         m = meta(n, "run")[0]
         k = m["costs"]
         later, second, ae = note(n, "three_s_after_the_result"), note(n, "second_turn"), note(n, "after_the_exit")
-        check(m["result_subtype"] == "error_max_budget_usd" and m["result_errors"] == ["Reached maximum budget ($%.6f)" % m["budget_usd"]] or
-              m["result_errors"] == ["Reached maximum budget ($%s)" % ("%.6f" % m["budget_usd"]).rstrip("0")], "the stop of " + n)
+        check(m["result_subtype"] == "error_max_budget_usd" and (m["result_errors"] == ["Reached maximum budget ($%.6f)" % m["budget_usd"]] or
+              m["result_errors"] == ["Reached maximum budget ($%s)" % ("%.6f" % m["budget_usd"]).rstrip("0")]), "the stop of " + n)
         check(k["when_the_bash_call_began"] < m["budget_usd"] < k["once_the_story_was_written"], "the budget lies between in " + n)
         check(m["t_bash_tool_use"] < m["t_helper_story"] < m["t_result"] and m["t_bash_tool_result"] is None, "the limit came during the call in " + n)
         check(m["sleep_61_5_alive_at_the_result"] and later["sleep_61_5_alive"] and second["sleep_61_5_alive"] and later["list"] == [] and second["list"] == [], "the call runs on, unlisted, in " + n)

@@ -25,7 +25,7 @@ from r5_lib import Procs, ask, next_turn, open_tasks, results, task_started
 from r6_lib import answer_to, is_init, is_result, kinds, note_exit, sent_at, stamps, system, tool_call, wait_alive
 variant = sys.argv[1] if len(sys.argv) > 1 else "sequence"
 run = sys.argv[2] if len(sys.argv) > 2 else "1"
-helper, fg = Procs("[s]leep 139"), Procs("[s]leep 67")
+helper, fg = Procs("sleep 139"), Procs("sleep 67")
 s = Session("r6-shutdown-helper-%s-%s" % (variant, run), extra=["--tools", "Bash,Agent"], hard_timeout=220, own_group=True)
 
 if variant == "foreground-stop":

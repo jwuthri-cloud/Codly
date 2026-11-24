@@ -31,7 +31,7 @@ def new(label):
 cancel = {"cancel_queued": True} if variant.endswith("cancel") or variant == "sequence" else {}
 
 if variant == "sequence":
-    late, fg = Procs("[s]leep 307"), Procs("[s]leep 61")
+    late, fg = Procs("sleep 307"), Procs("sleep 61")
     s.user("Run `sleep 307; echo late` with the Bash tool using run_in_background: true. Do not wait for it and do not "
            "check its output: right after starting it, reply with the single word: started", uuid=new("m0"))
     t = task_started(s, background=True)

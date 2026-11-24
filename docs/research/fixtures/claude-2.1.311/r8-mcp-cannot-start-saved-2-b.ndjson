@@ -1,0 +1,17 @@
+{"_note":"claude 2.1.311, recorded 2026-11-23. Lines without a leading _ key are CLI stdout lines. Ids, paths and account fields are placeholders; slash_commands, skills, plugins, agents, commands, models and usage reports are shortened. See cli-claude-stream-json-2.1.311-part6.md.","_argv":["claude","-p","--input-format","stream-json","--output-format","stream-json","--verbose","--include-partial-messages","--permission-prompt-tool","stdio","--permission-mode","acceptEdits","--session-id","sess-1","--model","haiku","--strict-mcp-config","--setting-sources","local","--tools","Bash","--mcp-config","/tmp/work/r8-mcp-cannot-start-saved-2.json"],"_cwd":"/tmp/work/r8-mcp-cannot-start-saved-2"}
+{"_meta":{"env_set":{"HOME":"/tmp/work/r8-mcp-cannot-start-saved-2-home"}},"_t":0.0}
+{"_meta":{"after":"start + 3 s","server_starts_so_far":2,"switch_file_exists":false,"saved_disabledMcpServers":["ping-flaky"]},"_t":4.009}
+{"_sent":{"type":"control_request","request_id":"host-1","request":{"subtype":"mcp_status"}},"_t":4.009}
+{"type":"control_response","response":{"subtype":"success","request_id":"host-1","response":{"mcpServers":[{"name":"ping-flaky","status":"disabled","config":{"type":"stdio","command":"python3","args":["mcp_ping_server.py","started.txt","need=switch.on"]},"transport":"stdio","scope":"dynamic","source":"dynamic"}]}}}
+{"_sent":{"type":"control_request","request_id":"host-2","request":{"subtype":"mcp_toggle","serverName":"ping-flaky","enabled":true}},"_t":4.01}
+{"type":"control_response","response":{"subtype":"error","request_id":"host-2","error":"Connection closed"}}
+{"_meta":{"after":"mcp_toggle on while the program exits at once","server_starts_so_far":4,"switch_file_exists":false,"saved_disabledMcpServers":[]},"_t":5.107}
+{"_sent":{"type":"control_request","request_id":"host-3","request":{"subtype":"mcp_status"}},"_t":5.107}
+{"type":"control_response","response":{"subtype":"success","request_id":"host-3","response":{"mcpServers":[{"name":"ping-flaky","status":"failed","error":"Connection closed","config":{"type":"stdio","command":"python3","args":["mcp_ping_server.py","started.txt","need=switch.on"]},"transport":"stdio","scope":"dynamic","source":"dynamic"}]}}}
+{"_sent":{"type":"control_request","request_id":"host-4","request":{"subtype":"mcp_reconnect","serverName":"ping-flaky"}},"_t":5.108}
+{"type":"control_response","response":{"subtype":"success","request_id":"host-4"}}
+{"_meta":{"after":"mcp_reconnect after switch.on was made","server_starts_so_far":5,"switch_file_exists":true,"saved_disabledMcpServers":[]},"_t":6.148}
+{"_sent":{"type":"control_request","request_id":"host-5","request":{"subtype":"mcp_status"}},"_t":6.148}
+{"type":"control_response","response":{"subtype":"success","request_id":"host-5","response":{"mcpServers":[{"name":"ping-flaky","status":"connected","serverInfo":{"name":"ping-project","version":"0.0.1"},"config":{"type":"stdio","command":"python3","args":["mcp_ping_server.py","started.txt","need=switch.on"]},"transport":"stdio","scope":"dynamic","source":"dynamic","tools":[{"name":"ping","annotations":{}}]}]}}}
+{"_meta":{"closing_stdin":true,"alive_before_close":true},"_t":6.148}
+{"_meta":{"exit_code":0},"_t":6.682}

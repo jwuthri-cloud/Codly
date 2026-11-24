@@ -28,7 +28,7 @@ def since_interrupt():
 
 
 if variant == "foreground":
-    sleeps = Procs("[s]leep 127")
+    sleeps = Procs("sleep 127")
     s.user("Use the Agent tool with run_in_background set to false to have a subagent run the Bash command "
            "`echo begin; sleep 127; echo end` and report its output. Then tell me what it reported.")
     t = task_started(s, task_type="local_agent")
@@ -52,7 +52,7 @@ if variant == "foreground":
     print("killed leftovers:", sleeps.kill_left())
     sys.exit(0)
 
-helper, fg = Procs("[s]leep 43"), Procs("[s]leep 59")
+helper, fg = Procs("sleep 43"), Procs("sleep 59")
 s.user("Use the Agent tool with run_in_background set to true to have a subagent run the Bash command "
        "`echo begin; sleep 43; echo end` and report its output. Do not wait for the subagent: right after starting it, "
        "reply with the single word: started")

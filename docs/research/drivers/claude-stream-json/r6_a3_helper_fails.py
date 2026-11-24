@@ -46,7 +46,7 @@ if variant.startswith("helper"):
     sys.exit(0)
 
 sig, target = {"signal-term": ("TERM", "shell"), "signal-kill": ("KILL", "shell"), "signal-child-kill": ("KILL", "child")}[variant]
-sleeps = Procs("[s]leep 131")
+sleeps = Procs("sleep 131")
 s = Session(name, extra=["--tools", "Bash"], hard_timeout=150, own_group=True)
 s.user("Run `echo begin; sleep 131; echo end` with the Bash tool using run_in_background: true. Do not wait for it and do not "
        "check its output: right after starting it, reply with the single word: started")

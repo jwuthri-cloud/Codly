@@ -1,6 +1,7 @@
 """Helpers shared by the r5_* scripts (part 3)."""
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -52,12 +53,18 @@ def task_started(s, start=0, timeout=60, task_type=None, background=None):
 
 
 class Procs:
-    """Processes whose command line matches a pattern and that did not exist before the run.
-    Write the pattern so that it cannot match itself (`[s]leep 113`), and so that only what the scenario starts can
-    match it (an unusual duration, a file name of the run): kill_left() ends every new match, whoever started it."""
+    """Processes whose command line has this text as whole words (`Procs("sleep 113")`) and that did not exist before
+    the run. "Whole": the text must not go on with a letter, a digit, `_` or `.` on either side, so `sleep 41` matches
+    `sleep 41` and `echo a; sleep 41; echo b` but not `sleep 410` or `sleep 41.5`. Pick a text that only what the
+    scenario starts can have (an unusual duration, a file name of the run): kill_left() ends every new match, whoever
+    started it."""
 
-    def __init__(self, pattern):
-        self.pattern = pattern
+    def __init__(self, text):
+        self.text = text
+        word = "[^A-Za-z0-9_.]"
+        literal = re.sub(r"([.\\[\](){}*+?|^$])", r"\\\1", text[1:])
+        # The first character in brackets: the pattern does not match a command line that has the pattern itself.
+        self.pattern = "(^|%s)[%s]%s($|%s)" % (word, text[0], literal, word)
         self.before = set(self._all())
 
     def _all(self):
