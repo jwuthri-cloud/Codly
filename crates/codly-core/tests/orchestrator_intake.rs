@@ -24,6 +24,27 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 /// What stands in for `gh`: it writes down each call (its arguments, one per line, then `--`)
 /// and answers with the fixtures beside it. While a `signed-out` file is next to it, nothing
 /// can be read and `auth status` fails; issue 404 does not exist; number 7 is a pull request,
@@ -58,7 +79,7 @@ const FIXTURES: [(&str, &str); 4] = [
 ];
 
 fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -228,7 +249,7 @@ async fn world_with(gh: bool, clis: Vec<CliInfo>) -> World {
             std::fs::write(bin.join(name), text).unwrap();
         }
     }
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+    let mut env: HashMap<String, String> = core_env();
     env.insert("PATH".into(), bin.to_string_lossy().into_owned());
 
     let (turns, answers): (Turns, Answers) = Default::default();
@@ -319,7 +340,7 @@ async fn an_issue_becomes_a_request_with_its_text_quoted_for_the_lead() {
     assert_eq!(w.answer(1).await, "awaiting_approval");
     let plan = w.core.snapshot().await.unwrap().plans.into_iter().max_by_key(|p| p.created_at).expect("a plan");
     assert_eq!(plan.request, ISSUE_WORDS);
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -367,7 +388,7 @@ async fn a_pull_request_brings_its_reviews_its_code_comments_and_its_checks() {
     let block = prompt.find("<untrusted from=").unwrap();
     assert!(prompt[..block].ends_with(" Codly could not read its comments on the code.\n"), "{prompt}");
     assert!(!prompt.contains("Comments on the code") && quoted_in(&prompt, from, "Failing: lint, deploy"), "{prompt}");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -397,14 +418,14 @@ async fn nothing_is_recorded_when_it_cannot_be_read() {
 
     assert!(w.chats().await.iter().all(|c| c.author != "user"), "nothing is in the thread");
     assert!(w.turns.lock().unwrap().is_empty(), "the Lead was not asked");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 
     // Without gh on the PATH.
     let w = world(false).await;
     let e = w.core.start_from_github("lead", IntakeKind::Issue, "12", "").await.unwrap_err().to_string();
     assert!(e.starts_with("The GitHub CLI (gh) is not installed. To start from an issue or a pull request, install it"), "{e}");
     assert!(w.chats().await.iter().all(|c| c.author != "user"));
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 
     // Without an agent CLI that can be the Lead: gh is not asked.
     let w = world_with(true, vec![]).await;
@@ -412,7 +433,7 @@ async fn nothing_is_recorded_when_it_cannot_be_read() {
     assert!(e.starts_with("The Lead cannot start: no signed-in agent CLI found"), "{e}");
     assert_eq!(w.gh_calls(), Vec::<Vec<String>>::new());
     assert!(w.chats().await.iter().all(|c| c.author != "user"), "nothing is in the thread");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -437,7 +458,7 @@ async fn a_lead_that_cannot_start_is_told_in_the_request_and_to_the_caller() {
     w.broken.store(false, Ordering::SeqCst);
     w.core.send_chat("lead:i12", "Try again.").await.unwrap();
     assert!(w.lead_turn(1).await.ends_with("Try again."));
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 /// Other people write what is on GitHub. In a request that runs plans at once, the plan made
@@ -491,5 +512,5 @@ async fn a_plan_made_from_an_issue_waits_for_run_plan_in_every_mode() {
     let plan = newest_plan().await;
     assert_eq!((plan.status, plan.request.as_str()), (PlanStatus::AwaitingApproval, "Keep the old cookie name working."));
     assert_eq!(w.chats().await.iter().filter(|c| c.author == "codly" && c.text.ends_with(WHY)).count(), 4);
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }

@@ -17,8 +17,8 @@ Parameters go in the URL and can be combined. They are read once, when the page 
 | --- | --- |
 | `?ws=1` | Opens `acme/web` at once. |
 | `?speed=2` | Plays the script faster (`0.5` is slower). |
-| `?skip=90` | Starts 90 seconds into the script. It also opens the repo. |
-| `?autoplay=1` | Runs each plan and allows each request by itself. |
+| `?skip=90` | Starts 90 seconds into the script. Any value, `0` included, also opens the repo. |
+| `?autoplay=1` | Runs each plan and allows each request by itself. A request it allowed says "by autoplay", not "by you". |
 | `?onboard=1` | A machine with no agent CLI installed, to see the first-run quest. |
 
 `?autoplay=1&skip=180` is the short way to both plans finished.
@@ -29,13 +29,22 @@ Each of these opens `acme/web` at once, except `?trust=ask` and `?hour=`.
 
 | Parameter | What you get | Where to look |
 | --- | --- | --- |
-| `?trust=ask` | The repo has CLI settings of its own, and you were never asked about them. | Open `acme/web`: the trust dialog. |
+| `?trust=ask` | The repo has CLI settings of its own, and you were never asked about them. After "Open without…", each Claude Code agent that starts from then on says that its run started without them. | Open `acme/web`: the trust dialog; then the Lead's sheet, under "MCP servers". |
 | `?merge=conflict` | Your branch changed a file that each finished plan changed too. Merge is refused. "Have an agent resolve it" gives the plan one more task; when it is done, the plan merges. | The plan's finished card: `?merge=conflict&autoplay=1&skip=180` |
+| `?merge=checks` | Your branch moved since each plan started, and one check of a finished plan fails on the merge result. Merge is refused and says which check, with the failing test; "Have an agent fix it" gives the plan one more task (`fix-checks`) that changes one line of that test; when it is done, the plan merges. "Merge anyway" merges without the check. Cancel a plan with finished work, then: Merge is refused for its check as well, "Have an agent fix it" says to fix the checks yourself (no agent works on a cancelled plan), and "Merge anyway" merges the work it finished. | The plan's finished card: `?merge=checks&autoplay=1&skip=180` |
+| `?pr=open` | Each finished plan has an open pull request whose checks are not read yet. Refresh finds them running, then passed. | The plan's finished card: `?pr=open&autoplay=1&skip=180` |
+| `?turn=failed` | The first turn of the first 1:1 agent you talk to fails: the API is overloaded. The thread shows the trouble row with "Retry", and Retry works. | Hire a 1:1 agent and send it a message. |
+| `?requests=two` | Both scripted requests (the dark-mode toggle and the sign-in lockout) are there when the page loads, not 1.6 and 24 seconds later. The demo repo keeps its id in this browser, so after a reload Codly opens on the request you left. | Open the lockout request, then reload the page. |
+| `?search=fail` | Every code search fails, with a reason. | Knowledge: the code part of a search says why, with Try again. |
 | `?preview=running` | A command you started earlier runs in each worktree you look at. | "Try it before you merge" on a finished plan's card (`?preview=running&autoplay=1&skip=180`), or on the Git tab of a 1:1 agent. |
-| `?intake=issue`, `?intake=pr` | The "From issue…" (or "From pull request…") dialog is open, and the scripted requests do not start: yours is the first. Any number works. Run the plan, then "Create pull request…": the description ends with `Closes #N`. | The dialog, then the request it opens. |
+| `?intake=issue`, `?intake=pr` | The "From issue…" (or "From pull request…") dialog is open, and the scripted requests do not start: yours is the first. Any number works. "Run plans without asking" is on in this state, and the plan waits all the same, because its request started from GitHub: its card says why above "Run plan". Run the plan, then "Create pull request…": the description ends with `Closes #N`. A request you type there runs its plan at once, unless the plan has an open question (the dark-mode one has): then it waits, as in the app. | The dialog, then the request it opens. |
 | `?helper=slow` | The helper (sub-agent) that Ada starts in her first task works for about a minute, not three seconds. | Ada's work in the first request: `?helper=slow&autoplay=1&skip=20` |
 | `?checks=on` | The repo's required checks are on, so Codly runs them for each task after the task's own checks. | A finished task's sheet, under its checks ("required by you"): `?checks=on&autoplay=1&skip=180` |
 | `?mode=plan` | Eli, a 1:1 Claude agent in the mode "plan first", was asked for a small change and shows a plan. Send it back with a note and it comes again; accept it and Eli asks before the edit. | Eli's conversation; the mode switch is in Eli's sheet, under Controls. |
+| `?resume=ask` | Codly "closed" while the first plan ran: two of its tasks were in work and wait, each with its worker (offline) and its branch, and nothing starts. The bar at the top asks. "Resume work" starts them, with the same workers and the same attempt; "Not now" keeps them waiting, with the button; cancel a waiting task and the bar counts one less. (`billing-api` plays its own script: it is not held.) | The bar at the top of the window, and the two tasks on the board. |
+| `?background=on` | Eli, a 1:1 Claude agent, ended its turn with two things at work in the background: a dev server and a helper. "Stop" ends the one you press it on. After the helper's stop Eli says so in a short turn of its own, as Claude Code does; after the command's stop no turn follows. Left alone, the helper reports after about three minutes. | Eli's sheet, under "In the background". |
+| `?cards=3` | The one request is a release checklist: a plan of four tasks that wait on nothing. Three of its workers ask you within a few seconds of each other (Max a command, Noa a change to `README.md`, Rio a question), and Sam finishes the fourth task while the three cards wait. Max and Noa have written a file before they ask, so their unfinished tasks have a diff. With `?autoplay=1` the plan runs by itself, and the three cards still wait for you. | The request's thread: `?cards=3&autoplay=1` |
+| `?long=2000` | Lena, a 1:1 Claude agent, has a long past: that many turns (2000 with no number) of your message, a file read and her answer; every 25th turn a command she asked you before, every 50th a turn that failed and your message sent again, every 40th a change of her mode. 12 seconds after the page loads she streams one long answer (about 9,000 characters). Each batch of events the page takes is timed into `__codlyLong.batches` (script until the screen is updated, then layout, in ms): read it in the browser's console. | Lena's conversation: press her chip at the top. |
 | `?hour=13` | The demo's clock says 13:00 when the page loads, and goes on from there (from `0`, below `24`; `21.5` is 21:30). The office and the map are lit for the hour of the clock, so this sets their light; every time on screen follows. It opens no repo. | The office and the map: `?hour=13&ws=1` with the app's dark theme (a bright office under a dark app), `?hour=23&ws=1` with its light theme. |
 
 ### A kind of request (`?approval=`)
@@ -48,9 +57,10 @@ each page load. Approve, deny or answer as on the other cards: the agent goes on
 | --- | --- | --- |
 | `?approval=file` | Eli (Claude Code, "ask for edits") asks before it changes `README.md`, and shows the change. | Eli's conversation. |
 | `?approval=plan` | Eli (Claude Code, "plan first") shows its plan. The same as `?mode=plan`. | Eli's conversation. |
-| `?approval=network` | Ned (Claude Code): a command in Claude Code's sandbox wants to reach `registry.npmjs.org`. Gil (Gemini CLI): a tool with the same name, `SandboxNetworkAccess`, asks to run. Only Ned's is the sandbox's request. | Ned's conversation and Gil's, side by side. |
+| `?approval=network` | Ned (Claude Code): a command in Claude Code's sandbox wants to reach `registry.npmjs.org`. The step in the thread is the command; after Deny it ends with the sandbox's network error. | Ned's conversation. |
 | `?approval=permissions` | Kit (Codex) asks for more permissions: to write in `../acme-docs`, outside its worktree. | Kit's conversation. |
 | `?approval=question-long` | Ned (Claude Code) asks a question with two options of about 120 characters each. Kit (Codex) passes on a question of an MCP server that has no options: you write the answer. | Answer both (write a long answer for Kit), then look at the two closed rows. |
+| `?approval=questions-two` | Ned (Claude Code) asks two questions at once, six options each: the colour and the font of a landing page. At 1024x640 the card's body scrolls: a number key picks only an option that is in view together with its question (else the press scrolls the body to them, or says to click the option), and ⌘↵ sends only when both questions and both answers are in view at once, so at this size Send answer is the way. | Ned's conversation, at 1024x640. |
 
 ## The second office: `billing-api`
 
@@ -62,7 +72,7 @@ and it is as you left it, plus what its agents did meanwhile: both offices keep 
 request that waits in the one you are not looking at shows as a notice. A draft you typed in a
 request of one office is there again when you come back to it.
 
-`docs-site`, the third office, is a tab with numbers only: opening it changes nothing.
+The wallet is one for both offices: XP and coins are the same whichever office is open.
 
 ## What the demo does as the app does
 
@@ -70,22 +80,32 @@ request of one office is there again when you come back to it.
   agent is in, and gets no turn of its own. With another CLI it waits for the turn's end. The
   wait is about a second: slow the script down (`?speed=0.25`) to see the "Queued" line.
 - "Always allow in this repo": Ada asks before `npm install -D @testing-library/react`. Save the
-  rule for `npm install` on that card, and Cy's later `npm install` is allowed without a question.
-  A command that deletes (`rm -rf dist && npm run build`) offers no rule.
+  rule for `npm install` on that card, and Cy's later `npm install -D @axe-core/playwright` is
+  allowed without a question.
+  A command that deletes (Bo's `rm -rf dist && npm run build`) offers no rule.
 - A 1:1 Claude agent you hire works in its mode: "plan first" shows a plan, "ask for edits" asks
   before the edit, "accept edits" edits without a question.
 - Close office (on the map) refuses while the office has unfinished work or an agent is in a turn.
-  In the demo, `billing-api` has agents at work, `docs-site` closes, and `acme/web` closes once its
-  open tasks are done or cancelled.
+  In the demo, `billing-api` has agents at work, and `acme/web` closes once its open tasks are
+  done or cancelled.
 - MCP servers: the first Lead of an office (a Claude Code one) reports three when its session
   starts: `codly` is connected, `linear` needs a sign-in, `postgres` did not start. Its sheet shows
   the section "MCP servers". Reconnect connects `postgres` after a second; `linear` still needs
-  its sign-in, and the row says so.
+  its sign-in, and the row says so. Stop the Lead and the section is gone with its process, as in
+  the app; it is back when the Lead works again.
 - A command an agent leaves running in the background: in her first task Ada starts a type check
   (`npx tsc --noEmit --watch`) and stops it before she reports. While it runs, her sheet lists it
   under "In the background" with Stop, and her History has one row for each change of the list.
-  Without `?autoplay=1` it stays until you answer her `npm install` request: run the first plan
-  (`?skip=20`), open Ada's sheet, and press Stop.
+  Without `?autoplay=1` it stays until you answer her `npm install` request and then her
+  question about the `localStorage` fallback: run the first plan (`?skip=20`), open Ada's sheet,
+  and press Stop. Stop Ada herself and the section is gone: the
+  command ended with her process, as in the app.
+
+## Other demo pages
+
+`office-demo.html` (the office alone) and `character-lab.html` (the characters) read parameters
+of their own: see `src/office/demo.ts`, `src/office/demo/Harness.svelte` and
+`src/office/demo/lab.ts`. They are tools for the office's look, not part of the app's demo.
 
 ## What the demo cannot show
 

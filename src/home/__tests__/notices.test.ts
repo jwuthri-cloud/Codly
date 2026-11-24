@@ -6,7 +6,7 @@ import type { EventRow } from '../../lib/gen/EventRow';
 import type { Snapshot } from '../../lib/gen/Snapshot';
 import { store } from '../../lib/state/store.svelte';
 import { mkAgent } from '../../office/demo/script';
-import { moreOf, noticeRows } from '../notices';
+import { headline, moreOf, noticeRows } from '../notices';
 import { buildSpine, keepRows, type Item } from '../spine';
 
 let id = 0;
@@ -65,12 +65,39 @@ describe('noticeRows', () => {
 
   it('a log that begins inside a turn: what was told before that turn ended is one row', () => {
     expect(words([notice('a'), notice('b'), notice('c'), turnEnd(), notice('d')])).toEqual([['a', 'b', 'c'], ['d']]);
-    // Nothing says a turn ran: they stay rows of their own.
-    expect(words([notice('a'), notice('b'), turn(), notice('c')])).toEqual([['a'], ['b'], ['c']]);
+    // The turn that starts next is another one, with a row of its own.
+    expect(words([notice('a'), notice('b'), turn(), notice('c')])).toEqual([['a', 'b'], ['c']]);
+  });
+
+  it('a long turn whose start left the log is one row while it runs, and still one when it ends', () => {
+    // The log holds the newest events only: the `turn_started` of this turn is not in it any more.
+    const hook = Array.from({ length: 30 }, (_, i) => notice(`hook: checked call ${i + 1}`));
+    const running = noticeRows(hook, 'l1');
+    expect(running).toHaveLength(1);
+    expect(running[0].map((n) => n.eventId)).toEqual(hook.map((e) => e.id));
+    expect(moreOf(running[0])).toBe('and 29 more');
+    // The row does not change when the turn's end comes: the same notes, so the same key.
+    const ended = noticeRows([...hook, turnEnd()], 'l1');
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toEqual(running[0]);
+  });
+
+  it('a turn end between two groups, with no turn start in the log, gives two rows', () => {
+    const first = [notice('a'), notice('b'), notice('c')];
+    const second = [notice('d'), notice('d')];
+    expect(words([...first, turnEnd(), ...second])).toEqual([['a', 'b', 'c'], ['d', 'd']]);
+    // After the end the log says that no turn runs: other words are a row of their own again.
+    expect(words([...first, turnEnd(), notice('d'), notice('e')])).toEqual([['a', 'b', 'c'], ['d'], ['e']]);
+    // The process that ended closes the turn too.
+    expect(words([...first, ev({ type: 'exited', code: 1 }), notice('d'), notice('e')])).toEqual([['a', 'b', 'c'], ['d'], ['e']]);
   });
 
   it("another agent's turns and notices are not this agent's", () => {
-    expect(words([notice('mine, outside'), turn('w1'), notice('theirs', 'w1'), notice('mine, still outside'), turnEnd('w1')])).toEqual([['mine, outside'], ['mine, still outside']]);
+    // No turn of `l1` runs. Were the worker's turn taken for its own, the words told during it would be a row apart.
+    const events = [turn(), turnEnd(), notice('Goal: ship it'), turn('w1'), notice('theirs', 'w1'), notice('Goal: ship it'), turnEnd('w1'), notice('Goal: ship it')];
+    expect(words(events)).toEqual([['Goal: ship it', 'Goal: ship it', 'Goal: ship it']]);
+    // And the worker's end does not close a turn of `l1` whose start left the log.
+    expect(words([notice('a'), turnEnd('w1'), notice('b')])).toEqual([['a', 'b']]);
   });
 
   it('says how many there are: a count for the same words, "more" for different ones', () => {
@@ -78,6 +105,36 @@ describe('noticeRows', () => {
     const [mixed] = noticeRows([turn(), notice('a'), notice('b'), notice('a'), turnEnd()], 'l1');
     const [one] = noticeRows([notice('a')], 'l1');
     expect([moreOf(same), moreOf(mixed), moreOf(one)]).toEqual(['2 times', 'and 2 more', null]);
+  });
+});
+
+describe('headline', () => {
+  it('a joined row shows its worst notice: an MCP server that did not start before a goal', () => {
+    const [row] = noticeRows([notice('MCP server A did not start, so this agent works without its tools.'), notice('MCP server B did not start, so this agent works without its tools.'), notice('Goal: ship it')], 'l1');
+    expect(headline(row).text).toBe('MCP server B did not start, so this agent works without its tools.');
+    expect(moreOf(row)).toBe('and 2 more');
+  });
+
+  it('with no failure in the row, the newest one', () => {
+    const [row] = noticeRows([notice('Goal: ship it'), notice('Codex hook Stop (hooks.json) added context: ok')], 'l1');
+    expect(headline(row).text).toBe('Codex hook Stop (hooks.json) added context: ok');
+  });
+
+  it('a hook that blocked and a turn on another model are failures too', () => {
+    const [blocked] = noticeRows([notice('Codex hook PreToolUse (hooks.json) blocked: no'), notice('Goal: ship it')], 'l1');
+    const [rerouted] = noticeRows([notice('Codex ran this turn on gpt-5 instead of gpt-6.'), notice('Goal cleared')], 'l1');
+    expect([headline(blocked).text, headline(rerouted).text]).toEqual(['Codex hook PreToolUse (hooks.json) blocked: no', 'Codex ran this turn on gpt-5 instead of gpt-6.']);
+  });
+
+  it('the words of a goal or of what a hook said do not make a failure', () => {
+    const mcp = 'MCP server A did not start, so this agent works without its tools.';
+    for (const plain of ['Goal: fix the failed checkout test', 'Goal: find why the build stopped', 'Codex hook Stop (hooks.json) added context: 2 tests failed', 'Goal: run it on gpt-5 instead of gpt-6']) {
+      const [row] = noticeRows([notice(mcp), notice(plain)], 'l1');
+      expect(headline(row).text).toBe(mcp);
+    }
+    // A goal that is blocked is the core's word, not the goal's.
+    const [goal] = noticeRows([notice('Goal: ship it'), notice('Goal blocked: ship it'), notice('Goal: ship it again')], 'l1');
+    expect(headline(goal).text).toBe('Goal blocked: ship it');
   });
 });
 

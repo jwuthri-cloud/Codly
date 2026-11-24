@@ -119,7 +119,9 @@ describe("a helper's call that is open when the turn ends", () => {
     launchEarly();
     expect(callOf('toolu-2')).toMatchObject({ parent: 'toolu-1', end: null, ok: null });
     expect(callOf('toolu-3')).toMatchObject({ end: 14, ok: null }); // the agent's own call ends with its turn
-    expect(store.now('l1')?.seg?.callId).toBe('toolu-2');
+    // (the helper's call is the helper's, never the agent's own: its turn ended, so the agent,
+    // still "working" here by its state, rests)
+    expect(store.now('l1')).toBeNull();
 
     apply(completed(40, 'toolu-2', false));
     expect(callOf('toolu-2')).toMatchObject({ end: 40, ok: false, exitCode: 1 });
@@ -165,7 +167,9 @@ describe('a plan a Claude agent shows you', () => {
 
 describe('a helper whose turn was interrupted or failed', () => {
   const atWork = () => (store.live.l1?.subagents ?? []).filter((s) => s.status === 'running').map((s) => s.callId);
-  /** As `launchEarly`, but the turn does not end normally. */
+  /** As `launchEarly`, but the turn does not end normally. The helper's `Agent` call still
+   *  waited for it, so the Claude adapter says "stopped" for it right after the turn's end (for
+   *  a Claude agent that row decides, not the turn's end: lib/__tests__/helperTurnEnd.test.ts). */
   function cut(status: 'interrupted' | 'failed') {
     apply(
       ev(10, { type: 'turn_started', input: 'Have a subagent run the tests' }),
@@ -174,6 +178,7 @@ describe('a helper whose turn was interrupted or failed', () => {
       started(13, 'toolu-2', 'Bash', 'execute'),
       progress(13, 'toolu-1', { tool_call_id: 'toolu-2' }),
       ev(14, { type: 'turn_completed', status, result_text: null, duration_ms: null }),
+      helper(14, 'toolu-1', 'stopped'),
     );
   }
 

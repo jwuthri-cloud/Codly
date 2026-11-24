@@ -10,6 +10,7 @@ import type { Approval } from '../lib/gen/Approval';
 import type { EventRow } from '../lib/gen/EventRow';
 import type { Provider } from '../lib/gen/Provider';
 import type { Task } from '../lib/gen/Task';
+import { permissionsAsked } from '../lib/util/permissionsAsked';
 import { PLAN_ASK, showsPlan } from '../lib/util/planRequest';
 import { sandboxWants } from '../lib/util/sandbox';
 import { columnOf, emptyModel, type AgentState, type Fx, type OfficeModel, type TaskCard, type Tone, type ToolCall } from './model';
@@ -198,7 +199,7 @@ export function applyStatus(a: AgentState, status: AgentStatus, ts: number) {
       if (a.thinkingSince == null) a.thinkingSince = ts;
       break;
     case 'waiting_approval':
-      if (!a.approval) a.approval = { id: 'status', text: '', command: false, since: ts };
+      if (!a.approval) a.approval = { id: 'status', text: '', waits: '', command: false, since: ts };
       break;
     case 'blocked':
     case 'failed':
@@ -212,7 +213,8 @@ export function applyStatus(a: AgentState, status: AgentStatus, ts: number) {
 
 /**
  * What a request asks, in a few words: a command by its first words, every other request by
- * what the agent wants to do, so that it reads after "May I" and after "Waiting for you:". A
+ * what the agent wants to do, so that it reads after "May I" (the ticker and the line of a
+ * request you denied have forms of their own: `approvalWaits`, `deniedLine`). A
  * Claude agent's plan is `PLAN_ASK`: what you do with it, since a plan is read, not allowed.
  * `provider`: the CLI of the agent that asks (null: the office does not know it).
  */
@@ -229,8 +231,44 @@ export function approvalText(ap: Approval, provider: Provider | null): string {
       return showsPlan(s, provider) ? PLAN_ASK : (sandboxWants(s, provider, 30) ?? `use ${clean(s.name, 30)}`);
     case 'question':
       return 'ask a question';
+    case 'permissions':
+      return clean(permissionsAsked(s.detail).wants, 40);
+  }
+}
+
+/**
+ * The same request where nothing asks "May I": after "Waiting for you:" in the ticker. A
+ * question and a permissions request are named there ("its question", "more permissions"):
+ * "Waiting for you: ask a question" reads as something you are told to do. Every other
+ * request reads as in `approvalText`.
+ */
+export function approvalWaits(ap: Approval, provider: Provider | null): string {
+  const kind = ap.subject.kind;
+  return kind === 'question' ? 'its question' : kind === 'permissions' ? 'more permissions' : approvalText(ap, provider);
+}
+
+/** The line of an agent that waits for you in the Sims panel and on its "Now" row: the ticker's
+ *  form (`approvalWaits`), so a question reads "Waiting for you: its question". */
+export function waitingLine(approval: Pick<NonNullable<AgentState['approval']>, 'waits'>): string {
+  return approval.waits ? `Waiting for you: ${approval.waits}` : 'Waiting for you';
+}
+
+/**
+ * The agent's line after you said no to its request: "Denied <command>" for a command,
+ * "Skipped its question", "Denied: more permissions", "Plan sent back" for a Claude agent's
+ * plan (a plan is read, not allowed), and "Denied: <what it wanted to do>" for the rest.
+ */
+export function deniedLine(ap: Approval, provider: Provider | null): { text: string; code: string | null } {
+  const s = ap.subject;
+  switch (s.kind) {
+    case 'command':
+      return { text: 'Denied', code: approvalText(ap, provider) };
+    case 'question':
+      return { text: 'Skipped its question', code: null };
+    case 'permissions':
+      return { text: 'Denied: more permissions', code: null };
     default:
-      return 'get more permissions';
+      return s.kind === 'tool' && showsPlan(s, provider) ? { text: 'Plan sent back', code: null } : { text: 'Denied:', code: approvalText(ap, provider) };
   }
 }
 
@@ -414,10 +452,12 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
         case 'delegate':
           tick('Briefing a helper');
           break;
-        case 'await_approval':
-          a.approval = { id: 'q:' + call.callId, text: call.query ? clean(call.query, 60) : 'a question', command: false, since: at };
+        case 'await_approval': {
+          const asks = call.query ? clean(call.query, 60) : 'a question';
+          a.approval = { id: 'q:' + call.callId, text: asks, waits: asks, command: false, since: at };
           tick('Waiting for you:', a.approval.text, 'warn');
           break;
+        }
       }
       break;
     }
@@ -462,10 +502,10 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       const who = ap.agent_id || aid;
       if (!who || m.resolved.has(ap.id)) break;
       const ag = ensureAgent(m, who, at);
-      const text = approvalText(ap, ag.providerKnown ? ag.provider : null);
-      ag.approval = { id: ap.id, text, command: ap.subject.kind === 'command', since: at };
-      m.approvals.set(ap.id, { agentId: who, text, since: at });
-      tick('Waiting for you:', text, 'warn', who);
+      const provider = ag.providerKnown ? ag.provider : null;
+      ag.approval = { id: ap.id, text: approvalText(ap, provider), waits: approvalWaits(ap, provider), command: ap.subject.kind === 'command', since: at };
+      m.approvals.set(ap.id, { agentId: who, denied: deniedLine(ap, provider), since: at });
+      tick('Waiting for you:', ag.approval.waits, 'warn', who);
       break;
     }
     case 'approval_resolved': {
@@ -475,7 +515,8 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       const who = ap?.agentId ?? aid;
       const ag = who ? m.agents.get(who) : null;
       if (ag?.approval && (ag.approval.id === k.approval_id || ag.approval.id === 'status')) ag.approval = null;
-      if (ag && k.status === 'denied') ag.outcome = { text: 'Denied', code: ap?.text ?? null, tone: 'muted', at };
+      // A request the office never saw asked (it joined later) is only known as denied.
+      if (ag && k.status === 'denied') ag.outcome = { ...(ap?.denied ?? { text: 'Denied', code: null }), tone: 'muted', at };
       break;
     }
     case 'rate_limit':
@@ -511,8 +552,11 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
     case 'turn_completed':
       if (a) {
         clearWork(a);
-        // A turn that was interrupted or that failed takes its helpers with it.
-        if (k.status === 'interrupted' || k.status === 'failed') a.subagents.clear();
+        // A turn that was interrupted or that failed takes its helpers with it. Not so for a
+        // Claude agent: a helper in the background works on, and its adapter says which helpers
+        // ended with the turn (a `sub_agent` row "stopped" for each). The store has the same rule.
+        const claude = a.providerKnown && a.provider === 'claude';
+        if (!claude && (k.status === 'interrupted' || k.status === 'failed')) a.subagents.clear();
         if (k.status === 'failed') a.blocked = { reason: 'turn failed', since: at };
       }
       break;
@@ -525,6 +569,8 @@ export function reduce(m: OfficeModel, ev: EventRow, ctx: ReduceContext): Fx[] {
       break;
     case 'exited':
       if (a && own) clearWork(a);
+      // Its helpers ran inside the process that is gone (of any run: the store says the same).
+      if (a) a.subagents.clear();
       break;
     case 'agent_changed': {
       const ag = ensureAgent(m, k.agent.id, at);

@@ -1065,6 +1065,12 @@ pub struct BackgroundTask {
     pub kind: String,
     /// The command, or what the helper was asked to do.
     pub description: String,
+    /// When the first list that named it came (ms), as the adapter saw it: later lists keep
+    /// it, so a row read again from a later list still knows how long the work runs. None
+    /// from an adapter that does not say it, and in rows written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub started_at: Option<i64>,
 }
 
 /// Something that left the list of a run's background work (`EventKind::BackgroundTasks`).
@@ -1573,6 +1579,19 @@ pub enum EventKind {
     ApprovalRequested {
         approval: Approval,
     },
+    /// What you said with your answer to a request, when it carried words: the note of a "no",
+    /// the answer to a question, or that you changed a plan before you accepted it. It comes
+    /// just before the `ApprovalResolved` of that answer, and only for an answer that went to
+    /// the agent. A request answered without words has no such row.
+    ApprovalSaid {
+        approval_id: Id,
+        /// What you told the agent to do instead (at most 2000 characters).
+        note: Option<String>,
+        /// Your answers to a question, on one line (at most 500 characters).
+        answer: Option<String>,
+        /// The plan was accepted with your text in place of the agent's.
+        plan_changed: bool,
+    },
     ApprovalResolved {
         approval_id: Id,
         status: ApprovalStatus,
@@ -1752,6 +1771,7 @@ impl EventKind {
             EventKind::FilesChanged { .. } => "files_changed",
             EventKind::PlanUpdated { .. } => "plan_updated",
             EventKind::ApprovalRequested { .. } => "approval_requested",
+            EventKind::ApprovalSaid { .. } => "approval_said",
             EventKind::ApprovalResolved { .. } => "approval_resolved",
             EventKind::UsageUpdated { .. } => "usage_updated",
             EventKind::RateLimit { .. } => "rate_limit",

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tip } from '../lib/state/tooltip.svelte';
+  import { tipPlace } from '../lib/util/tipPlace';
   import Kbd from './Kbd.svelte';
 
   let el: HTMLDivElement | undefined = $state();
@@ -9,12 +10,7 @@
     const r = tip.rect;
     if (!tip.visible || !r || !el) return;
     void tip.text;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    let x = r.left + r.width / 2 - w / 2;
-    x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
-    const below = r.top - h - 8 < 4;
-    pos = { x, y: below ? r.bottom + 8 : r.top - h - 8, below };
+    pos = tipPlace(r, el.offsetWidth, el.offsetHeight, tip.place, { width: window.innerWidth, height: window.innerHeight });
   });
 </script>
 

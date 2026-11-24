@@ -11,9 +11,11 @@ import type { ApprovalRuleKind } from '../gen/ApprovalRuleKind';
 import type { HeldCheck } from '../gen/HeldCheck';
 import type { MemoryKind } from '../gen/MemoryKind';
 import type { MemoryScope } from '../gen/MemoryScope';
+import type { Plan } from '../gen/Plan';
 import type { Provider } from '../gen/Provider';
 import type { Rank } from '../gen/Rank';
 import type { Settings } from '../gen/Settings';
+import type { Task } from '../gen/Task';
 import type { TaskStatus } from '../gen/TaskStatus';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
 import type { RequestPrefs } from '../gen/RequestPrefs';
@@ -22,20 +24,27 @@ import { shortSha } from '../util/format';
 import { accountId, applyConfigs, withProvider } from '../util/accounts';
 import { trustOf } from '../util/career';
 import { withModel } from '../util/team';
-import { followUpRequest, reviewMessage, type ReviewDraft } from '../util/review';
+import { finishedWorkGoes, followUpRequest, reviewMessage, sameSpot, splitByTask, splitWords, type ReviewComment, type ReviewDraft, type SplitPart } from '../util/review';
 import { answerText } from '../util/outcome';
-import { draftSlot, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
+import { safetyPlace } from '../util/approvalFooter';
+import { openSettings } from '../../overlays/settingsLink';
+import { safetyLink } from '../../overlays/settingsPages';
+import { draftSlot, forgetDraft, loadDraft, saveDraft, withoutSeed, type Att } from '../../home/drafts';
 import { accounts } from './accounts.svelte';
-import { yourAnswers } from './answers';
+import { yourAnswers, yourChoice } from './answers';
 import { diffstats } from './diffstats.svelte';
-import { fileList, loadMergeState, resolveMergeConflict } from './mergeState.svelte';
+import { fileList, loadMergeState, mergeKey, mergeUi, resolveMergeConflict } from './mergeState.svelte';
+import { mergeOfferGone, type MergeRefusal } from '../util/mergeOffer';
 import { flushClosing } from './closing';
 import { ESC_STOP_WINDOW, escStop } from './esc';
 import { busy } from './queue';
+import { prKey, prUi } from './pullRequest.svelte';
 import { requests } from './requests.svelte';
-import { review, reviewKey } from './review.svelte';
-import { noteStop, stopping } from './stops';
+import { planOwners, review, reviewKey } from './review.svelte';
+import { killRefusal } from './killRule';
+import { noteKill, noteStop, stopping } from './stops';
 import { store } from './store.svelte';
+import { takeovers } from './takeover.svelte';
 import { toast, toasts } from './toasts.svelte';
 import { ui, wallNow } from './ui.svelte';
 
@@ -80,6 +89,15 @@ export async function openWorkspace(path?: string) {
   const last = ui.enterOffice(ws.id);
   const list = requests.list;
   ui.openRequest((list.find((r) => r.thread === last) ?? list[0])?.thread ?? 'lead');
+}
+
+/** Codly starts on the office the core had open: you are on the request you last had open
+ *  there, when it is still one, and in the room you were in. */
+export function reopenLastRequest() {
+  const office = store.workspace?.id;
+  if (office) ui.restoreKeptDrafts(office);
+  const last = office ? ui.lastRequest(office) : null;
+  if (last && requests.get(last)) ui.resumeRequest(last);
 }
 
 export async function updateSettings(patch: Partial<Settings>) {
@@ -173,6 +191,16 @@ export function resendChat(id: string) {
   sendChat(o.thread, o.text);
 }
 
+/** The message "Continue" sends after a turn you stopped. */
+export const CONTINUE = 'Continue from where you stopped.';
+
+/** Continue: a turn you stopped goes on, as your next message in the agent's own conversation
+ *  (a Lead's request, or its 1:1 chat). */
+export function continueAgent(agentId: string): boolean {
+  const a = store.agentMap.get(agentId);
+  return !!a && sendChat(a.role === 'lead' ? (a.thread ?? 'lead') : `agent:${a.id}`, CONTINUE);
+}
+
 /** Send now: stop the agent's current turn, so that it reads your oldest queued message at once. */
 export async function sendQueuedNow(agentId: string) {
   const undo = noteStop(agentId);
@@ -221,23 +249,45 @@ export async function closeRequest(thread: string): Promise<boolean> {
   // Review comments its composer held and did not send stay on their diff: a request that is
   // no tab any more holds none (`waitingRequest`), and its thread name is never given again.
   ui.draftRequests = ui.draftRequests.filter((d) => d.thread !== thread);
+  // Its composer's draft goes too, also the copy kept across a restart.
+  forgetDraft(draftSlot(store.workspace?.id, thread));
   if (ui.request === thread) ui.openRequest((list[i + 1] ?? list[i - 1])?.thread ?? 'lead');
   await store.resync(); // its messages moved out of the thread without events
   return true;
 }
 
+/** By plan: the toast that says why its last merge was refused for its checks. */
+const refusedToast = new Map<string, number>();
+
+/** The core's words as a sentence of a toast: its first letter a capital. */
+const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 /** Merge a done plan into your checked-out branch. When that is not the branch the plan started
  *  from, nothing is merged yet: a toast says what the merge would bring and offers to go on
  *  (`into` is then the branch you confirmed). A merge that stops says why and how to go on: a
  *  conflict can go to an agent, and checks that failed on the merge result can be skipped
- *  (`unchecked`). */
+ *  (`unchecked`). One merge of a plan at a time: a press while one is under way (the card, the
+ *  chip at the thread's end, the palette) does nothing. */
 export async function mergePlan(planId: string, into: string | null = null, unchecked = false) {
+  if (mergeUi.merging.includes(planId)) return;
+  mergeUi.merging = [...mergeUi.merging, planId];
+  try {
+    await mergePlanNow(planId, into, unchecked);
+  } finally {
+    mergeUi.merging = mergeUi.merging.filter((id) => id !== planId);
+  }
+}
+
+async function mergePlanNow(planId: string, into: string | null, unchecked: boolean) {
   const plan = store.planMap.get(planId);
+  const source = { kind: 'plan' as const, id: planId };
+  // A toast that offers to go on goes once that is no longer true (a merge made, the cause gone).
+  const offerGone = (refusal: MergeRefusal) => () => mergeOfferGone(refusal, !!store.mergeOf(planId), mergeUi.states[mergeKey(source)]);
   if (!into) {
     const warning = await attempt('merge the plan', () => api.mergePlanWarning(planId));
     if (warning === undefined) return;
     if (warning) {
-      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, warning.target, unchecked) };
+      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, warning.target, unchecked), gone: offerGone('branch') };
       toast({ kind: 'attention', title: `Merge into ${warning.target}?`, body: warning.message, action: goOn, duration: 0 });
       return;
     }
@@ -250,18 +300,22 @@ export async function mergePlan(planId: string, into: string | null = null, unch
     toastsUpdate(id, { kind: 'success', title: `Merged into ${target}`, body: `${plan?.summary ?? 'Plan'} · ${shortSha(sha)}` });
   } catch (e) {
     // What stands in the way, as the core reads it now. Your branch did not move.
-    const source = { kind: 'plan' as const, id: planId };
     const state = await loadMergeState(source);
     if (state?.conflicts.length) {
       const body = `${state.target} and this plan both changed ${fileList(state.conflicts)}. ${state.target} is unchanged. An agent can resolve it in Codly’s own worktree, or you can do it yourself: see the plan’s card.`;
-      const resolve = { label: 'Have an agent resolve it', run: () => void resolveMergeConflict(source, null, into) };
+      const resolve = { label: 'Have an agent resolve it', run: () => void resolveMergeConflict(source, null, into), gone: offerGone('conflict') };
       toastsUpdate(id, { kind: 'error', title: `Couldn’t merge into ${state.target}`, body, action: resolve, duration: 0 });
       return;
     }
     if (state?.failed_checks.length || state?.checks_not_run) {
-      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true) };
+      const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true), gone: offerGone('checks') };
       // Checks that failed can go to an agent, like a conflict: the button is on the plan's card.
-      const body = state.failed_checks.length ? `${msg(e)}. An agent can fix it: see the plan’s card.` : msg(e);
+      const why = sentence(msg(e));
+      const body = state.failed_checks.length ? `${why}. An agent can fix it: see the plan’s card.` : why;
+      // One refusal on screen per plan: a press again puts its answer in the place of the last one.
+      const last = refusedToast.get(planId);
+      if (last !== undefined && last !== id) toasts.dismiss(last);
+      refusedToast.set(planId, id);
       toastsUpdate(id, { kind: 'error', title: `Not merged into ${state.target}`, body, action: goOn, duration: 0 });
       return;
     }
@@ -332,27 +386,47 @@ export async function pushCheckout(): Promise<RepoSync | undefined> {
   }
 }
 
-export async function resolveApproval(approvalId: string, choice: ApprovalChoice, message: string | null = null, answers: unknown = null) {
+/** Returns whether the core took the answer. */
+export async function resolveApproval(approvalId: string, choice: ApprovalChoice, message: string | null = null, answers: unknown = null): Promise<boolean> {
   const sent = await attempt('send your answer', async () => {
     await api.resolveApproval(approvalId, { choice, message, answers: (answers ?? null) as never });
     return true;
   });
-  // The core keeps no copy of an answer: the closed card and the history show it from here.
-  const said = sent ? answerText(answers) : null;
-  if (said) yourAnswers.set(approvalId, said);
+  if (!sent) return false;
+  // The core puts the answer to a question on record (`approval_said`); until that row is here,
+  // the closed card and the history show it from this. A row that came while the answer was on
+  // its way is the core's word and stays. What goes with a plan accepted with your changes is
+  // the plan, not an answer.
+  const question = store.approvals.find((a) => a.id === approvalId)?.subject.kind === 'question';
+  const said = question ? answerText(answers) : null;
+  if (said && !yourAnswers.has(approvalId)) yourAnswers.set(approvalId, said);
+  yourChoice.set(approvalId, choice);
+  return true;
 }
 
-/** One answer for the requests that share a card: the same command asked by several agents. */
-export async function resolveApprovals(approvalIds: string[], choice: ApprovalChoice, message: string | null = null, answers: unknown = null) {
-  await Promise.all(approvalIds.map((id) => resolveApproval(id, choice, message, answers)));
+/** One answer for the requests that share a card: the same command asked by several agents.
+ *  Returns whether the core took it for every one of them. */
+export async function resolveApprovals(approvalIds: string[], choice: ApprovalChoice, message: string | null = null, answers: unknown = null): Promise<boolean> {
+  const sent = await Promise.all(approvalIds.map((id) => resolveApproval(id, choice, message, answers)));
+  return sent.every(Boolean);
 }
 
-/** "Always allow in this repo": save the rule a card offers. The core answers the requests it covers. */
+/** The section of Settings that lists the rules saved from cards. */
+const RULES = 'approval-rules';
+
+/** "Always allow in this repo": save the rule a card offers. The core answers the requests it covers.
+ *  Its toast opens Settings where you remove the rule: two sentences and a link, so it stays as
+ *  long as an 'attention' toast does. */
 export async function saveApprovalRule(approvalId: string, kind: ApprovalRuleKind) {
   const rule = await attempt('save the rule', () => api.addApprovalRule(approvalId, kind));
   if (!rule) return;
   const what = rule.kind === 'prefix' ? `commands that start with ${rule.command}` : rule.command;
-  toast({ kind: 'success', title: 'Codly will not ask about this again', body: `In this repo: ${what}. Remove the rule in Settings → Safety.` });
+  toast({
+    kind: 'attention',
+    title: 'Codly will not ask about this again',
+    body: `In this repo: ${what}. Remove the rule in ${safetyPlace(RULES)}.`,
+    action: { label: 'Open Settings', run: () => openSettings(safetyLink(RULES)) },
+  });
 }
 
 // What a command answers belongs to the office it was sent from: after a switch it is dropped
@@ -394,30 +468,67 @@ export function waitingRequest(key: string): string | null {
 /**
  * Send back: every comment you wrote on a diff, as one message (file, line, the quoted line, the
  * comment). A task that is not done gets them through the core: its worker reads them and Codly
- * checks the work again. Merged or finished work (a done task, a whole plan) opens a new request
- * with the comments ready to send: they stay on the diff until you send that message, and Send
- * back again goes to the same request (with the comments as they are now). `paths`: the diff's
- * files, in order. True: the comments went to the worker, or are in a request's composer; false:
- * nothing happened (nothing to send, or the core refused and a toast says why).
+ * checks the work again; they leave the diff when the core took them, and one you wrote or
+ * changed while the call was on its way stays. On a plan that still runs, each comment goes
+ * where its file's work is (`splitByTask`): the comments on the files of a task still at work go
+ * to that task's worker, one call per task; a call that is refused keeps its comments on the diff.
+ * The comments on finished work (a done task, the files no task at work takes) go where
+ * `finishedWorkGoes` says: on a finished plan that is not in your branch they become one more task
+ * of the plan, through the core (`sendToPlan`); while the plan runs they stay on the diff until it
+ * is done, and you press Send back again then (a plan that does not move on without you, its
+ * tasks left blocked or failed, sends them to a new request instead); on merged work, on a
+ * finished plan whose pull request is open or merged as last read (`planPrState`), or when the
+ * core says they belong there (it read the pull request since)
+ * a new request opens with them ready to send: they stay on the diff until you send that message,
+ * and Send back again goes to the same request (with the comments as they are now). A 1:1 agent's
+ * diff sends them as one message of yours in its 1:1 chat. `paths`: the diff's files, in order.
+ * True: comments went to an agent, or are in a request's composer; false: nothing happened
+ * (nothing to send, the plan still runs, or the core refused and a toast says why).
  */
-export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, paths: string[]): Promise<boolean> {
+export async function sendBack(target: { kind: 'plan' | 'task' | 'agent'; id: string }, paths: string[]): Promise<boolean> {
   const key = reviewKey(target);
   const list = review.comments(key);
+  if (!list.length) return false;
+  if (target.kind === 'agent') return sendToAgent(target.id, key, list, paths);
   const task = target.kind === 'task' ? (store.taskMap.get(target.id) ?? null) : null;
   const planId = target.kind === 'plan' ? target.id : task?.plan_id;
   const plan = (planId && store.planMap.get(planId)) || null;
-  if (!list.length || (!task && !plan)) return false;
+  if (!task && !plan) return false;
   if (task && task.status !== 'done') {
-    const ws = store.workspace?.id;
-    const t = await attempt('send your comments back', () => api.sendBackTask(task.id, reviewMessage(list, paths)), 'your comments stay on the diff.');
+    const t = await sendToTask(task, key, list, paths, 'send your comments back');
     if (!t) return false;
-    if (store.isOpen(ws)) store.upsertTask(t);
-    review.clear(key);
-    const who = (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
-    toast({ kind: 'success', title: `${t.key} sent back to ${who}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
+    toast({ kind: 'success', title: `${t.key} sent back to ${workerName(t)}`, body: list.length === 1 ? '1 comment' : `${list.length} comments` });
     return true;
   }
-  const text = followUpRequest(task, plan, list, paths);
+  let rest = list;
+  const goes = finishedWorkGoes(plan, store.tasks, planPrState(plan));
+  const parts: SplitPart[] = [];
+  if (!task && plan) {
+    const split = splitByTask(list, planOwners(store.tasks.filter((t) => t.plan_id === plan.id)));
+    if (split.tasks.length) {
+      for (const { task: owner, comments } of split.tasks) {
+        const t = await sendToTask(owner, key, comments, paths, `send your comments back to ${owner.key}`);
+        if (t) parts.push({ n: comments.length, who: workerName(t), key: t.key });
+      }
+      if (parts.length) toast({ kind: 'success', title: 'Comments sent back', body: splitWords(parts, split.rest.length, true, goes) });
+      if (!split.rest.length) return parts.length > 0;
+      rest = split.rest;
+    }
+  }
+  // The plan still runs: its finished work takes comments once the plan is done (`send_back_plan`).
+  // Nothing sends them by itself then: you press Send back again.
+  if (goes === 'wait') {
+    if (!parts.length) {
+      const them = rest.length === 1 ? 'it' : 'them';
+      toast({ kind: 'info', title: 'Your comments stay here for now', body: `The plan is still running. When it is done, press Send back again and it makes ${them} one more task of it.` });
+    }
+    return parts.length > 0;
+  }
+  if (goes === 'plan' && plan) {
+    const went = await sendToPlan(plan, key, rest, paths);
+    if (went !== 'new request') return went === 'sent' || parts.length > 0;
+  }
+  const text = followUpRequest(task, plan, rest, paths);
   const waiting = waitingRequest(key);
   const was = review.handedTo(key)?.text ?? null;
   if (!waiting) {
@@ -425,7 +536,78 @@ export async function sendBack(target: { kind: 'plan' | 'task'; id: string }, pa
     ui.seedComposer(ui.request, text);
   } else if (was === text) ui.openRequest(waiting);
   else ui.seedComposer(waiting, text, false, was);
-  review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text, comments: list });
+  review.hand(key, { office: store.workspace?.id ?? null, thread: ui.request, text, comments: rest });
+  return true;
+}
+
+const workerName = (t: Task) => (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
+
+/** `sent` went out: those of them still on the diff as they were leave it. A comment written or
+ *  changed while the call was on its way is not in what went: it stays. */
+function dropSent(key: string, sent: ReviewComment[]) {
+  const now = review.comments(key);
+  for (const c of sent) if (now.some((n) => sameSpot(n, c) && n.text === c.text)) review.comment(key, c, '');
+  if (!review.comments(key).length) review.clear(key);
+}
+
+/** Review comments to a task that is not done, through the core (`what`: the toast's words if it
+ *  refuses). The task as the core left it; undefined when it refused. */
+async function sendToTask(task: Task, key: string, comments: ReviewComment[], paths: string[], what: string): Promise<Task | undefined> {
+  const ws = store.workspace?.id;
+  const t = await attempt(what, () => api.sendBackTask(task.id, reviewMessage(comments, paths)), 'your comments stay on the diff.');
+  if (!t) return undefined;
+  if (store.isOpen(ws)) store.upsertTask(t);
+  dropSent(key, comments);
+  return t;
+}
+
+/** How the core's refusal ends when the comments belong in a new request: the plan has a pull
+ *  request, or is merged since (crates/codly-core/src/orchestrator/review_back.rs, `NEW_REQUEST`;
+ *  a test ties the two, and the demo's, together). */
+export const NEW_REQUEST = 'ask for the changes in a new request';
+
+/** The state of a plan's pull request as Codly last read it; null when none is on record, or it is not read yet. */
+export const planPrState = (plan: Plan | null) => (plan && prUi.opened[prKey({ kind: 'plan', id: plan.id })]?.state) ?? null;
+
+/** Review comments on a finished plan's work, through the core: one more task of the plan, for
+ *  the agent that wrote their files. They leave the diff when the core took them (`dropSent`).
+ *  'new request': the core says they belong in one; a toast says why it refused otherwise. */
+async function sendToPlan(plan: Plan, key: string, comments: ReviewComment[], paths: string[]): Promise<'sent' | 'refused' | 'new request'> {
+  const ws = store.workspace?.id;
+  const files = [...new Set(comments.map((c) => c.path))];
+  let t: Task;
+  try {
+    t = await api.sendBackPlan(plan.id, reviewMessage(comments, paths), files);
+  } catch (e) {
+    if (msg(e).includes(NEW_REQUEST)) return 'new request';
+    toast({ kind: 'error', title: 'Couldn’t send your comments back', body: `${msg(e)} — your comments stay on the diff.` });
+    return 'refused';
+  }
+  if (store.isOpen(ws)) store.upsertTask(t);
+  dropSent(key, comments);
+  const n = comments.length === 1 ? '1 comment' : `${comments.length} comments`;
+  toast({ kind: 'success', title: `${n} sent back: task ${t.key}${t.assignee ? ` for ${workerName(t)}` : ''}, in this request` });
+  return 'sent';
+}
+
+/** Review comments on a 1:1 agent's diff: one message of yours in its 1:1 chat, the call a chat
+ *  message makes (it waits its turn while the agent works). They leave the diff when the core
+ *  took the message; a refused one is not left in the chat: the comments stay on the diff. */
+async function sendToAgent(agentId: string, key: string, list: ReviewComment[], paths: string[]): Promise<boolean> {
+  const agent = store.agentMap.get(agentId);
+  if (!agent) return false;
+  const thread = `agent:${agentId}`;
+  const text = reviewMessage(list, paths);
+  const id = store.queueOutgoing(thread, text, wallNow());
+  try {
+    await api.sendChat(thread, text);
+  } catch (e) {
+    store.dropOutgoing(id);
+    toast({ kind: 'error', title: `Couldn’t send your comments to ${agent.name}`, body: `${msg(e)} — your comments stay on the diff.` });
+    return false;
+  }
+  dropSent(key, list);
+  toast({ kind: 'success', title: `${list.length === 1 ? '1 comment' : `${list.length} comments`} sent to ${agent.name}` });
   return true;
 }
 
@@ -486,13 +668,25 @@ export async function createTask(title: string, goal = '') {
  *  resumes the conversation on the new model with its next message. The core's refusal says
  *  what to do (stop its turn first, wait for its task, pick a model the CLI knows). */
 export async function setAgentModel(agent: Agent, model: string | null): Promise<boolean> {
-  const label = model ?? 'the default model';
+  const why = await switchAgentModel(agent, model);
+  if (why) toast({ kind: 'error', title: `Couldn’t switch ${agent.name} to ${model ?? 'the default model'}`, body: why });
+  return !why;
+}
+
+/** `setAgentModel` for the model dialog, which says the reason itself: null when the agent
+ *  switched, else why not. An answer with no agent in it is a failure too, never a silent one. */
+export async function switchAgentModel(agent: Agent, model: string | null): Promise<string | null> {
   const ws = store.workspace?.id;
-  const a = await attempt(`switch ${agent.name} to ${label}`, () => api.setAgentModel(agent.id, model));
-  if (!a) return false;
+  let a: Agent | null;
+  try {
+    a = await api.setAgentModel(agent.id, model);
+  } catch (e) {
+    return msg(e);
+  }
+  if (!a) return 'Codly got no answer for the switch. Try again.';
   if (store.isOpen(ws)) store.upsertAgent(a);
-  toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${label}` });
-  return true;
+  toast({ kind: 'success', title: `${a.name} switched`, body: `${PROVIDER_LABEL[a.provider]} · ${model ?? 'the default model'}` });
+  return null;
 }
 
 /** Give an agent another model (a new Legend's bigger context window; you clicked it): a 1:1
@@ -567,13 +761,23 @@ export function stopThreadByEsc(thread: string): boolean {
   return true;
 }
 
+/** Kill: the process ends now. The agent's conversation says that you killed it. Not while it is in your terminal: Codly runs nothing for it then (state/killRule.ts). */
 export async function stopAgent(agentId: string) {
+  const refused = killRefusal(store.agentMap.get(agentId)?.name ?? 'This agent', takeovers.has(agentId));
+  if (refused) {
+    toast({ kind: 'info', title: refused });
+    return;
+  }
   const undo = noteStop(agentId);
+  const unkill = noteKill(agentId, wallNow());
   const ok = await attempt('stop the agent', async () => {
     await api.stopAgent(agentId);
     return true;
   });
-  if (!ok) undo();
+  if (!ok) {
+    undo();
+    unkill();
+  }
 }
 
 /** Let go an agent you hired: it joins the ghosts by the memory archive (you can bring it back). */

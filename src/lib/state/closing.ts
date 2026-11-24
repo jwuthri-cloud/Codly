@@ -8,6 +8,7 @@
 import type { Plan } from '../gen/Plan';
 import { closeRequest } from './actions';
 import { loadPullRequest, prKey, prUi } from './pullRequest.svelte';
+import { busy } from './queue';
 import { requests, type Request } from './requests.svelte';
 import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
@@ -50,7 +51,9 @@ export type CloseQuestion = { ask: string; detail: string; yes: 'Close' | 'Disca
  * merged), and a pull request is not touched. The request's tab is where that work is merged
  * from, though: a close with finished work that is not merged (a finished plan, or the done
  * tasks of a plan that failed or was cancelled), or with a pull request still open, first says
- * what becomes of them. A new request with nothing asked in it has no work: it asks only when
+ * what becomes of them. So does a close while its Lead works (in a turn, or starting or thinking
+ * before it) or before it answered your newest message: the close stops it and drops the answer.
+ * A new request with nothing asked in it has no work: it asks only when
  * its composer holds text you did not send.
  */
 export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
@@ -59,6 +62,12 @@ export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
     return holdsText ? { ask: 'Discard this draft?', detail: 'What you wrote in it was not sent: it goes with the tab.', yes: 'Discard' } : null;
   }
   if (r.phase === 'running') return { ask: 'Cancel its running plan and close?', detail: 'Its unfinished tasks are cancelled. Nothing is deleted: what is done so far stays on its branch.', yes: 'Close' };
+  // Its Lead is in a turn (planning, answering), or starts or thinks before the first turn of a
+  // request with no plan yet: the close stops it mid-way. (With a plan, what becomes of the plan is asked below.)
+  const planless = !store.plans.some((p) => (p.thread || 'lead') === r.thread);
+  if (busy(r.thread) || (r.phase === 'planning' && planless)) return { ask: 'The Lead is working: close and stop it?', detail: 'Its turn stops where it is. Nothing is deleted.', yes: 'Close' };
+  // Your newest message has no answer yet and can still get one (the Lead has not begun its turn): the close drops it.
+  if (unanswered(r.thread)) return { ask: 'Your message has no answer yet: close anyway?', detail: 'The Lead stops before it answers. Nothing is deleted.', yes: 'Close' };
   const finished = store.plans.filter((p) => (p.thread || 'lead') === r.thread && p.status === 'done');
   const pr = (planId: string) => prKey({ kind: 'plan', id: planId });
   // Their pull requests, from Codly's own record (no network), where nothing read them yet.
@@ -84,6 +93,22 @@ export async function closeQuestion(r: Request): Promise<CloseQuestion | null> {
   return open
     ? { ask: 'Not merged yet: its branch and pull request stay. Close?', detail: `${kept} ${stays}`, yes: 'Close' }
     : { ask: 'Not merged yet: its branch stays. Close?', detail: kept, yes: 'Close' };
+}
+
+/**
+ * An answer to your newest message can still come: it is on its way (not "Not sent"), or it is
+ * the thread's newest message and no turn of its Lead began after it or took it in. A turn that
+ * took it and ended with no reply (it failed, or you stopped it) leaves nothing to wait for.
+ */
+function unanswered(thread: string): boolean {
+  if (store.outbox.some((o) => o.thread === thread && !o.error)) return true;
+  let last: { author: string; ts: number } | null = null;
+  for (const c of store.chats) if (c.thread === thread && (!last || c.ts >= last.ts)) last = c;
+  if (last?.author !== 'user') return false;
+  const at = last.ts;
+  const lead = store.threadAgent(thread);
+  const turns = lead ? (store.live[lead.id]?.turns ?? []) : [];
+  return !turns.some((t) => t.start >= at || !!t.steers?.some((s) => s.ts >= at));
 }
 
 /** Close a request's tab, with Undo for a few seconds. You land on the tab beside it (a new request if it was the only one). */

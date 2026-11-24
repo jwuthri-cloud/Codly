@@ -1,13 +1,17 @@
 // three.js (and with it the character builder) must not be in the startup graph: the office is
 // loaded lazily (shell/OfficeLayer.svelte) and so is the portrait drawing (office/portraits). A
 // static import anywhere on the way from main.ts undoes both without any error, so this test
-// walks the static imports of the app's sources and fails with the offending chain.
+// walks the static imports of every .ts and .svelte source and fails with the offending chain.
+// It reads imports however they are written: over several lines, with comments in the list.
 import { describe, expect, it } from 'vitest';
 
 const sources = import.meta.glob<string>(['/src/**/*.ts', '/src/**/*.svelte', '!/src/**/__tests__/**'], { query: '?raw', import: 'default', eager: true });
 
-/** `import x from '…'`, `import '…'`, `export … from '…'`; not `import type`, not `import('…')`. */
-const STATIC = /^\s*(?:import|export)\s+(?!type\b)(?:[^'";]*?\sfrom\s+)?['"]([^'"]+)['"]/gm;
+/**
+ * `import x from '…'`, `import '…'`, `export … from '…'`; not `import type`, not `import('…')`.
+ * What it imports is names, braces, commas and comments, over as many lines as it takes.
+ */
+const STATIC = /^\s*(?:import|export)\s+(?!type\b)(?:(?:[\w$*{},\s]|\/\/[^\n]*|\/\*[\s\S]*?\*\/)*?\bfrom\s+)?['"]([^'"]+)['"]/gm;
 
 function resolve(from: string, spec: string): string | null {
   if (spec === 'three' || spec.startsWith('three/')) return 'three';
@@ -47,6 +51,24 @@ function chainToThree(entry: string): string | null {
 }
 
 describe('the startup graph', () => {
+  it('the pattern sees every way to write a static import, and nothing else', () => {
+    const source = [
+      "import a from './a';",
+      "import './b.css';",
+      "export { c } from './c';",
+      "export * from './d';",
+      'import {',
+      '  e, // the e\'s; see f',
+      '  /* g */ type G,',
+      "} from './e';",
+      "import x,\n  { y as z } from './f';",
+      "import type { T } from './t';",
+      "const lazy = import('./lazy');",
+      "export const s = './not-an-import';",
+    ].join('\n');
+    expect([...source.matchAll(STATIC)].map((m) => m[1])).toEqual(['./a', './b.css', './c', './d', './e', './f']);
+  });
+
   it('the walk works: it sees the app, follows .svelte and .svelte.ts imports, and finds three.js in the office', () => {
     const graph = startupGraph('/src/main.ts');
     expect(graph.has('/src/App.svelte')).toBe(true);

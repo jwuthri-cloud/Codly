@@ -15,4 +15,10 @@ kind: string,
 /**
  * The command, or what the helper was asked to do.
  */
-description: string, };
+description: string, 
+/**
+ * When the first list that named it came (ms), as the adapter saw it: later lists keep
+ * it, so a row read again from a later list still knows how long the work runs. None
+ * from an adapter that does not say it, and in rows written before it was kept.
+ */
+started_at?: number, };

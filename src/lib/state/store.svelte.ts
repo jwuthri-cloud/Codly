@@ -17,7 +17,7 @@
 //   the open office is merged into what is held (`mergeSnapshot`), and a thread loads what is
 //   older on request (`loadEarlier`).
 import { SvelteMap } from 'svelte/reactivity';
-import { api, getTransport, type UiBatch } from '../api';
+import { api, getTransport, LinkLost, type UiBatch } from '../api';
 import type { Agent } from '../gen/Agent';
 import type { WorkspaceTeam } from '../gen/WorkspaceTeam';
 import type { RequestPrefs } from '../gen/RequestPrefs';
@@ -45,8 +45,10 @@ import type { Provider } from '../gen/Provider';
 import { targetLabel, type Provenance } from '../util/labels';
 import { transferredOut } from '../util/transfer';
 import { accounts } from './accounts.svelte';
+import { recordSaid } from './answers';
 import { controls } from './control.svelte';
-import { withBackgroundTasks, withMcpServer, type BackgroundWork, type McpServer } from './session';
+import { isDown, Reconnect, type Link } from './connection';
+import { withBackgroundTasks, withKnownStarts, withMcpServer, type BackgroundWork, type McpServer } from './session';
 
 export const LOG_CAP = 5000;
 const SEG_CAP = 1500;
@@ -58,10 +60,14 @@ export const FILE_CAP = 2000;
 const SEARCH_OUTPUT_CAP = 16_000;
 /** Events asked for at once when a thread loads earlier history. */
 const EARLIER_PAGE = 500;
+/** The decisions held (the newest). */
+const DECISION_CAP = 400;
+/** The events held for one agent whose history was loaded further back (the newest). */
+export const DEEP_CAP = 20_000;
 /** Event kinds whose derivation is no part of one agent's own state (`AgentLive`). */
 const SHARED_KINDS: ReadonlySet<EventKind['type']> = new Set([
   'control_changed', 'text_delta', 'reasoning_delta', 'tool_output', 'rate_limit', 'decision',
-  'approval_requested', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged',
+  'approval_requested', 'approval_said', 'approval_resolved', 'committed', 'verified', 'reviewed', 'merged',
 ]);
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -326,8 +332,13 @@ class CodlyStore {
   revBy = new SvelteMap<string, number>();
   /** Per agent: counts the batches that held an ephemeral event (a delta) of that agent. */
   liveRevBy = new SvelteMap<string, number>();
+  /** Per agent: counts the batches that opened or ended a stream of that agent (a message or a
+   *  thought being written). A list of rows reads this, not `liveRevBy`: a new word is not news to it. */
+  openRevBy = new SvelteMap<string, number>();
   /** Bumped when state is replaced wholesale (snapshot): imperative consumers re-derive. */
   epoch = $state(0);
+  /** Counts the snapshots taken in: each starts `revBy` again, so with it a version never repeats. */
+  snapshots = 0;
 
   // log-derived (plain; see rules above)
   events: EventRow[] = [];
@@ -357,8 +368,10 @@ class CodlyStore {
   /** Per thread loaded further back: how far (an event id), and for which owner. */
   private paged = new Map<string, { owner: string | null; before: number }>();
   /** Per agent whose thread was loaded further back: all its persisted events held, oldest
-   *  first. Kept apart from the capped log, so its history is never trimmed or capped again. */
+   *  first. Kept apart from the capped log, and capped at `DEEP_CAP` of its own (`capDeep`). */
   private deep = new Map<string, EventRow[]>();
+  /** Per agent whose oldest held events left to `DEEP_CAP`: the first event its state is built from now. */
+  private builtFrom = new Map<string, number>();
   /** Agents with transcript rows dropped by a cap: their threads can load them again. */
   private clipped = new Set<string>();
   /** The status a task had before the `task_changed` being applied (null: first seen), for listeners. */
@@ -370,6 +383,10 @@ class CodlyStore {
   private owned = new Set<object>();
   /** The agents whose file map got an entry in the batch being applied. */
   private touched = new Set<AgentLive>();
+  /** Per stream: the words of the batch being applied, joined to its text at the batch's end. */
+  private words = new Map<string, string[]>();
+  /** The agents with a stream that opened or ended in the batch being applied. */
+  private opened = new Set<string>();
 
   // lookups
   agentMap = $derived(new Map(this.agents.map((a) => [a.id, a])));
@@ -381,6 +398,29 @@ class CodlyStore {
   pendingApprovals = $derived(this.approvals.filter((a) => a.status === 'pending'));
 
   // ───────────── connection ─────────────
+
+  /** A browser page's link to `codly serve` (always "connected" in the app's window). */
+  link = $state.raw<Link>({ kind: 'connected' });
+  /** This page cannot reach Codly, or Codly answered that its core could not start: the
+   *  polls that call it skip. */
+  get offline(): boolean {
+    return isDown(this.link) || this.error !== null;
+  }
+  /** Counts the times this page lost `codly serve` and reached it again. */
+  private rejoins = $state(0);
+  /** -1 while the core is not up (it starts, or its start failed); else a number that changes
+   *  each time a browser page reaches `codly serve` again after it had lost it (App.svelte asks
+   *  then what waits for Resume: a restart of the server holds the work again). */
+  get coreSession(): number {
+    return this.ready && !this.error ? this.rejoins : -1;
+  }
+  private reconnect = new Reconnect(
+    () => this.connect(),
+    (l) => {
+      if (l.kind === 'back') this.rejoins++;
+      this.link = l;
+    },
+  );
 
   async connect(): Promise<void> {
     const gen = ++this.gen;
@@ -399,19 +439,27 @@ class CodlyStore {
       this.syncing = false;
       this.ready = true;
       this.error = null;
+      this.reconnect.reached();
       if (early.length) this.applyEvents(early);
     } catch (e) {
       if (gen !== this.gen) return; // a newer resync owns the state
-      this.error = e instanceof Error ? e.message : String(e);
       this.syncing = false;
       this.ready = true;
+      if (e instanceof LinkLost) this.reconnect.lost(e.signedOut);
+      else this.reconnect.reached(); // Codly answered, with why it could not start
+      // What is held stays on screen while the bar says the link is down.
+      if (e instanceof LinkLost && this.held !== undefined) return;
+      this.error = e instanceof Error ? e.message : String(e);
     }
   }
 
   /** "Try again" after a failed start. The app keeps a failed core start, so connecting again
    *  would only repeat its error: ask the app to start the core again first. */
   async retry(): Promise<void> {
-    this.ready = false; // the loading screen, while the core starts
+    // In a browser that lost `codly serve`, its core is not the problem: open the stream again.
+    if (isDown(this.link)) return this.reconnect.tryNow();
+    // The loading screen while the core starts, unless an office is on screen: it stays readable.
+    if (this.held === undefined) this.ready = false;
     try {
       await api.retryCore();
     } catch (e) {
@@ -425,6 +473,9 @@ class CodlyStore {
   /** Fresh snapshot (workspace switch, long hidden period). Old-generation batches are ignored.
    *  For the office already open it is merged into what is held: nothing older is dropped. */
   resync = () => this.connect();
+
+  /** "Try now" on the bar: one try at once (the waits go on if it fails). */
+  tryNow = () => this.reconnect.tryNow();
 
   private onBatch(gen: number, b: UiBatch) {
     if (gen !== this.gen) return;
@@ -544,6 +595,7 @@ class CodlyStore {
     this.earlier = {};
     this.paged = new Map();
     this.deep = new Map();
+    this.builtFrom = new Map();
     this.clipped = new Set();
     this.live = {};
     this.streams = new Map();
@@ -600,6 +652,7 @@ class CodlyStore {
       this.tell(this.listeners, ev);
     }
     this.settle();
+    for (const aid of stored) if ((this.deep.get(aid)?.length ?? 0) > DEEP_CAP * 1.2) this.capDeep(aid);
     if (this.events.length > LOG_CAP * 1.2) {
       this.events = this.events.slice(-LOG_CAP);
       this.forgetEarlier(); // what left the log is earlier history now
@@ -608,6 +661,8 @@ class CodlyStore {
     if (live) this.liveRev++;
     this.bump(this.revBy, stored);
     this.bump(this.liveRevBy, lively);
+    this.bump(this.openRevBy, this.opened);
+    this.opened.clear();
   }
 
   private bump(by: SvelteMap<string, number>, agents: Iterable<string>) {
@@ -618,14 +673,17 @@ class CodlyStore {
    *  reads an entry that is not there is told of every change of the map (that is how a
    *  `SvelteMap` lets it see the entry appear), so it would run again on every agent's batch. */
   private seedRevs(id: string) {
-    for (const by of [this.revBy, this.liveRevBy]) if (!by.has(id)) by.set(id, 0);
+    for (const by of [this.revBy, this.liveRevBy, this.openRevBy]) if (!by.has(id)) by.set(id, 0);
   }
 
   /** A snapshot took the place of what the per-agent versions count: they start again, and
    *  every panel that read one runs again. */
   private resetRevs() {
+    this.snapshots++;
     this.revBy.clear();
     this.liveRevBy.clear();
+    this.openRevBy.clear();
+    this.opened.clear();
     for (const a of this.agents) this.seedRevs(a.id);
   }
 
@@ -649,10 +707,16 @@ class CodlyStore {
     return l.files;
   }
 
-  /** The end of a batch: the file maps that got an entry are held to their cap. */
+  /** The end of a batch: the file maps that got an entry are held to their cap, and the words
+   *  of the batch join the streams they belong to (a stream that ended meanwhile takes none). */
   private settle() {
     for (const l of this.touched) l.files = capFiles(l.files);
     this.touched.clear();
+    for (const [id, words] of this.words) {
+      const s = this.streams.get(id);
+      if (s) this.streams.set(id, { ...s, text: s.text + words.join('') });
+    }
+    this.words.clear();
   }
 
   // ───────────── entities (only from live events, never from snapshot replay) ─────────────
@@ -778,7 +842,15 @@ class CodlyStore {
 
   /** What the agent was writing (a reply, a thought) will not be finished: it leaves the screen. */
   private dropStreams(aid: string | null) {
-    for (const [id, s] of this.streams) if (s.agentId === aid) this.streams.delete(id);
+    for (const [id, s] of this.streams) if (s.agentId === aid) this.endStream(id);
+  }
+
+  /** A message or a thought is no longer being written: whole, or never to be. */
+  private endStream(id: string) {
+    const s = this.streams.get(id);
+    if (!s) return;
+    this.streams.delete(id);
+    this.opened.add(s.agentId);
   }
 
   /** The newest `n` of an agent's rows. An agent whose history was loaded on request keeps all. */
@@ -808,7 +880,10 @@ class CodlyStore {
   private addMark(tid: string, mark: TaskMark) {
     const marks = this.taskMarks[tid] ?? [];
     if (marks.some((m) => m.eventId === mark.eventId)) return;
-    this.taskMarks = { ...this.taskMarks, [tid]: [...marks, mark].sort((a, b) => a.eventId - b.eventId) };
+    // A new list (a card holds the old one), with the mark at its place: mostly the end.
+    let at = marks.length;
+    while (at > 0 && marks[at - 1].eventId > mark.eventId) at--;
+    this.taskMarks = { ...this.taskMarks, [tid]: [...marks.slice(0, at), mark, ...marks.slice(at)] };
   }
 
   /** An answered approval still has a place to show: its task's request, or its agent's thread.
@@ -859,8 +934,11 @@ class CodlyStore {
           const t = l.turns;
           if (t.length && t[t.length - 1].end == null) l.turns = [...t.slice(0, -1), { ...t[t.length - 1], end: ev.ts }];
           // A turn that was interrupted or that failed takes its helpers with it: none of them
-          // is at work any more.
-          if ((k.status === 'interrupted' || k.status === 'failed') && l.subagents.some((s) => s.status === 'running'))
+          // is at work any more. Not so for a Claude agent: a helper in the background works on
+          // after such a turn, and its adapter says which helpers ended with the turn (a
+          // `sub_agent` row "stopped" for each, right after this one), so its rows decide.
+          const cli = (aid ? this.agentMap.get(aid)?.provider : undefined) ?? l.session?.provider;
+          if (cli !== 'claude' && (k.status === 'interrupted' || k.status === 'failed') && l.subagents.some((s) => s.status === 'running'))
             l.subagents = l.subagents.map((s) => (s.status === 'running' ? { ...s, status: 'stopped', ts: ev.ts } : s));
           // A helper that is still at work when a turn ends normally goes on after it: a call of its
           // own stays open until its result comes, or until the helper is over (`sub_agent`, `exited`).
@@ -898,14 +976,18 @@ class CodlyStore {
         // A delta that was on its way while a snapshot was taken: its item is already whole in
         // the snapshot, and a stream opened now would never close (two rows with one key).
         if ((kind === 'text' ? l?.messages : l?.reasoning)?.some((x) => x.itemId === k.item_id)) break;
-        const prev = this.streams.get(k.item_id);
-        this.streams.set(k.item_id, {
-          itemId: k.item_id, agentId: aid, kind, text: (prev?.text ?? '') + k.text, ts: prev?.ts ?? ev.ts,
-        });
+        // The words are joined once, at the end of the batch (`settle`): not the whole text again for each word.
+        if (!this.streams.has(k.item_id)) {
+          this.streams.set(k.item_id, { itemId: k.item_id, agentId: aid, kind, text: '', ts: ev.ts });
+          this.opened.add(aid);
+        }
+        const words = this.words.get(k.item_id);
+        if (words) words.push(k.text);
+        else this.words.set(k.item_id, [k.text]);
         break;
       }
       case 'message':
-        if (!into) this.streams.delete(k.item_id);
+        if (!into) this.endStream(k.item_id);
         if (l && aid) {
           const m: AgentMsg = { itemId: k.item_id, agentId: aid, text: k.text, phase: k.phase, ts: ev.ts, eventId: ev.id };
           const list = this.msgsOf(l);
@@ -916,7 +998,7 @@ class CodlyStore {
         }
         break;
       case 'reasoning':
-        if (!into) this.streams.delete(k.item_id);
+        if (!into) this.endStream(k.item_id);
         if (l && aid) l.reasoning = this.tail(aid, [...l.reasoning.filter((x) => x.itemId !== k.item_id), { itemId: k.item_id, text: k.text, ts: ev.ts, eventId: ev.id }], 60);
         break;
       case 'tool_started': {
@@ -1041,7 +1123,7 @@ class CodlyStore {
         if (l) l.mcp = withMcpServer(l.mcp, k, ev.run_id, ev.ts);
         break;
       case 'background_tasks':
-        if (l) l.background = withBackgroundTasks(l.background, k, ev.run_id, ev.ts);
+        if (l) l.background = withBackgroundTasks(l.background, k, ev.run_id, ev.ts, replay);
         break;
       case 'error':
         if (l) l.errors = [...l.errors, { message: k.message, fatal: k.fatal, ts: ev.ts }].slice(-20);
@@ -1060,6 +1142,10 @@ class CodlyStore {
         // was asked, then as it was answered.
         if (replay) this.pastApproval(k.approval);
         break;
+      case 'approval_said':
+        // What you said with an answer: the closed card and the history show it from here.
+        recordSaid(k);
+        break;
       case 'approval_resolved': {
         const a = replay ? this.approvals.find((x) => x.id === k.approval_id) : undefined;
         if (a) this.approvals = upsert(this.approvals, { ...a, status: k.status, decided_by: k.by });
@@ -1070,10 +1156,9 @@ class CodlyStore {
           const d = k.detail as Record<string, unknown>;
           if (typeof d.plan_id === 'string') this.planMerges = { ...this.planMerges, [d.plan_id]: { sha: String(d.sha ?? ''), ts: ev.ts } };
         }
-        this.decisions = [
-          ...this.decisions,
-          { id: k.id, type: k.decision_type, method: k.method, summary: k.summary, detail: k.detail, ts: ev.ts, agentId: aid, taskId: ev.task_id, eventId: ev.id },
-        ].slice(-400);
+        // In place, as the log: no panel holds the list itself (they read it again on `rev`).
+        this.decisions.push({ id: k.id, type: k.decision_type, method: k.method, summary: k.summary, detail: k.detail, ts: ev.ts, agentId: aid, taskId: ev.task_id, eventId: ev.id });
+        if (this.decisions.length > DECISION_CAP * 1.2) this.decisions.splice(0, this.decisions.length - DECISION_CAP);
         break;
       case 'committed':
       case 'verified':
@@ -1144,10 +1229,12 @@ class CodlyStore {
     const epoch = this.epoch;
     const owner = this.threadAgent(thread)?.id ?? null;
     // From now on the owner's events are kept apart from the capped log: what is loaded for
-    // it is never trimmed away again.
+    // it leaves only past its own cap (`capDeep`).
     if (owner && !this.deep.has(owner)) this.deep.set(owner, this.events.filter((e) => e.agent_id === owner));
     const at = this.paged.get(thread);
     let before = at && at.owner === owner ? at.before : this.floor();
+    /** Where the owner's state starts: the pages go back that far at least (see `capDeep`). */
+    const from = (owner ? this.builtFrom.get(owner) : undefined) ?? this.origin;
     let more = true;
     const rows: EventRow[] = [];
     this.setEarlier(thread, { more, loading: true });
@@ -1158,7 +1245,7 @@ class CodlyStore {
         rows.push(...page);
         more = page.length >= EARLIER_PAGE;
         if (page.length) before = page[page.length - 1].id;
-      } while (more && before > this.origin);
+      } while (more && before > from);
     } catch (e) {
       if (epoch === this.epoch) this.setEarlier(thread, { more: true, loading: false });
       throw e;
@@ -1166,6 +1253,25 @@ class CodlyStore {
     this.paged.set(thread, { owner, before });
     this.absorb(thread, owner, rows.reverse());
     this.setEarlier(thread, { more, loading: false });
+  }
+
+  /**
+   * An agent whose history was loaded back holds its newest `DEEP_CAP` events: the oldest go,
+   * its state is built again from the rest, and its threads can load them again ("Load
+   * earlier", one page from where it holds now). Not while one of its threads loads a page:
+   * that page lands next to what is held, and the next batch caps.
+   */
+  private capDeep(aid: string) {
+    const threads = [...this.paged].filter(([, at]) => at.owner === aid).map(([thread]) => thread);
+    if (threads.some((t) => this.earlier[t]?.loading)) return;
+    const kept = (this.deep.get(aid) ?? []).slice(-DEEP_CAP);
+    this.deep.set(aid, kept);
+    this.builtFrom.set(aid, kept[0].id);
+    for (const t of threads) {
+      this.paged.set(t, { owner: aid, before: kept[0].id });
+      this.setEarlier(t, { more: true, loading: false });
+    }
+    this.rebuild(aid, []);
   }
 
   /** Older rows of a thread, oldest first: its messages, its approvals and its tasks' finished
@@ -1178,35 +1284,48 @@ class CodlyStore {
       const mark = markOf(ev);
       if (k.type === 'chat' && k.message.thread === thread && !known.has(k.message.id)) said.push(k.message);
       else if (k.type === 'approval_requested') this.pastApproval(k.approval); // the core sends it as it ended
+      else if (k.type === 'approval_said') recordSaid(k);
       else if (mark && ev.task_id) this.addMark(ev.task_id, mark);
     }
     if (said.length) this.chats = [...this.chats, ...said].sort((a, b) => a.ts - b.ts);
-    if (owner) {
-      const all = new Map<number, EventRow>();
-      for (const ev of this.beside) if (ev.agent_id === owner) all.set(ev.id, ev);
-      for (const ev of rows) if (ev.agent_id === owner) all.set(ev.id, ev);
-      for (const ev of this.deep.get(owner) ?? []) all.set(ev.id, ev);
-      const log = [...all.values()].sort((a, b) => a.id - b.id);
-      this.deep.set(owner, log);
-      const prev = this.live[owner];
-      const l = emptyLive(prev?.statusSince ?? Date.now());
-      this.owned.clear();
-      for (const ev of log) this.derive(ev, true, l);
-      this.settle();
-      // Output that only came as live chunks is in no stored row.
-      if (prev?.lastOutput && (!l.lastOutput || l.lastOutput.ts <= prev.lastOutput.ts)) l.lastOutput = prev.lastOutput;
-      // Nor is a server that stands where an earlier run recorded it. The servers as held are
-      // the newest there are: older rows add nothing to them.
-      if (prev) l.mcp = prev.mcp;
-      this.live[owner] = l;
-      this.bump(this.revBy, [owner]);
-    }
+    if (owner) this.rebuild(owner, rows);
     this.rev++;
+  }
+
+  /** The agent's state built again from all of its events held: the ones beside the log, `rows`
+   *  (older ones just loaded) and its own events held apart (`deep`). */
+  private rebuild(owner: string, rows: EventRow[]) {
+    const all = new Map<number, EventRow>();
+    for (const ev of this.beside) if (ev.agent_id === owner) all.set(ev.id, ev);
+    for (const ev of rows) if (ev.agent_id === owner) all.set(ev.id, ev);
+    for (const ev of this.deep.get(owner) ?? []) all.set(ev.id, ev);
+    const log = [...all.values()].sort((a, b) => a.id - b.id);
+    this.deep.set(owner, log);
+    const prev = this.live[owner];
+    const l = emptyLive(prev?.statusSince ?? Date.now());
+    this.owned.clear();
+    for (const ev of log) this.derive(ev, true, l);
+    this.settle();
+    // Output that only came as live chunks is in no stored row.
+    if (prev?.lastOutput && (!l.lastOutput || l.lastOutput.ts <= prev.lastOutput.ts)) l.lastOutput = prev.lastOutput;
+    // Nor is a server that stands where an earlier run recorded it. The servers as held are
+    // the newest there are: older rows add nothing to them.
+    if (prev) l.mcp = prev.mcp;
+    // A start of background work that the window saw is known, though the rows do not say it.
+    if (prev) l.background = withKnownStarts(l.background, prev.background);
+    this.live[owner] = l;
+    this.bump(this.revBy, [owner]);
   }
 
   // ───────────── queries used by several panels ─────────────
 
-  /** What the agent is doing right now (open tool call first, then the agent's own activity). */
+  /**
+   * What the agent is doing right now: its own open tool call first, then the agent's own
+   * activity. A call of one of its helpers (`seg.parent`) is never the agent's own: while a turn
+   * of the agent runs and only such calls are open, it waits for its helper (`seg` null: the
+   * call is not the agent's); between turns it rests, also while a helper's calls set its state
+   * "working" or "thinking" (narrate.ts `turnRuns`: the same rule).
+   */
   now(agentId: string): { activity: ActivityKind; label: string; since: number; seg: Seg | null } | null {
     const a = this.agentMap.get(agentId);
     const l = this.live[agentId];
@@ -1215,17 +1334,27 @@ class CodlyStore {
       if (l) for (const i of Object.values(l.open)) if (l.segments[i] && (!open || l.segments[i].start > open.start)) open = l.segments[i];
       return { activity: 'await_approval', label: open?.label ?? '', since: l?.statusSince ?? a.updated_at, seg: open };
     }
+    let helping: Seg | null = null;
     if (l) {
       let best: Seg | null = null;
       for (const i of Object.values(l.open)) {
         const s = l.segments[i];
-        if (s && (!best || s.start > best.start)) best = s;
+        if (!s) continue;
+        if (s.parent == null) {
+          if (!best || s.start > best.start) best = s;
+        } else if (!helping || s.start > helping.start) helping = s;
       }
       if (best) return { activity: best.activity, label: best.label, since: best.start, seg: best };
     }
     if (!a) return null;
     for (const s of this.streams.values())
       if (s.agentId === agentId) return { activity: s.kind === 'text' ? 'replying' : 'thinking', label: '', since: s.ts, seg: null };
+    const turnRuns = l?.turn ? l.turn.endedAt == null : a.status === 'working' || a.status === 'thinking' || a.status === 'starting';
+    if (helping && turnRuns) {
+      const parent = helping.parent;
+      return { activity: 'delegate', label: l?.subagents.find((h) => h.callId === parent)?.description ?? '', since: helping.start, seg: null };
+    }
+    if (!turnRuns && a.status !== 'starting') return null;
     if (a.activity && a.activity !== 'idle' && a.status !== 'idle' && a.status !== 'done' && a.status !== 'offline')
       return { activity: a.activity, label: a.activity_label ?? '', since: l?.statusSince ?? a.updated_at, seg: null };
     if (a.status === 'thinking' || a.status === 'starting') return { activity: 'thinking', label: '', since: l?.statusSince ?? a.updated_at, seg: null };

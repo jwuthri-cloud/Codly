@@ -4,7 +4,8 @@
 
 import type { WatchdogSettings } from '../gen/WatchdogSettings';
 
-type Limit = { key: keyof WatchdogSettings; title: string; body: string; choices: number[] };
+/** `more`: the rest of a long text, behind "More about this" under `body`. */
+type Limit = { key: keyof WatchdogSettings; title: string; body: string; more?: string; choices: number[] };
 
 /** One row per limit, in the order the watchdog steps in. Each says in two short sentences
  *  when Codly marks, interrupts and stops (watchdog.rs: flagged at the limit, interrupted at
@@ -19,7 +20,8 @@ export const WATCHDOG_LIMITS: Limit[] = [
   {
     key: 'quiet_tool_secs',
     title: 'No output while a tool runs',
-    body: 'The limit for the same three steps while a command or another tool call is open. A build or a test suite can be silent for a long time.',
+    body: 'The limit for the same three steps while a tool call is open that gives no sign of life: a build or a test suite can be silent for a long time.',
+    more: 'A Claude agent’s commands, MCP tools and helpers say every 30 s that they still run, so the limit above counts for them.',
     choices: [0, 1800, 3600, 7200, 14400],
   },
   {

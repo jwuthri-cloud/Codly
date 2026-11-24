@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 
 use super::controls::LiveSwitch;
-use super::{Inner, Live, guard, lock, read};
+use super::{Inner, Live, guard, lock, read, row};
 use crate::adapters::{AgentCmd, AgentHandle, SessionMode, SpawnSpec, classify, claude};
 use crate::mcp::ToolCtx;
 use crate::model::*;
@@ -48,6 +48,11 @@ impl Inner {
         let Some(cli) = cli.filter(|c| c.path.is_some()) else { bail!("{} is not installed", provider.label()) };
         // What the folder itself would make the CLI load, and whether you trusted it (trust.rs).
         let repo_config = self.repo_config(req.workspace_id.as_deref(), &req.cwd, provider).await?;
+        // The folder has files for this CLI, and your trust is what keeps them out of this run.
+        // Claude Code alone starts that way: Codex keeps its own gate, and the other CLIs are
+        // not started. With "Use my own CLI setup" off no run loads them, trusted or not.
+        let without_folder_config =
+            provider == Provider::Claude && repo_config.has_files && !repo_config.project && self.settings().use_my_claude_setup;
         let account = match (&req.account, &req.session) {
             (Some(a), _) => Some(a.clone()),
             (None, SessionMode::Resume { .. }) => self.agent_account(&req.agent),
@@ -61,10 +66,11 @@ impl Inner {
             .or_else(|| cli.path.as_ref().map(PathBuf::from))
             .ok_or_else(|| anyhow!("{} binary not found", provider.label()))?;
         let (byok_key, byok_command) = self.byok_for(provider).await?;
-        // An ACP agent reports its session's cost as a running total. The adapter takes off what
-        // the session's earlier runs cost, so a resumed session is not counted a second time.
+        // An ACP agent reports its session's cost as a running total, and so does Claude Code
+        // where a result has no cost of the turn's own. The adapter takes off what the
+        // session's earlier runs cost, so a resumed session is not counted a second time.
         let session_cost_usd = match &req.session {
-            SessionMode::Resume { session_id } if !matches!(provider, Provider::Claude | Provider::Codex) => {
+            SessionMode::Resume { session_id } if provider != Provider::Codex => {
                 self.store.session_cost(&req.agent.id, session_id)?
             }
             _ => 0.0,
@@ -211,6 +217,8 @@ impl Inner {
             raw_log,
             byok_command,
             sandbox_shell: self.settings().claude_sandbox,
+            // What is left of your cost budget, as this run's own limit (breaker_run.rs).
+            max_budget_usd: self.run_budget(&run_id, &req.agent.name, provider),
         };
         // A panicking adapter (or a stub) must fail this run, not the caller's task.
         let fut = self.spawner.spawn(spec, self.events_tx.clone());
@@ -234,6 +242,12 @@ impl Inner {
                 Some(l) => {
                     l.handle = handle;
                     l.waited = l.starting.take().unwrap_or_default();
+                    // Quitting: `shutdown` told the runs to stop that were in the live table when
+                    // it began (it sets its flag, then reads the table). A run that came into the
+                    // table after that is told here, so it ends in order and not at the deadline.
+                    if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                        l.stopping = true;
+                    }
                     if l.stopping {
                         l.handle.send(AgentCmd::Shutdown); // stopped while it started
                     }
@@ -244,6 +258,19 @@ impl Inner {
         };
         if !ours {
             return Err(self.spawn_failed(&req.agent.id, &run_id, &token, anyhow!("{} exited during startup", provider.label())));
+        }
+        // Said once per run, when it has started: the agent sheet and the History show which
+        // runs worked without the folder's own configuration (a choice in Settings → Safety
+        // changes nothing for a run that is already up).
+        if without_folder_config {
+            let text = format!(
+                "Started without this folder's {} configuration (its settings, hooks and MCP servers): you have not trusted these files. See Settings → Safety.",
+                provider.label()
+            );
+            let notice = row(Some(&req.agent.id), req.task_id.as_deref(), Some(&run_id), EventKind::Notice { text });
+            if let Err(e) = self.emit(req.workspace_id.as_deref(), notice) {
+                tracing::warn!("run {run_id}: the notice about the folder's configuration was not recorded: {e}");
+            }
         }
         self.restore_permission_mode(&req.agent, req.role, req.read_only); // before the run's first prompt
         Ok(run_id)
@@ -452,21 +479,25 @@ impl Inner {
     /// or both with no restart (`switch_live_model`). The model request is recorded between
     /// turns and, for a named model, during one; for the CLI's default model it is recorded
     /// between turns only (part 2 of the 2.1.311 recordings, scenario 13) and is sent during
-    /// a turn all the same. The effort request is recorded between turns only, and is sent
-    /// only then. None = the switch needs the restart: another CLI, no live process, a new
-    /// effort while the agent works, an effort level Claude Code does not list, or no effort
-    /// for a session that has one (taking a level away is recorded only for a process that
-    /// started without one).
+    /// a turn all the same. The effort request: a new level, and no level for a session that
+    /// has one (`effortLevel: null` takes the level away at once and for the next turns,
+    /// "medium" after it, on a process started with `--effort low`, `high` or `max`: part 4 §4
+    /// and part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2 each; it is read back, as a
+    /// level is: `set_live_effort`). It is sent while a turn runs or prompts wait too: the CLI
+    /// takes both forms during a tool call of a turn, and its settings name the new level at
+    /// once (part 6 §12, `r8-effort-mid-turn-*`, n=2 each). None = the switch needs the
+    /// restart: another CLI, no live process, or an effort level Claude Code does not list.
     fn live_model_switch(&self, agent: &Agent, model: Option<&str>) -> Option<LiveSwitch> {
         let (name, effort) = classify::split_model_effort(model);
         let live = lock(&self.live);
         let l = live.get(&agent.id).filter(|l| l.provider == Provider::Claude && l.starting.is_none() && !l.stopping)?;
         let (name_now, effort_now) = classify::split_model_effort(l.model.as_deref());
-        if effort.is_none() && effort_now.is_some() {
-            return None;
-        }
-        let effort = effort.filter(|e| effort_now.as_ref() != Some(e));
-        if effort.as_ref().is_some_and(|e| !claude::EFFORT_LEVELS.contains(&e.as_str()) || l.turn_active || l.queued > 0) {
+        let effort = match effort {
+            None => effort_now.is_some().then_some(None),
+            Some(e) => (effort_now.as_ref() != Some(&e)).then_some(Some(e)),
+        };
+        let unknown = |e: &Option<String>| e.as_ref().is_some_and(|e| !claude::EFFORT_LEVELS.contains(&e.as_str()));
+        if effort.as_ref().is_some_and(unknown) {
             return None;
         }
         // The session's model has two names: the one the run was started with or last

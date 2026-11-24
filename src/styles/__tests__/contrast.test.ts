@@ -1,19 +1,18 @@
 // The secondary inks carry small text the user must read: times, the queue and status lines,
 // the model and permission labels, diff line numbers. WCAG AA asks 4.5:1 for such text. This
 // reads the real token values and computes the ratios, so a new value that looks fine but
-// measures 4.3:1 fails here.
+// measures 4.3:1 fails here. Pins the two theme blocks of src/styles/tokens.css, found by their
+// selectors whatever their spacing or line breaks.
 import { describe, expect, it } from 'vitest';
+import { cssBlock } from '../../lib/__tests__/support/source';
 import css from '../tokens.css?raw';
 
 type Rgb = [number, number, number];
 type Rgba = { rgb: Rgb; alpha: number };
 
-/** The declarations of the block that starts with `selector`. */
+/** The declarations of the rule for `selector`. */
 function block(selector: string): Map<string, string> {
-  const start = css.indexOf(`${selector} {`);
-  expect(start, selector).toBeGreaterThanOrEqual(0);
-  const body = css.slice(start, css.indexOf('\n}', start));
-  return new Map([...body.matchAll(/(--[\w-]+):\s*([^;]+);/g)].map((m): [string, string] => [m[1], m[2].trim()]));
+  return new Map([...cssBlock(css, selector).matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m): [string, string] => [m[1], m[2].trim()]));
 }
 
 function color(value: string): Rgba {
@@ -84,5 +83,18 @@ describe.each([
     const bg = solids[0][1];
     const ratios = [1, 2, 3, 4].map((n) => contrast(ink(n), bg));
     for (let i = 1; i < ratios.length; i++) expect(ratios[i - 1] / ratios[i]).toBeGreaterThanOrEqual(1.15);
+  });
+});
+
+// The pills over the office (search, crew, "Talk to the Lead") are --glass. The office keeps its
+// own hour, so in the night theme it can be a bright day scene: white is the worst case.
+describe('secondary text on the night glass', () => {
+  const t = block(':root, [data-theme="dark"]');
+  it.each([
+    ['a white scene', [255, 255, 255] as Rgb],
+    ['a black scene', [0, 0, 0] as Rgb],
+  ])('--ink-3 is readable on --glass over %s', (_scene, scene) => {
+    const bg = over(color(t.get('--glass')!), scene);
+    expect(contrast(color(t.get('--ink-3')!).rgb, bg)).toBeGreaterThanOrEqual(AA_TEXT);
   });
 });

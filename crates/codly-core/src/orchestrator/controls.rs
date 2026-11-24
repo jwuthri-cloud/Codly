@@ -87,8 +87,9 @@ pub(super) struct LiveSwitch {
     /// The name for `set_model` (`claude::DEFAULT_MODEL` for the CLI's own default). None: the
     /// model stays, only the effort changes.
     pub model: Option<String>,
-    /// The effort level to set. None: the session keeps its effort.
-    pub effort: Option<String>,
+    /// The effort level to set; Some(None) takes the session's level away (the CLI's default
+    /// then). None: the session keeps its effort.
+    pub effort: Option<Option<String>>,
     /// The effort the session works with now: what it started with, or its last live change.
     pub effort_now: Option<String>,
 }
@@ -429,6 +430,8 @@ impl Inner {
     pub(super) async fn session_answer_within(mut answer: mpsc::UnboundedReceiver<Result<Value, String>>, limit: Duration) -> Result<Value> {
         match tokio::time::timeout(limit, answer.recv()).await {
             Ok(Some(Ok(v))) => Ok(v),
+            // (the adapter's own refusal: nothing reached the CLI, so it is no answer of Claude Code)
+            Ok(Some(Err(e))) if e == crate::adapters::claude::NOT_RUNNING => bail!(e),
             Ok(Some(Err(e))) => bail!("Claude Code answered: {e}"),
             Ok(None) => bail!("the agent's process ended before it answered"),
             Err(_) => bail!("Claude Code did not answer within {} s", limit.as_secs()),
@@ -445,6 +448,7 @@ impl Inner {
     pub(super) async fn switch_live_model(&self, agent: &Agent, model: Option<&str>, switch: LiveSwitch) -> Result<Option<Agent>> {
         let id = agent.id.as_str();
         let (name, mut effort) = classify::split_model_effort(model);
+        let mid_turn = lock(&self.live).get(id).is_some_and(|l| l.turn_active);
         // The model the CLI's answer names: for its default model, the only name there is.
         let mut resolved = None;
         if let Some(ask) = &switch.model {
@@ -453,12 +457,12 @@ impl Inner {
         }
         let mut effort_kept = None;
         if let Some(level) = &switch.effort
-            && let Err(e) = self.set_live_effort(id, level).await
+            && let Err(e) = self.set_live_effort(id, level.as_deref(), switch.effort_now.as_deref()).await
         {
             if switch.model.is_none() {
-                // The request is recorded on a process that started with no `--effort`. Whether
-                // a process that started with one takes it is not: the restart always does.
-                tracing::info!("{} restarts for the thinking effort {level}: {e:#}", agent.name);
+                // The session kept the effort it had (it dropped the new level, or did not give
+                // its own up): a new process, started with the effort asked for, has it.
+                tracing::info!("{} restarts for the thinking effort {level:?}: {e:#}", agent.name);
                 return Ok(None);
             }
             effort = switch.effort_now.clone();
@@ -476,11 +480,15 @@ impl Inner {
             });
         }
         if let Some(level) = switch.effort.as_ref().filter(|_| effort_kept.is_none()) {
-            now.push(format!("thinking effort {level}"));
+            now.push(level.as_ref().map_or_else(|| "Claude Code's default thinking effort".to_string(), |level| format!("thinking effort {level}")));
         }
         // (Recorded: after a model switch the next request reads the conversation with no cached tokens.)
         let reads_again = if switch.model.is_some() { " Its next turn reads the whole conversation again with the new model." } else { "" };
-        let text = format!("{} now works with {}, in the same conversation: no restart was needed.{reads_again}", agent.name, now.join(" and "));
+        // (Not recorded: which effort the model requests left in a running turn carry. The
+        // CLI's settings name the new level at once: part 6 §12.)
+        let effort_changed = switch.effort.is_some() && effort_kept.is_none();
+        let running = if mid_turn && effort_changed { " Claude Code does not say whether the turn that runs already uses it." } else { "" };
+        let text = format!("{} now works with {}, in the same conversation: no restart was needed.{reads_again}{running}", agent.name, now.join(" and "));
         let ws = self.store.agent_workspace(id)?;
         self.chat(ws.as_deref(), &format!("agent:{id}"), "codly", &text, None)?;
         // The agent's row: the name the user picked; for the CLI's default, the model the CLI
@@ -495,16 +503,28 @@ impl Inner {
 
     /// Set the reasoning effort of a live Claude session, then read it back: Claude Code
     /// answers "success" also for a level it drops (recorded), and only its settings say what
-    /// the session works with.
-    async fn set_live_effort(&self, agent_id: &str, level: &str) -> Result<()> {
-        let answer = self.ask_session(agent_id, SessionRequest::Effort(level.to_string()))?;
+    /// the session works with. None takes the session's level away: the CLI's default for its
+    /// model follows, "medium" at once for every level recorded (a process started with `low`,
+    /// `high` or `max`: part 4 §4 and part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2
+    /// each). So that switch did not take only when the settings still name `before`, the
+    /// level the agent's row had, and that level is not the default one; any other answer is
+    /// the CLI's default for the model. That rule rests on recordings of one model (Haiku):
+    /// another model's default level is not recorded, and may not be "medium". The same holds
+    /// while a turn runs (part 6 §12, `r8-effort-mid-turn-null-*` and `-high-*`, n=2 each).
+    async fn set_live_effort(&self, agent_id: &str, level: Option<&str>, before: Option<&str>) -> Result<()> {
+        let answer = self.ask_session(agent_id, SessionRequest::Effort(level.map(str::to_owned)))?;
         Self::session_answer(answer).await?;
         let answer = self.ask_session(agent_id, SessionRequest::Settings)?;
         let settings = Self::session_answer(answer).await?;
-        match settings["applied"]["effort"].as_str() {
-            Some(applied) if applied == level => Ok(()),
-            Some(applied) => bail!("Claude Code did not take the effort level \"{level}\": it works with \"{applied}\""),
-            None => bail!("Claude Code did not say which effort level it works with"),
+        let applied = settings["applied"]["effort"].as_str();
+        match (level, applied) {
+            (Some(level), Some(applied)) if applied == level => Ok(()),
+            (Some(level), Some(applied)) => bail!("Claude Code did not take the effort level \"{level}\": it works with \"{applied}\""),
+            (Some(_), None) => bail!("Claude Code did not say which effort level it works with"),
+            (None, Some(applied)) if before == Some(applied) && applied != "medium" => {
+                bail!("Claude Code did not take the effort away: it still works with \"{applied}\"")
+            }
+            (None, _) => Ok(()),
         }
     }
 

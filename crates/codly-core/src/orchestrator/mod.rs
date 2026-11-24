@@ -85,6 +85,9 @@ pub mod trust;
 mod background;
 mod outside;
 pub mod resume;
+mod chat_search;
+mod review_back;
+mod new_conversation;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -261,14 +264,18 @@ struct Inner {
     /// use, and turns waiting for a free Lead slot.
     leads: Mutex<lead::LeadPool>,
     shutting_down: AtomicBool,
-    /// Agent names and task keys by id, for readable knowledge-graph entities.
+    /// How many runs the last `shutdown` gave up waiting for (`Core::runs_given_up`).
+    runs_given_up: std::sync::atomic::AtomicUsize,
+    /// Agent names and task keys by id, for readable knowledge-graph entities. An agent's goes
+    /// when it is let go, a task's when it is done or cancelled, or its plan is closed.
     labels: Mutex<HashMap<Id, String>>,
     /// Every sign-in of every installed CLI, in your order (`limits` empty: see `quota`).
     accounts: RwLock<Vec<AccountInfo>>,
     /// Latest usage windows per account id (from RateLimit events; persisted in `kv`).
     quota: Mutex<HashMap<String, Vec<UsageWindow>>>,
-    /// Artifact files already announced (absolute path + size), so rewrites re-announce.
-    artifacts_seen: Mutex<HashSet<String>>,
+    /// Artifact files already announced (absolute path + size), so rewrites re-announce, by the
+    /// agent whose event named them (None: an event of no agent). An agent's go when it is let go.
+    artifacts_seen: Mutex<HashMap<Option<Id>, HashSet<String>>>,
     /// Files to copy into `artifacts/` and announce (`ingest::copy_artifacts` does it, so a
     /// copy never runs on the ingest task).
     artifact_copies: mpsc::UnboundedSender<ingest::ArtifactCopy>,
@@ -343,6 +350,14 @@ fn row(agent: Option<&str>, task: Option<&str>, run: Option<&str>, kind: EventKi
         workspace_id: None,
         kind,
     }
+}
+
+/// The event of one chat message, not yet written (`Inner::chat`).
+fn chat_row(thread: &str, author: &str, text: &str, attachment: Option<Value>, item_id: Option<String>) -> EventRow {
+    let message = ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment, ts: now_ms(), item_id };
+    // Attributed to the agent of a 1:1 thread, or to the agent who wrote it (the Lead).
+    let agent = thread.strip_prefix("agent:").or((author != "user" && author != "codly").then_some(author));
+    row(agent, None, None, EventKind::Chat { message })
 }
 
 async fn capture_env() -> HashMap<String, String> {
@@ -469,10 +484,11 @@ impl Core {
             nudges: Mutex::new(HashMap::new()),
             leads: Mutex::new(lead::LeadPool::default()),
             shutting_down: AtomicBool::new(false),
+            runs_given_up: std::sync::atomic::AtomicUsize::new(0),
             labels: Mutex::new(HashMap::new()),
             accounts: RwLock::new(accounts),
             quota: Mutex::new(quota),
-            artifacts_seen: Mutex::new(HashSet::new()),
+            artifacts_seen: Mutex::new(HashMap::new()),
             artifact_copies,
             offers: Mutex::new(HashMap::new()),
             hiring_window_ms: std::sync::atomic::AtomicU64::new(0),
@@ -575,6 +591,7 @@ impl Core {
         s.team = team::normalize_team(std::mem::take(&mut s.team), &repo_members)?;
         let accounts_changed = self.inner.settings().accounts != s.accounts;
         let team_changed = self.inner.settings().team != s.team;
+        let to_always = self.inner.settings().resume_on_launch != ResumeOnLaunch::Always && s.resume_on_launch == ResumeOnLaunch::Always;
         self.inner.store.save_settings(&s)?;
         *write(&self.inner.settings) = s.clone();
         if accounts_changed {
@@ -582,6 +599,10 @@ impl Core {
         }
         if team_changed && let Some(ws) = self.inner.workspace() {
             self.inner.sync_team(&ws)?;
+        }
+        if to_always {
+            // The work that waits for your Resume since the restart goes on now (`resume.rs`).
+            self.inner.resume_for_always().await;
         }
         self.inner.kick();
         self.inner.permissions_changed().await;
@@ -651,7 +672,7 @@ impl Core {
     }
 
     pub async fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
-        self.inner.resolve_approval(approval_id, decision, "user")
+        self.inner.answer_approval(approval_id, decision).await
     }
 
     pub async fn interrupt_agent(&self, agent_id: &str) -> anyhow::Result<()> {
@@ -1029,9 +1050,20 @@ impl Core {
     /// and line, the quoted line, the comment) go to the agent that did the work. A worker
     /// still on the task reads them after its current turn and the gate checks its work again;
     /// a blocked or failed task starts again with them. Refused for a done task: its work is
-    /// merged, so the changes are a new request.
+    /// merged into its plan, so the comments go on the plan (`send_back_plan`), or, once the
+    /// plan is in your branch, into a new request.
     pub async fn send_back_task(&self, task_id: &str, comments: &str) -> anyhow::Result<Task> {
         self.inner.send_back_task(task_id, comments).await
+    }
+
+    /// Send back, from a finished plan's diff: your review comments (`comments`, the one
+    /// message Send back builds; `files`, the files they are on) become one more task of the
+    /// plan, for the agent that wrote most of those files. It works on the plan's own branch,
+    /// in the plan's worktree, and the plan finishes again with its checks; if it does not
+    /// finish, the plan is as it was. Refused for a plan that is merged, still running, or has
+    /// an open pull request: those comments are a new request, and the refusal says so.
+    pub async fn send_back_plan(&self, plan_id: &str, comments: &str, files: &[String]) -> anyhow::Result<Task> {
+        self.inner.send_back_plan(plan_id, comments, files).await
     }
 
     /// Merge the plan's integration branch into the user's current branch (refuses if the
@@ -1183,6 +1215,14 @@ impl Core {
     /// Stop every agent (shutdown ladder) and flush the store. Called on app exit.
     pub async fn shutdown(&self) {
         self.inner.shutdown().await
+    }
+
+    /// How many runs the last `shutdown` gave up waiting for: still up at the end of its grace,
+    /// so it killed the agent process groups that were left and marked those runs lost. For
+    /// diagnostics and tests (a fake agent that ignores the stop fails its own test, not the
+    /// tests beside it); 0 before any shutdown.
+    pub fn runs_given_up(&self) -> usize {
+        self.inner.runs_given_up.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -1346,11 +1386,7 @@ impl Inner {
     }
 
     fn post_chat(&self, ws: Option<&str>, thread: &str, author: &str, text: &str, attachment: Option<Value>, item_id: Option<String>) -> anyhow::Result<EventRow> {
-        let message =
-            ChatMessage { id: new_id(), thread: thread.into(), author: author.into(), text: text.into(), attachment, ts: now_ms(), item_id };
-        // Attributed to the agent of a 1:1 thread, or to the agent who wrote it (the Lead).
-        let agent = thread.strip_prefix("agent:").or((author != "user" && author != "codly").then_some(author));
-        self.emit(ws, row(agent, None, None, EventKind::Chat { message }))
+        self.emit(ws, chat_row(thread, author, text, attachment, item_id))
     }
 
     /// Load-modify-save one JSON projection row atomically (one store transaction), emitting
@@ -1393,7 +1429,8 @@ impl Inner {
     }
 
     fn update_task_as(&self, id: &str, by_user: bool, f: impl FnOnce(&mut Task) -> anyhow::Result<()>) -> anyhow::Result<Task> {
-        self.update_row(
+        let mut over = false;
+        let task = self.update_row(
             "task",
             id,
             |t: &mut Task| {
@@ -1402,11 +1439,16 @@ impl Inner {
                 if !by_user && t.status != was && matches!(was, TaskStatus::Cancelled | TaskStatus::Done | TaskStatus::Blocked) {
                     bail!("task {} is {}", t.key, store::enum_str(&was));
                 }
+                over = t.status != was && matches!(t.status, TaskStatus::Cancelled | TaskStatus::Done);
                 Ok(())
             },
             |t: &Task| row(t.assignee.as_deref(), Some(&t.id), None, EventKind::TaskChanged { task: t.clone() }),
             |t| t.updated_at = now_ms(),
-        )
+        )?;
+        if over {
+            lock(&self.labels).remove(id);
+        }
+        Ok(task)
     }
 
     /// Load-modify-save an agent atomically, like `update_row`. A change to `LIVE_AGENT_FIELDS`
@@ -1414,6 +1456,7 @@ impl Inner {
     /// adds no `agent_changed` row to the event log: the tool and usage events that caused it
     /// are already there, and a full Agent per tool call would bury them.
     fn update_agent(&self, id: &str, f: impl FnOnce(&mut Agent)) -> anyhow::Result<Agent> {
+        let mut let_go = false;
         let (agent, ev, ws) = self.store.tx(|tx| {
             let (json, ws): (String, Option<String>) = tx
                 .query_row("SELECT json, workspace_id FROM agent WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -1421,7 +1464,9 @@ impl Inner {
                 .ok_or_else(|| anyhow!("unknown agent {id}"))?;
             let mut a: Agent = serde_json::from_str(&json)?;
             let before = serde_json::to_value(&a)?;
+            let was_archived = a.archived;
             f(&mut a);
+            let_go = a.archived && !was_archived;
             refresh_career(&mut a);
             let after = serde_json::to_value(&a)?;
             if after == before {
@@ -1440,17 +1485,31 @@ impl Inner {
         if let Some(ev) = ev {
             self.publish(ws.as_deref(), &ev);
         }
+        if let_go {
+            self.forget_agent_in_memory(&agent.id);
+        }
         Ok(agent)
     }
 
     fn update_plan(&self, id: &str, f: impl FnOnce(&mut Plan) -> anyhow::Result<()>) -> anyhow::Result<Plan> {
-        self.update_row(
+        let closed = |p: &Plan| matches!(p.status, PlanStatus::Done | PlanStatus::Failed | PlanStatus::Cancelled);
+        let mut closes = false;
+        let plan = self.update_row(
             "plan",
             id,
-            f,
+            |p: &mut Plan| {
+                let was = closed(p);
+                f(p)?;
+                closes = !was && closed(p);
+                Ok(())
+            },
             |p: &Plan| row(None, None, None, EventKind::PlanChanged { plan: p.clone() }),
             |p| p.updated_at = now_ms(),
-        )
+        )?;
+        if closes {
+            self.forget_plan_in_memory(&plan.id);
+        }
+        Ok(plan)
     }
 
     fn task(&self, id: &str) -> anyhow::Result<Task> {

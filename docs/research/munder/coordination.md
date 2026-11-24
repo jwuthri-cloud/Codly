@@ -1,7 +1,7 @@
 # Munder Difflin: coordination layer (research notes)
 
 - **Subject:** Munder Difflin v0.4.6 (MIT, Electron), coordination only: hive, supervisor, task board, messaging, git worktrees, recovery, hiring.
-- **Source:** shallow clone at `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/research-src/munder-difflin`
+- **Source:** shallow clone at `/tmp/scratch/research-src/munder-difflin`
 - **Date:** 2026-10-25
 - **Method:** read-only. No scripts, binaries or npm commands were run. Line numbers are from that clone.
 - **Confidence markers:** "inferred" means my reading of the code, not a reproduced behaviour. "unverified" means the code's own comments say so, or I could not check it.

@@ -53,11 +53,11 @@
       </div>
     {:else}
       <!-- This list holds the finished messages of the thread. Home shows the same thread with what the agent writes and does right now, so it can have more. -->
-      <p class="empty">No messages with {agent.name} in this list yet. Your chat with {agent.name} is on Home.</p>
+      <p class="empty">No chat with {agent.name} yet. Write below; what {agent.name} does right now shows in its conversation on Home.</p>
     {/each}
   </div>
   <div class="reply">
-    <textarea class="input" rows="2" placeholder="Reply to {agent.name}…" bind:value={draft} onkeydown={onKey}></textarea>
+    <textarea class="input" rows="2" placeholder="Reply to {agent.name}…" aria-label="Reply to {agent.name}" bind:value={draft} onkeydown={onKey}></textarea>
     <button class="btn sm" disabled={!draft.trim()} onclick={send} aria-label="Send"><Icon name="send" size={13} />Send</button>
   </div>
 </div>

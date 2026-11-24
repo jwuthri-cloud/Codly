@@ -5,10 +5,13 @@
 -->
 <script lang="ts">
   import { isTauriApp } from '../lib/api';
+  import { blockers } from '../lib/state/blockers.svelte';
   import { diffstats } from '../lib/state/diffstats.svelte';
+  import { resumeWork } from '../lib/state/resumeWork.svelte';
   import { store } from '../lib/state/store.svelte';
   import { loadTakeovers } from '../lib/state/takeover.svelte';
   import { ui } from '../lib/state/ui.svelte';
+  import { RESUME_BAR_ROOM } from '../components/ResumeWork.svelte';
   import Home from '../home/Home.svelte';
   import PlanRoom from '../rooms/plan/PlanRoom.svelte';
   import ChangesRoom from '../rooms/changes/ChangesRoom.svelte';
@@ -18,6 +21,7 @@
   import Sheet from '../sheet/Sheet.svelte';
   import OfficeLayer from './OfficeLayer.svelte';
   import Rail from './Rail.svelte';
+  import SkipToConversation from './SkipToConversation.svelte';
   import TopBar from './TopBar.svelte';
 
   const tauri = isTauriApp();
@@ -25,7 +29,10 @@
   const loadMap = () => (mapLoading ??= import('../world/Neighbourhood.svelte'));
 
   const SHEET = 404;
-  const frameW = $derived(ui.width - (ui.railW + 28) - 14 - (ui.sheetOpen ? SHEET + 14 : 0));
+  /** The Ask me panel, open with no sheet: the column gives way to it as it does to the sheet, so it lies on none of the composer's or the tabs' buttons. */
+  const askMe = $derived(blockers.panel && !ui.sheetOpen);
+  const ASK_ME = 440;
+  const frameW = $derived(ui.width - (ui.railW + 28) - 14 - (ui.sheetOpen ? SHEET + 14 : askMe ? Math.min(ASK_ME, ui.width - 28) + 14 : 0));
   const narrow = $derived(frameW < 960);
 
   // The agents that are in your terminal ("Open in my terminal") are marked from the moment
@@ -57,7 +64,8 @@
   });
 </script>
 
-<div class="shell mode-{ui.mode} room-{ui.room}" class:focus={ui.focus} class:sheet={ui.sheetOpen} class:tauri style:--rail-w="{ui.railW}px">
+<div class="shell mode-{ui.mode} room-{ui.room}" class:focus={ui.focus} class:sheet={ui.sheetOpen} class:askme={askMe} class:resume={resumeWork.offer != null} class:tauri style:--rail-w="{ui.railW}px" style:--resume-room="{RESUME_BAR_ROOM}px">
+  <SkipToConversation />
   <div class="world-wrap" class:hidden={ui.mode === 'work' || ui.mode === 'map'}><OfficeLayer /></div>
   {#if ui.mode === 'map'}
     <!-- The neighbourhood (⌘3): its own three.js scene, loaded on first use. -->
@@ -112,10 +120,14 @@
 
   .frame { position: absolute; z-index: var(--z-ui); top: 0; bottom: 0; left: calc(var(--rail-w) + var(--gutter) * 2); right: var(--gutter); display: flex; flex-direction: column; pointer-events: none; transition: right var(--d-4) var(--spring), left var(--d-4) var(--spring); }
   .sheet .frame { right: calc(var(--sheet-w) + var(--gutter) * 2); }
+  /* The Ask me panel's width (home/AskMe.svelte), and the gutter between. */
+  .askme .frame { right: calc(min(440px, 100vw - 2 * var(--gutter)) + var(--gutter) * 2); }
   .frame > :global(*) { pointer-events: auto; }
   .tauri .frame :global(.top) { padding-left: 10px; }
   .stage { position: relative; flex: 1; min-height: 0; padding-bottom: var(--gutter); display: flex; flex-direction: column; pointer-events: none; }
   .stage > :global(.home), .stage > :global(.room) { pointer-events: auto; }
+  /* The Resume bar (components/ResumeWork.svelte) has room of its own under the top bar: the stage starts below it. */
+  .resume .stage { padding-top: var(--resume-room); }
   .room { flex: 1; min-height: 0; display: flex; flex-direction: column; border-radius: var(--r-xl); overflow: hidden; animation: room-in var(--d-4) var(--spring); background: var(--glass-strong); }
   .mode-work .room { background: var(--glass-solid); }
   @keyframes room-in { from { opacity: 0; transform: translateY(10px) scale(0.995); } to { opacity: 1; transform: none; } }

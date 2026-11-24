@@ -1,33 +1,49 @@
 <!--
   Live controls for one running agent. Enforced by the core (orchestrator/controls.rs), not by
   asking nicely: blocked tools are denied, a stop waits for the step to end, a steer note is an
-  ordinary prompt tagged as context, and kill ends the process.
+  ordinary prompt tagged as context, and kill ends the process. While the agent is in your
+  terminal Codly runs no process for it: Kill is off, says why, and "Give it back" stands beside
+  it (state/killRule.ts).
   A Claude agent also has a mode (a 1:1 agent: ask for edits, accept edits, plan first; kept
   for its next runs, so it shows when the agent is not running too) and a context reading. They
   reach its live session with no restart. "Compact now" is one row for a Codex agent and a 1:1
   Claude agent: its CLI sums up the conversation between turns (the core says when it may start).
   The button reads "Compacting…" while the request is on its way, and the row then shows what
   the live run last said about a compaction, with the time.
+  "Model" names the model and its thinking effort, also when the agent is not running, and
+  "Change…" opens the same dialog as the sheet's menu entry "Change model…".
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
+  import { ui } from '../lib/state/ui.svelte';
+  import { modelChangeOff, modelLine } from './modelRow';
   import type { ContextUsage } from '../lib/gen/ContextUsage';
   import type { PermissionMode } from '../lib/gen/PermissionMode';
   import { stopAgent } from '../lib/state/actions';
+  import { killRefusal } from '../lib/state/killRule';
+  import { giveBack, takeovers } from '../lib/state/takeover.svelte';
+  import { closeSession, takeoverKey } from '../rooms/terminal/sessions';
   import { PERMISSION_MODES, canCompact, compactAgent, compactHint, compactWait, compactionLine, contextLine, controls, readContext, resumeAgent, setBlockTools, setPermissionMode, steerAgent, stopAfterStep } from '../lib/state/control.svelte';
   import { steerHint } from '../lib/state/queue';
+  import { safeChoice } from '../lib/util/confirm';
   import { store } from '../lib/state/store.svelte';
   import { tokens } from '../lib/util/format';
   import Icon from '../components/Icon.svelte';
   import Section from '../components/Section.svelte';
+  import { agentLogKey, logWork } from './agentLog';
 
   interface Props {
     agent: Agent;
+    /** Its model in words, as the sheet's head names it. */
+    model: string;
   }
-  let { agent }: Props = $props();
+  let { agent, model }: Props = $props();
+  const modelOff = $derived(modelChangeOff(agent));
 
   const c = $derived(controls.of(agent.id));
   const live = $derived(!!agent.run_id && agent.status !== 'offline');
+  /** Why it cannot be killed (it is in your terminal), else null. Then the controls are this alone. */
+  const killOff = $derived(killRefusal(agent.name, takeovers.has(agent.id)));
   const isLead = $derived(agent.role === 'lead');
   const claude = $derived(agent.provider === 'claude');
   /** Only a 1:1 Claude agent has a mode to switch. */
@@ -58,10 +74,9 @@
   }
   const compactWhy = $derived(compactWait(agent));
   /** The sign at the button that a compaction happened: what the live run last said about one. */
-  const compacted = $derived.by(() => {
-    void store.revBy.get(agent.id);
-    return compactionLine(store.events, agent);
-  });
+  const compactedWork = logWork(() => compactionLine(store.events, agent));
+  // Only while its row shows, and again only when an event of this agent came (agentLog.ts).
+  const compacted = $derived(compactedWork.read((ui.sections.controls ?? true) && live && !killOff && canCompact(agent), agentLogKey(agent.id, agent.run_id)));
   async function compact() {
     if (compacting) return;
     compacting = true;
@@ -72,6 +87,14 @@
   let note = $state('');
   let sending = $state(false);
   let confirmKill = $state(false);
+  let killBtn: HTMLButtonElement | undefined = $state();
+  let givingBack = $state(false);
+  async function back() {
+    givingBack = true;
+    // The core closed the terminal it opened: its tab here goes with it (as AgentTakeover.svelte does).
+    if (await giveBack(agent.id)) await closeSession(takeoverKey(agent.id));
+    givingBack = false;
+  }
 
   async function send() {
     const text = note.trim();
@@ -89,6 +112,13 @@
 </script>
 
 <Section id="controls" title="Controls" {summary}>
+  <div class="row model">
+    <span class="txt">
+      <b>Model</b>
+      <span class="sub">{modelLine(model, agent.model)}{modelOff ? ` · ${modelOff}` : ''}</span>
+    </span>
+    <button class="btn sm" disabled={modelOff != null} data-tip={modelOff} onclick={() => (ui.modelDialog = { provider: agent.provider, agentId: agent.id })}>Change…</button>
+  </div>
   {#if hasMode}
     <label class="row mode">
       <span class="txt">
@@ -100,7 +130,14 @@
       </select>
     </label>
   {/if}
-  {#if !live}
+  {#if killOff}
+    <!-- A take-over ends the run: this shows whenever the agent is in your terminal, with or without one. -->
+    <div class="kill-off">
+      <button class="btn sm danger" disabled aria-describedby="kill-off-{agent.id}"><Icon name="stop" size={12} />Kill agent…</button>
+      <button class="btn sm" disabled={givingBack} onclick={back}>Give it back</button>
+      <span class="sub" id="kill-off-{agent.id}">{killOff}</span>
+    </div>
+  {:else if !live}
     <p class="small">{agent.name} isn’t running. {hasMode ? 'The other controls' : 'Controls'} appear while it has a live process.</p>
   {:else}
     <div class="ctl">
@@ -171,10 +208,10 @@
         <div class="kill-confirm">
           <span>Kill {agent.name}? The process ends now; its worktree is kept.</span>
           <button class="btn sm danger" onclick={() => { confirmKill = false; stopAgent(agent.id); }}>Kill</button>
-          <button class="btn sm ghost" onclick={() => (confirmKill = false)}>Keep</button>
+          <button class="btn sm ghost" use:safeChoice={{ keep: () => (confirmKill = false), back: () => killBtn }} onclick={() => (confirmKill = false)}>Keep</button>
         </div>
       {:else}
-        <button class="btn sm danger kill" onclick={() => (confirmKill = true)}><Icon name="stop" size={12} />Kill agent…</button>
+        <button class="btn sm danger kill" bind:this={killBtn} onclick={() => (confirmKill = true)}><Icon name="stop" size={12} />Kill agent…</button>
       {/if}
     </div>
   {/if}
@@ -184,7 +221,7 @@
   .small { font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .ctl { display: flex; flex-direction: column; gap: 14px; }
   .row { display: flex; align-items: center; gap: 12px; }
-  .mode { margin-bottom: 14px; }
+  .mode, .model { margin-bottom: 14px; }
   .field { width: 150px; flex: none; font-size: var(--t-sm); }
   .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .txt b, .steer b { font-weight: var(--w-med); font-size: var(--t-md); color: var(--ink-1); }
@@ -199,6 +236,8 @@
   .steer-foot { display: flex; align-items: flex-end; gap: 10px; }
   .steer-foot .sub { flex: 1; }
   .kill { align-self: flex-start; }
+  .kill-off { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .kill-off .sub { flex-basis: 100%; }
   .kill-confirm { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-radius: var(--r-md); background: var(--bad-soft); font-size: var(--t-sm); }
   .kill-confirm span { flex: 1; }
   @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }

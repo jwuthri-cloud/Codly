@@ -12,8 +12,8 @@ import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 import { parseDiff, type DiffFile } from '../util/diff';
 import {
-  discardWords, editorPlace, fileAnchor, fileMark, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
-  inTurn, linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewBarWords, reviewMessage, turnReadKey, withComment, type ReviewComment,
+  discardWords, editorPlace, fileAnchor, fileMark, finishedWorkGoes, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
+  inTurn, linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewBarWords, reviewMessage, sendBackBarWords, turnReadKey, withComment, writerOnTeam, type ReviewComment,
 } from '../util/review';
 
 const A = `diff --git a/src/a.ts b/src/a.ts
@@ -165,6 +165,62 @@ describe('what the review bar says', () => {
     expect(reviewBarWords(3, null, null)).toBe('This work is finished: Send back opens a new request with your comments, ready to send.');
     expect(reviewBarWords(1, null, 1)).toBe('It is in a new request, ready to send, and stays here until you send its message. Send back opens that request.');
     expect(reviewBarWords(2, null, 2)).toBe('They are in a new request, ready to send, and stay here until you send its message. Send back opens that request.');
+  });
+
+  it('says where Send back takes them: a task at work, a running plan, a finished plan, a merged plan', () => {
+    const plan = { id: 'p1', status: 'done', merged_sha: null, kept: false } as Plan;
+    const tasks = [{ plan_id: 'p1', status: 'done' }, { plan_id: 'p1', status: 'running' }] as Task[];
+    const running = finishedWorkGoes({ ...plan, status: 'running' }, tasks, null);
+    const finished = finishedWorkGoes(plan, tasks, null);
+    const merged = finishedWorkGoes({ ...plan, merged_sha: 'abc' }, tasks, null);
+    const others = [finishedWorkGoes({ ...plan, kept: true }, tasks, null), finishedWorkGoes({ ...plan, status: 'failed' }, tasks, null), finishedWorkGoes(null, tasks, null)];
+    expect([running, finished, merged, ...others]).toEqual(['wait', 'plan', 'request', 'request', 'request', 'request']);
+    // A running plan that does not move on without you (each task left blocked or failed): a new request, as before.
+    const stuck = [{ plan_id: 'p1', status: 'done' }, { plan_id: 'p1', status: 'blocked' }, { plan_id: 'p2', status: 'running' }] as Task[];
+    expect(finishedWorkGoes({ ...plan, status: 'running' }, stuck, null)).toBe('request');
+    // Every task done, the plan about to finish, or merging its work: it waits.
+    expect(finishedWorkGoes({ ...plan, status: 'running' }, [{ plan_id: 'p1', status: 'done' }] as Task[], null)).toBe('wait');
+    expect(finishedWorkGoes({ ...plan, status: 'integrating' }, stuck, null)).toBe('wait');
+    // A task at work: its worker gets them, whatever the plan.
+    expect(sendBackBarWords(2, 'Ana', running, null, true)).toBe('Send back gives them to Ana; Codly checks the work again after the changes.');
+    expect(sendBackBarWords(2, null, running, null, true)).toBe('This plan is still running, and nothing is sent yet: when it is done, press Send back and it makes them one more task of it, for the agent that wrote these files.');
+    expect(sendBackBarWords(1, null, finished, null, true)).toBe('Send back makes it one more task of this plan, for the agent that wrote these files.');
+    expect(sendBackBarWords(3, null, finished, null, true)).toBe('Send back makes them one more task of this plan, for the agent that wrote these files.');
+    // Merged: the words of a new request, as before.
+    expect(sendBackBarWords(1, null, merged, null, true)).toBe(reviewBarWords(1, null, null));
+    expect(sendBackBarWords(2, null, merged, 2, true)).toBe(reviewBarWords(2, null, 2));
+    // A finished plan whose comments the core put in a request (it has a pull request): that request.
+    expect(sendBackBarWords(2, null, finished, 1, true)).toBe(reviewBarWords(2, null, 1));
+  });
+
+  it('says before the press that a finished plan with a pull request opens a new request', () => {
+    const plan = { id: 'p1', status: 'done', merged_sha: null, kept: false } as Plan;
+    const tasks = [{ plan_id: 'p1', status: 'done' }] as Task[];
+    expect([finishedWorkGoes(plan, tasks, 'open'), finishedWorkGoes(plan, tasks, 'merged'), finishedWorkGoes(plan, tasks, 'closed')]).toEqual(['pull request', 'pull request', 'plan']);
+    // A pull request of a plan that still runs changes nothing yet: it waits.
+    expect(finishedWorkGoes({ ...plan, status: 'running' }, tasks, 'open')).toBe('wait');
+    expect(sendBackBarWords(1, null, 'pull request', null, true)).toBe('Send back opens a new request: this plan has a pull request.');
+    // Once a request holds them, the bar speaks of that request.
+    expect(sendBackBarWords(2, null, 'pull request', 2, true)).toBe(reviewBarWords(2, null, 2));
+  });
+
+  it('names the agent that wrote the files only while it is on the team', () => {
+    const plan = { id: 'p1', status: 'done', integration_branch: 'codly/p1' } as Plan;
+    expect(sendBackBarWords(1, null, 'plan', null, false)).toBe('Send back makes it one more task of this plan, for an agent of the team.');
+    expect(sendBackBarWords(2, null, 'wait', null, false)).toBe('This plan is still running, and nothing is sent yet: when it is done, press Send back and it makes them one more task of it, for an agent of the team.');
+    const t1 = { id: 't1', plan_id: 'p1', status: 'done', assignee: 'ana', branch: 'codly/t1' } as Task;
+    const t2 = { id: 't2', plan_id: 'p1', status: 'done', assignee: 'bo', branch: 'codly/t2' } as Task;
+    const review1 = { id: 't3', plan_id: 'p1', status: 'done', assignee: 'cy', branch: 'codly/p1' } as Task;
+    const owners = new Map([['a.ts', t1], ['b.ts', t2], ['c.ts', t2], ['d.ts', review1]]);
+    const on = (team: string[]) => (id: string) => team.includes(id);
+    const at = (...paths: string[]) => paths.map((path) => ({ path, line: null, side: null, quote: null, text: 'x' }));
+    // Bo wrote two of the three files; two comments on one file count once.
+    expect(writerOnTeam(at('a.ts', 'b.ts', 'c.ts', 'c.ts'), owners, plan, on(['bo']))).toBe(true);
+    expect(writerOnTeam(at('a.ts', 'b.ts', 'c.ts'), owners, plan, on(['ana']))).toBe(false);
+    // A task on the plan's own branch (an earlier review) is not who wrote the file.
+    expect(writerOnTeam(at('d.ts'), owners, plan, on(['cy']))).toBe(false);
+    // A file no task wrote.
+    expect(writerOnTeam(at('e.ts'), owners, plan, on(['ana', 'bo']))).toBe(false);
   });
 
   it('after Send back, a comment written or changed since is counted apart: it is not in the request yet', () => {

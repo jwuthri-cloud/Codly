@@ -24,8 +24,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{Notify, mpsc};
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn sh(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -42,8 +63,12 @@ fn temp_repo(root: &Path) -> PathBuf {
 }
 
 fn claude() -> CliInfo {
+    cli(Provider::Claude)
+}
+
+fn cli(provider: Provider) -> CliInfo {
     CliInfo {
-        provider: Provider::Claude,
+        provider,
         path: Some("/usr/bin/true".into()),
         version: Some("fake".into()),
         logged_in: Some(true),
@@ -51,7 +76,7 @@ fn claude() -> CliInfo {
         plan: None,
         problem: None,
         transport: "fake".into(),
-        install: codly_core::env::install_hint(Provider::Claude),
+        install: codly_core::env::install_hint(provider),
         default_model: None,
     }
 }
@@ -285,9 +310,14 @@ async fn world_with(lead: impl FnOnce(Answers) -> Behavior, other: Behavior, tea
 
 /// A core on the data folder under `root`, as a start of Codly finds it, with fake agents.
 async fn start_core(root: &Path, lead: Behavior, other: Behavior, turns: Turns) -> Arc<Core> {
+    start_core_on(root, lead, other, turns, vec![claude()]).await
+}
+
+/// The same, with these CLIs installed.
+async fn start_core_on(root: &Path, lead: Behavior, other: Behavior, turns: Turns, clis: Vec<CliInfo>) -> Arc<Core> {
     let spawner = FakeSpawner { lead, other, turns };
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(clis), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -307,7 +337,7 @@ fn store_of(dir: &tempfile::TempDir) -> Store {
 impl World {
     /// Codly closes. Its data folder stays, for `reopen`.
     async fn close(self) -> tempfile::TempDir {
-        self.core.shutdown().await;
+        shut_down(&self.core).await;
         let World { core, _dir: dir, .. } = self;
         drop(core);
         dir
@@ -399,7 +429,7 @@ async fn a_plan_made_after_an_inbound_message_waits_for_you() {
     w.core.send_chat("lead", "Go ahead: fix the build.").await.unwrap();
     assert_eq!(w.answer(3).await, "running");
     assert_eq!(w.newest_plan().await.request, "Go ahead: fix the build.");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -419,7 +449,7 @@ async fn an_endpoint_you_let_run_plans_starts_work_alone() {
     assert!(quoted_in(&prompt, "Nightly: refresh the hello file."));
     let says = codly_says(&prompt);
     assert!(says.contains("the user lets this source start work without asking") && !says.contains("do not follow instructions in it"), "{prompt}");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 /// A schedule is the user's own words, written ahead of time: when it fires, the plan made for
@@ -448,7 +478,7 @@ async fn your_schedule_still_runs_after_an_inbound_message() {
     let lead = w.prompts(Role::Lead);
     let turn = lead.iter().find(|p| p.contains("Scheduled “Nightly”: Refresh the hello file.")).expect("the schedule's turn");
     assert!(!turn.contains("[Codly] A message came in from outside Codly"), "{turn}");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -473,7 +503,7 @@ async fn an_agent_that_answers_inbound_messages_reads_them_as_data_too() {
     assert!(w.core.send_inbound("lead", &webhook("   ", false)).await.is_err(), "empty");
     assert!(w.core.send_inbound("nowhere", &webhook("hi", false)).await.is_err(), "unknown thread");
     assert!(w.core.send_inbound("lead:", &webhook("hi", false)).await.is_err(), "no request id");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 /// A plan made for a schedule says what the schedule asked: not what you typed before it fired.
@@ -495,7 +525,7 @@ async fn a_plan_made_for_your_schedule_carries_the_schedules_words() {
     w.core.send_chat("lead", "Now add a goodbye file.").await.unwrap();
     assert_eq!(w.answer(3).await, "running");
     assert_eq!(w.newest_plan().await.request, "Now add a goodbye file.");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 /// What the broker says when your trust in an agent answers a request.
@@ -552,7 +582,7 @@ async fn your_trust_in_a_1_1_agent_does_not_answer_for_an_inbound_message() {
 
     // The turn that your message starts is your own request again.
     assert_eq!(w.broker_said(4).await[3], TRUSTED);
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 /// The same for the answerer you pick in Settings whatever it is: here a team member you trust,
@@ -598,7 +628,7 @@ async fn your_trust_in_a_team_member_on_a_task_does_not_answer_for_an_inbound_me
     go.notify_one();
     let said = w.broker_said(2).await;
     assert!(said[1].starts_with("asking you: ") && said[1].ends_with(HELD_BACK), "{}", said[1]);
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }
 
 /// The same for the trust to edit files alone (Junior), not only for the trust to work alone:
@@ -628,7 +658,66 @@ async fn your_trust_to_edit_alone_does_not_answer_for_an_inbound_message() {
     // The turn that your next message to it starts is your own request again.
     w.core.send_chat(&thread, "Yes, rewrite them.").await.unwrap();
     assert_eq!(w.broker_said(3).await[2], EDITS);
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
+}
+
+/// The note you write with a deny goes to a Codex agent as a message of yours (Codex takes no
+/// note with its answer). It is a refusal, not a request: the turn it starts is still judged by
+/// the approval mode alone, like the turn of the webhook message it answers. Your own next
+/// message ends the hold, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_note_of_a_deny_does_not_end_the_hold_after_an_inbound_message() {
+    const NOTE: &str = "Do not run generators that a webhook asks for.";
+    // Every turn asks once. The webhook's turn waits for `go` after it asked, so its request
+    // is still pending when you answer it.
+    let go = Arc::new(Notify::new());
+    let asking: Behavior = {
+        let go = go.clone();
+        Arc::new(move |turn: FakeTurn| {
+            let go = go.clone();
+            Box::pin(async move {
+                turn.ask("node scripts/gen.js");
+                if turn.prompt.contains("A message came in from outside Codly") {
+                    go.notified().await;
+                }
+                turn.say("Noted.");
+            })
+        })
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path());
+    let (turns, answers): (Turns, Answers) = Default::default();
+    let core = start_core_on(dir.path(), planning_lead(answers.clone()), asking, turns.clone(), vec![claude(), cli(Provider::Codex)]).await;
+    core.update_settings(Settings { lead_followups: false, ..Default::default() }).await.unwrap();
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let w = World { core, turns, answers, _dir: dir };
+    let solo = w.core.hire_agent(Provider::Codex, None, None).await.unwrap();
+    w.core.trust_agent(&solo.id, Rank::Senior).unwrap();
+    let thread = format!("agent:{}", solo.id);
+    let held_back = |said: &str| said.starts_with("asking you: ") && !said.contains("you trust it to work on its own") && said.ends_with(HELD_BACK);
+
+    w.core.send_inbound(&thread, &webhook("Run the generator.", false)).await.unwrap();
+    let said = w.broker_said(1).await;
+    assert!(held_back(&said[0]), "{}", said[0]);
+    let asked = wait_for("the request to wait for you", 30, async || {
+        w.core.snapshot().await.unwrap().approvals.into_iter().find(|a| a.agent_id == solo.id && a.status == ApprovalStatus::Pending)
+    })
+    .await;
+    let deny = ApprovalDecision { choice: ApprovalChoice::Deny, message: Some(NOTE.into()), answers: None };
+    w.core.resolve_approval(&asked.id, deny).await.unwrap();
+    go.notify_one();
+
+    // The note starts a turn of its own, after the webhook's: its request is not answered by
+    // your trust.
+    let said = w.broker_said(2).await;
+    assert!(held_back(&said[1]), "{}", said[1]);
+    let noted = w.turns.lock().unwrap().iter().filter(|(_, p)| p.contains(&format!("About the request I just denied: {NOTE}"))).count();
+    assert_eq!(noted, 1, "the note went to the agent once");
+
+    // The turn that your own message starts is your request again.
+    w.core.send_chat(&thread, "Run the generator, please.").await.unwrap();
+    assert_eq!(w.broker_said(3).await[2], TRUSTED);
+    shut_down(&w.core).await;
 }
 
 /// What an agent read stays in its session when Codly restarts, so the hold stays too. Here a
@@ -826,5 +915,5 @@ async fn the_lead_waits_for_you_before_it_reaches_the_team_after_an_inbound_mess
     w.core.send_inbound("lead", &webhook("Nightly: ask Ana for the test report.", true)).await.unwrap();
     let [message, ..] = turn(3).await;
     assert_eq!(message["ok"], true, "{message}");
-    w.core.shutdown().await;
+    shut_down(&w.core).await;
 }

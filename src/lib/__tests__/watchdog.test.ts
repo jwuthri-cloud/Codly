@@ -10,11 +10,17 @@ describe('the watchdog limits in Settings', () => {
   });
 
   it('says each limit in two short sentences, with the steps the core takes', () => {
+    // What shows, and what "More about this" opens under it.
+    const whole = (l: (typeof WATCHDOG_LIMITS)[number]) => [l.body, l.more].filter(Boolean).join(' ');
     const body = Object.fromEntries(WATCHDOG_LIMITS.map((l) => [l.key, l.body]));
-    for (const l of WATCHDOG_LIMITS) expect(l.body.split(/(?<=\.)\s+/), l.key).toHaveLength(2);
+    for (const l of WATCHDOG_LIMITS) expect(whole(l).split(/(?<=\.)\s+/), l.key).toHaveLength(2);
     // watchdog.rs: flagged at the limit, interrupted at twice the limit, stopped one limit later.
     expect(body.quiet_secs).toBe('Codly marks a turn as stalled after this long with no output. At twice this time it interrupts the turn, and when the agent stays silent this long once more, it stops the agent.');
-    expect(body.quiet_tool_secs).toContain('the same three steps');
+    // A long text shows its first sentence; the rest is one press away.
+    const tool = WATCHDOG_LIMITS.find((l) => l.key === 'quiet_tool_secs')!;
+    expect(tool.body).toBe('The limit for the same three steps while a tool call is open that gives no sign of life: a build or a test suite can be silent for a long time.');
+    // watchdog.rs `has_heartbeat`: Claude Code says that these calls still run, so they keep the first limit.
+    expect(tool.more).toBe('A Claude agent’s commands, MCP tools and helpers say every 30 s that they still run, so the limit above counts for them.');
     // An idle worker is only marked.
     expect(body.idle_secs).toContain('It does nothing else');
   });
@@ -24,8 +30,10 @@ describe('the watchdog limits in Settings', () => {
     expect(WATCHDOG_DETAIL).toContain('A Lead is only interrupted: send your message again.');
     expect(WATCHDOG_DETAIL).toContain('from its third start on it is blocked for you instead');
     for (const l of WATCHDOG_LIMITS) {
-      expect(l.body, l.key).not.toContain('third start');
-      expect(l.body, l.key).not.toContain('Lead');
+      for (const text of [l.body, l.more ?? '']) {
+        expect(text, l.key).not.toContain('third start');
+        expect(text, l.key).not.toContain('Lead');
+      }
     }
   });
 

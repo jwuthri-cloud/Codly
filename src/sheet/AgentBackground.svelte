@@ -1,13 +1,20 @@
 <!--
   What the agent left at work in the background in its live run, as Claude Code lists it: the
   commands it started with `run_in_background` and its helpers. They go on after the turn that
-  started them. "Stop" ends a command (orchestrator/live_session.rs); Claude Code's next list
-  no longer names it, and the row shows how it ended, in Claude Code's own word. A helper has no
-  "Stop": Claude Code's request is known to stop a command only.
+  started them. "Stop" ends a command or a helper (orchestrator/live_session.rs); Claude Code's
+  next list no longer names it, and the row shows how it ended, in Claude Code's own word. After
+  the stop of a helper the agent is told: in a turn of its own when none runs, else within the
+  turn that runs (session.ts `stopHint`), and the button says which.
+  A row whose start is not known (session.ts: its first list came from a snapshot) shows
+  "running" with no timer. A row you stopped stays in its place for a moment with how it ended
+  (`backgroundRows`), then the list closes up: no other "Stop" moves under the pointer right
+  after a press.
 -->
 <script lang="ts">
   import type { Agent } from '../lib/gen/Agent';
-  import { backgroundKind, backgroundSummary, canStop, ofLiveRun, stopBackgroundTask } from '../lib/state/session';
+  import { untrack } from 'svelte';
+  import { turnRuns } from '../lib/narrate';
+  import { STOP_BUSY, backgroundKind, backgroundRows, backgroundSummary, canStop, ofLiveRun, rowOrder, stopBackgroundTask, stopHint, stopLabel, stopOnItsWay, type BackgroundWork } from '../lib/state/session';
   import { store } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { dur, timer } from '../lib/util/format';
@@ -25,15 +32,27 @@
     void store.revBy.get(agent.id);
     return ofLiveRun(store.live[agent.id]?.background ?? [], agent.run_id);
   });
-  const running = $derived(work.filter((w) => w.status === 'running'));
-  const ended = $derived(work.filter((w) => w.status !== 'running'));
-  /** The commands a stop is on its way for (by the CLI's task id), until Claude Code answered. Its
-   *  answer does not say whether the command ended: its next list does, and moves the row. */
-  let stopping = $state<string[]>([]);
-  async function stop(taskId: string) {
-    stopping = [...stopping, taskId];
-    await stopBackgroundTask(agent.id, taskId);
-    stopping = stopping.filter((id) => id !== taskId);
+  /** The order of the running rows: a row keeps its place while it shows (`rowOrder`). */
+  let order = $state<string[]>([]);
+  $effect(() => {
+    const next = rowOrder(untrack(() => order), work);
+    untrack(() => (order = next));
+  });
+  /** The work a stop is on its way for, by the CLI's task id: `sent` until Claude Code answers,
+   *  then `taken` (with when it took the stop). Its answer does not say whether the work ended:
+   *  its next list does, and moves the row. Until then the button reads "Stopping…"
+   *  (`stopOnItsWay`); a request Claude Code did not take gives "Stop" back at once. */
+  let sent = $state<string[]>([]);
+  let taken = $state<Record<string, number>>({});
+  const stopping = (w: BackgroundWork) => sent.includes(w.id) || stopOnItsWay(taken[w.id], ui.now);
+  const rows = $derived(backgroundRows(work, order, new Set([...sent, ...Object.keys(taken)]), ui.now));
+  const running = $derived(rows.running);
+  const ended = $derived(rows.ended);
+  async function stop(w: BackgroundWork) {
+    sent = [...sent, w.id];
+    const took = await stopBackgroundTask(agent.id, w);
+    sent = sent.filter((id) => id !== w.id);
+    if (took) taken = { ...taken, [w.id]: ui.now };
   }
 </script>
 
@@ -42,14 +61,23 @@
     <ul class="cmds">
       {#each running as w (w.id)}
         {@const kind = backgroundKind(w)}
-        <li>
-          <span class="dot on" aria-hidden="true"></span>
-          <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
-          <span class="meta num">{kind ? `${kind} · ` : ''}{w.startedAt == null ? 'running' : timer(ui.now - w.startedAt)}</span>
-          {#if canStop(w)}
-            <button class="btn sm ghost" disabled={stopping.includes(w.id)} onclick={() => stop(w.id)}><Icon name="stop" size={12} />{stopping.includes(w.id) ? 'Stopping…' : 'Stop'}</button>
-          {/if}
-        </li>
+        {#if w.status === 'running'}
+          <li>
+            <span class="dot on" aria-hidden="true"></span>
+            <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
+            <span class="meta num">{kind ? `${kind} · ` : ''}{w.startedAt == null ? 'running' : timer(ui.now - w.startedAt)}</span>
+            {#if canStop(w)}
+              <button class="btn sm ghost" disabled={stopping(w)} aria-label={stopLabel(w, stopping(w))} data-tip={stopHint(w, agent.name, turnRuns(agent, store.live[agent.id]))} data-tip-place="below" onclick={() => stop(w)}><Icon name="stop" size={12} />{stopping(w) ? STOP_BUSY : 'Stop'}</button>
+            {/if}
+          </li>
+        {:else}
+          <!-- (you stopped it: it keeps its place for a moment, with how it ended) -->
+          <li class="fin">
+            <Icon name={w.status === 'completed' ? 'check' : 'x-circle'} size={13} />
+            <code class="what truncate selectable" data-tip={clean(w.description)}>{clean(w.description)}</code>
+            <span class="meta num">{kind ? `${kind} · ` : ''}{w.status}</span>
+          </li>
+        {/if}
       {/each}
       {#each ended as w (w.id)}
         {@const kind = backgroundKind(w)}

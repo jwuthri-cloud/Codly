@@ -5,15 +5,23 @@
   files. Plans already in your branch (merged from Codly or by hand) or kept on their own branch
   sit under Merged, with their tasks.
   It is also where you review: comment on a line or a file, tick files as viewed, open one in
-  the editor, and Send back gives all your comments to the agent that did the work (a new
-  request, for work that is merged or finished: the comments stay here until you send its
-  message; Discard takes them out of that request too). A comment on a file that left the diff since stays in the bar above Send back,
+  the editor, and Send back gives all your comments to the agent that did the work. On a
+  finished plan that is not in your branch they become one more task of the plan, for the agent
+  that wrote the files; while the plan runs, those on its finished work wait here until it is
+  done and you press Send back again (nothing goes by itself; a plan that does not move on
+  without you sends them to a new request); on merged work they go to a new request, and stay here until you send its message
+  (Discard takes them out of that request too). A comment on a file that left the diff since stays in the bar above Send back,
   where you can read and remove it.
   A task's diff has a second scope, "Last turn": only what the last turn in the task's worktree
   changed, committed or not (from the checkpoint Codly kept before that turn). It is for
   reading: comments go on the whole task's diff, and the ones you wrote wait there. Each read
   of it takes a snapshot of the worktree, so it is read one at a time, and when a turn starts or
   ends, not on each file the agent writes.
+  1:1 agents with changes in their worktree have a chip of their own. An agent's diff is all its
+  work since its branch left yours (its commits, its edits, its new files), or its last turn; a
+  read of either is a snapshot too. Comments on it go to the agent as one message of yours in
+  its 1:1 chat. On a plan that still runs, Send back gives each task's comments to its worker,
+  and the rest wait for the plan to finish.
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
@@ -22,19 +30,21 @@
   import type { Agent } from '../../lib/gen/Agent';
   import type { LastTurn } from '../../lib/gen/LastTurn';
   import type { Task } from '../../lib/gen/Task';
-  import { discardReview, mergePlan, reviewDraft, sendBack, waitingRequest } from '../../lib/state/actions';
+  import { discardReview, mergePlan, planPrState, reviewDraft, sendBack, waitingRequest } from '../../lib/state/actions';
   import { diffstats } from '../../lib/state/diffstats.svelte';
-  import { review, reviewKey } from '../../lib/state/review.svelte';
+  import { loadPullRequest, prKey, prUi } from '../../lib/state/pullRequest.svelte';
+  import { planOwners, review, reviewKey, taskOwners } from '../../lib/state/review.svelte';
   import { store } from '../../lib/state/store.svelte';
-  import { ui } from '../../lib/state/ui.svelte';
+  import { ui, type DiffTarget } from '../../lib/state/ui.svelte';
   import { diffStats, type DiffFile } from '../../lib/util/diff';
   import { ago, plural } from '../../lib/util/format';
   import { idVar, TASK_STATUS_LABEL } from '../../lib/util/labels';
   import { oneAtATime } from '../../lib/util/oneAtATime';
-  import { discardWords, editorPlace, heavy, HEAVY_LABEL, inTurn, offDiff, parseDiffKeeping, placeId, reviewBarWords, turnReadKey, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
+  import { agentBarWords, agentEditorPlace, AGENTS_GROUP, agentsWithChanges, commentKeys, diffGroup, discardWords, editorPlace, finishedWorkGoes, heavy, HEAVY_LABEL, IN_FOLDER_WORDS, inProjectFolder, inTurn, offDiff, parseDiffKeeping, sendBackBarWords, splitByTask, splitWords, turnReadKey, writerOnTeam, type DiffParts, type ReviewComment, type ReviewDraft } from '../../lib/util/review';
   import EmptyState from '../../components/EmptyState.svelte';
   import Icon from '../../components/Icon.svelte';
   import DiffView from './DiffView.svelte';
+  import { safeChoice } from '../../lib/util/confirm';
 
   const allPlans = $derived([...store.plans].filter((p) => p.status !== 'cancelled' && store.tasks.some((t) => t.plan_id === p.id && (t.status === 'done' || t.branch))).sort((a, b) => b.created_at - a.created_at));
   const allTasks = $derived([...store.tasks].filter((t) => t.branch || t.status === 'done').sort((a, b) => (a.plan_id ?? '~').localeCompare(b.plan_id ?? '~') || a.key.localeCompare(b.key, undefined, { numeric: true })));
@@ -44,22 +54,31 @@
   // Tasks with no plan shown above them: no plan, or a cancelled one.
   const loose = $derived(tasks.filter((t) => !plans.some((p) => p.id === t.plan_id)));
   const merged = $derived(allPlans.filter((p) => settled.has(p.id)));
+  /** 1:1 agents with changes in their worktree, as far as Codly saw (its files are per agent, so
+   *  they also hold what it wrote on a task: only the diff says how many are its own). */
+  const solo = $derived.by(() => {
+    void store.rev;
+    const picked = ui.diffTarget?.kind === 'agent' ? ui.diffTarget.id : null;
+    return agentsWithChanges(store.agents, (a) => Object.values(store.live[a.id]?.files ?? {}).some((f) => f.modified), picked);
+  });
   // The request you are on picks its plan first, as in the Plan room.
   const first = $derived(plans.find((p) => p.id === store.planOf(ui.request)?.id) ?? plans[0]);
   const target = $derived(
-    ui.diffTarget ?? (first ? { kind: 'plan' as const, id: first.id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : null),
+    ui.diffTarget ??
+      (first ? { kind: 'plan' as const, id: first.id } : tasks[0] ? { kind: 'task' as const, id: tasks[0].id } : merged[0] ? { kind: 'plan' as const, id: merged[0].id } : solo[0] ? { kind: 'agent' as const, id: solo[0].id } : null),
   );
-  // The chip you are in: a plan's id, 'loose' (tasks with no plan shown) or 'merged'.
-  const group = $derived.by(() => {
-    if (!target) return null;
-    const pid = target.kind === 'plan' ? target.id : store.taskMap.get(target.id)?.plan_id;
-    if (pid && settled.has(pid)) return 'merged';
-    return pid && plans.some((p) => p.id === pid) ? pid : 'loose';
+  /** The diff on screen, for the room's title (ChangesRoom): the one you picked or the one shown first. */
+  let { shown = $bindable(null) }: { shown?: DiffTarget } = $props();
+  $effect(() => {
+    shown = target;
   });
+  // The chip you are in: a plan's id, 'loose' (tasks with no plan shown), 'merged' or the 1:1 agents.
+  const group = $derived(diffGroup(target, (id) => store.taskMap.get(id)?.plan_id, settled, (pid) => plans.some((p) => p.id === pid)));
   const groupPlan = $derived(plans.find((p) => p.id === group) ?? null);
   const chips = $derived([
     ...plans.map((p) => ({ id: p.id, label: p.summary, stat: diffstats.plan[p.id] ?? null, n: null as number | null })),
     ...(loose.length ? [{ id: 'loose', label: plans.length ? 'Other tasks' : 'Tasks', stat: null, n: loose.length }] : []),
+    ...(solo.length ? [{ id: AGENTS_GROUP, label: '1:1 agents', stat: null, n: solo.length }] : []),
     ...(merged.length ? [{ id: 'merged', label: 'Merged', stat: null, n: merged.length }] : []),
   ]);
   const into = $derived(store.workspace?.current_branch ?? store.workspace?.default_branch ?? 'main');
@@ -82,6 +101,7 @@
   }
   function choose(id: string) {
     if (id === 'loose') ui.diffTarget = { kind: 'task', id: loose[0].id };
+    else if (id === AGENTS_GROUP) ui.diffTarget = { kind: 'agent', id: solo[0].id };
     else ui.diffTarget = { kind: 'plan', id: id === 'merged' ? merged[0].id : id };
   }
 
@@ -95,21 +115,25 @@
   let drawn: { key: string; text: string; parts: DiffParts } | null = null;
   /** The diff whose files are on screen (its `key`); null while another one loads. */
   let loaded = $state<string | null>(null);
-  /** You picked "Last turn": a task's diff shows only what its last turn changed. */
+  /** You picked "Last turn": a task's or an agent's diff shows only what its last turn changed. */
   let turnOnly = $state(false);
-  const lastTurn = $derived(turnOnly && target?.kind === 'task');
-  /** The turn on screen in the "Last turn" scope; null when Codly kept no turn of the task. */
+  const lastTurn = $derived(turnOnly && (target?.kind === 'task' || target?.kind === 'agent'));
+  /** The turn on screen in the "Last turn" scope; null when Codly kept no turn there. */
   let turn = $state.raw<LastTurn | null>(null);
-  /** Your comments are on the task or the plan, whichever scope is on screen. */
+  /** Your comments are on the task, the agent or the plan, whichever scope is on screen. */
   const notesKey = $derived(target ? reviewKey(target) : '');
-  /** The diff on screen: the last turn of a task has its own folds and ticks. */
+  /** The diff on screen: the last turn has its own folds and ticks. */
   const key = $derived(lastTurn ? `${notesKey}:turn` : notesKey);
+  /** The scope that takes comments, beside "Last turn". */
+  const wholeLabel = $derived(target?.kind === 'agent' ? 'All changes' : 'Whole task');
   let main = $state<HTMLElement | null>(null);
 
   const version = $derived.by(() => {
     if (!target) return '';
     void store.rev;
     if (target.kind === 'plan') return store.tasks.filter((t) => t.plan_id === target.id).map((t) => `${t.id}:${t.status}`).join(',');
+    // Both scopes of an agent are a snapshot of its worktree: read again when a turn starts or ends (see `turnReadKey`).
+    if (target.kind === 'agent') return turnReadKey(undefined, store.agentMap.get(target.id)?.status);
     const t = store.taskMap.get(target.id);
     // The last turn is not read again on each file the agent writes: see `turnReadKey`.
     if (lastTurn) return turnReadKey(t?.status, t?.assignee ? store.agentMap.get(t.assignee)?.status : undefined);
@@ -141,12 +165,14 @@
       if (my === seq) loading = false;
     }
   }
-  // A read of the last turn starts git in the worktree and takes a snapshot of it: never two
-  // at once. It reads what is asked for when it starts (the newest `seq`), not when it was asked.
-  const readTurn = oneAtATime(async () => {
+  // A read of the last turn, or of an agent's whole work, starts git in the worktree and takes a
+  // snapshot of it: never two at once. It reads what is asked for when it starts (the newest
+  // `seq`), not when it was asked.
+  const readSnapshot = oneAtATime(async () => {
     const t = target;
-    if (!t || !lastTurn) return;
-    await draw(seq, key, api.lastTurnDiff({ kind: 'task', id: t.id }).then((kept) => ({ text: kept?.diff ?? '', turn: kept })));
+    if (!t || t.kind === 'plan') return;
+    if (lastTurn) await draw(seq, key, api.lastTurnDiff({ kind: t.kind, id: t.id }).then((kept) => ({ text: kept?.diff ?? '', turn: kept })));
+    else if (t.kind === 'agent') await draw(seq, key, api.agentDiff(t.id).then((text) => ({ text, turn: null })));
   });
   $effect(() => {
     const t = target;
@@ -162,32 +188,33 @@
       loaded = null;
     }
     loading = true;
-    if (lastTurn) untrack(() => void readTurn());
+    if (lastTurn || t.kind === 'agent') untrack(() => void readSnapshot());
     else void draw(my, name, (t.kind === 'plan' ? api.planDiff(t.id) : api.taskDiff(t.id)).then((text) => ({ text, turn: null })));
   });
   const totals = $derived(diffStats(files));
 
   const targetTask = $derived(target?.kind === 'task' ? (store.taskMap.get(target.id) ?? null) : null);
-  /** In the "Last turn" scope while a turn of the task's agent is on: the diff on screen is not read on each step of it. */
+  const targetAgent = $derived(target?.kind === 'agent' ? (store.agentMap.get(target.id) ?? null) : null);
+  /** While a turn is on (of the task's agent, in the "Last turn" scope; of the 1:1 agent, in both): the diff on screen is not read on each step of it. */
   const turnNote = $derived.by(() => {
-    const worker = lastTurn && targetTask?.assignee ? store.agentMap.get(targetTask.assignee) : null;
+    const worker = targetAgent ?? (lastTurn && targetTask?.assignee ? store.agentMap.get(targetTask.assignee) : null);
     return worker && inTurn(worker.status) ? ` ${worker.name} is working: this is read again when its turn ends.` : '';
   });
-  /** Which task (and agent) wrote each file: from Codly's commits, then from what its agent
-   *  changes now. One pass for the whole diff; the first task of the scope that has a file owns it. */
-  const owners = $derived.by(() => {
+  /** A 1:1 agent's last turn ran in a task's worktree (it is on that task), not in its own. */
+  const turnTask = $derived(lastTurn && targetAgent ? (turn?.task ?? null) : null);
+  const turnTaskNote = $derived(turnTask && targetAgent ? ` ${targetAgent.name} is on task ${turnTask}: this is its last turn in that task’s worktree, not in its own.` : '');
+  /** Which task wrote each file: on a plan's diff (merged work), a done task's commit first (`planOwners`); on a task's, that task. */
+  const ownerTasks = $derived.by(() => {
     void store.rev;
-    const out = new Map<string, { task: Task; agent: Agent | null }>();
-    const scope = target?.kind === 'plan' ? store.tasks.filter((t) => t.plan_id === target.id) : targetTask ? [targetTask] : [];
-    for (const t of scope) {
-      const owner = { task: t, agent: (t.assignee && store.agentMap.get(t.assignee)) || null };
-      const own = (path: string) => out.has(path) || out.set(path, owner);
-      for (const m of store.taskMarks[t.id] ?? []) m.files?.forEach(own);
-      const live = t.assignee ? store.live[t.assignee]?.files : null;
-      if (live) for (const [path, f] of Object.entries(live)) if (f.modified) own(path);
-    }
-    return out;
+    return target?.kind === 'plan' ? planOwners(store.tasks.filter((t) => t.plan_id === target.id)) : taskOwners(targetTask ? [targetTask] : []);
   });
+  /** Which task and agent wrote each file. */
+  const owners = $derived(new Map<string, { task: Task; agent: Agent | null }>([...ownerTasks].map(([path, t]) => [path, { task: t, agent: (t.assignee && store.agentMap.get(t.assignee)) || null }])));
+  /** A file's colour: the agent that wrote it (the 1:1 agent's own, on its diff). */
+  function hueOf(path: string) {
+    const agent = owners.get(path)?.agent ?? targetAgent;
+    return agent ? idVar(agent.color) : 'var(--line-3)';
+  }
   function jump(path: string) {
     active = path;
     review.fold(key, path, false);
@@ -206,21 +233,51 @@
   /** Comments on files that left the diff since you wrote them: no file on screen shows them.
    *  (The last turn shows a part of the task's diff: a file that is not in it did not leave.) */
   const gone = $derived(!lastTurn && loaded === key && !error ? offDiff(comments, files.map((f) => f.path)) : NONE);
+  const goneKeys = $derived(commentKeys(gone));
   const viewedCount = $derived(files.filter((f) => review.viewed(key, f)).length);
   /** Where a file opens in the editor: the worktree of the task that wrote it, or your
    *  repository once the plan is merged (see `editorPlace`). */
   function placeOf(path: string) {
+    if (target?.kind === 'agent') return agentEditorPlace(targetAgent, store.workspace?.repo_path ?? null, turnTask);
     const task = targetTask ?? owners.get(path)?.task ?? null;
     const planId = target?.kind === 'plan' ? target.id : task?.plan_id;
     const plan = (planId && store.planMap.get(planId)) || null;
     const worker = (task?.assignee && store.agentMap.get(task.assignee)) || null;
     return editorPlace(task, plan, worker, store.leadOf(plan?.thread ?? 'lead') ?? store.leads[0] ?? null);
   }
-  // A task that is not done takes the comments itself; merged or finished work gets a new request.
+  // A task that is not done takes the comments itself; finished work goes where `finishedWorkGoes` says.
   const toWorker = $derived(!!targetTask && targetTask.status !== 'done');
   const workerName = $derived((targetTask?.assignee && store.agentMap.get(targetTask.assignee)?.name) || 'its worker');
+  /** The plan of the diff on screen (the plan's, or its task's), and where the comments on its finished work go. */
+  const targetPlan = $derived.by(() => {
+    const id = target?.kind === 'plan' ? target.id : targetTask?.plan_id;
+    return (id && store.planMap.get(id)) || null;
+  });
+  const goes = $derived(finishedWorkGoes(targetPlan, store.tasks, planPrState(targetPlan)));
+  // A finished plan's pull request, from Codly's own record (no network): with one open or
+  // merged, the bar says before the press that Send back opens a new request.
+  $effect(() => {
+    if (targetPlan?.status !== 'done') return;
+    const source = { kind: 'plan' as const, id: targetPlan.id };
+    if (!(prKey(source) in prUi.opened)) void loadPullRequest(source);
+  });
+  /** The agent that wrote the commented files is still on the team: the new task is for it. */
+  const toWriter = $derived(writerOnTeam(comments, ownerTasks, targetPlan, (id) => !!store.agentMap.get(id) && !store.agentMap.get(id)!.archived));
+  /** On the diff of a plan that still runs: where Send back takes the comments of each task at work, and where the rest go (see `sendBack`). */
+  const split = $derived.by(() => {
+    if (target?.kind !== 'plan') return null;
+    const { tasks: parts, rest } = splitByTask(comments, ownerTasks);
+    if (!parts.length) return null;
+    const who = (t: Task) => (t.assignee && store.agentMap.get(t.assignee)?.name) || 'its worker';
+    return splitWords(parts.map((p) => ({ n: p.comments.length, who: who(p.task), key: p.task.key })), rest.length, false, goes);
+  });
   /** Finished work whose comments are in a new request already, not sent yet. */
   const waiting = $derived(!toWorker && !!waitingRequest(notesKey));
+  /** Nothing goes now: the comments are on finished work of a plan that still runs. */
+  const onlyWait = $derived(!toWorker && !split && !targetAgent && goes === 'wait');
+  const sendLabel = $derived(targetAgent ? `Send to ${targetAgent.name}` : 'Send back');
+  /** An agent that works in your project folder itself: its diff is every uncommitted change there. */
+  const inFolder = $derived(inProjectFolder(targetAgent, store.workspace?.repo_path));
   let sending = $state(false);
   async function send() {
     if (!target || sending) return;
@@ -230,6 +287,7 @@
   }
   /** Discard asks once more, and says where else the comments are (`draft`, read at the first press). */
   let discarding = $state<{ draft: ReviewDraft } | null>(null);
+  let discardBtn: HTMLButtonElement | undefined = $state();
   $effect(() => {
     void comments;
     discarding = null;
@@ -298,21 +356,33 @@
           {@render planRow(p)}
           <div class="sub">{#each allTasks.filter((t) => t.plan_id === p.id) as t (t.id)}{@render taskRow(t)}{/each}</div>
         {/each}
+      {:else if group === AGENTS_GROUP}
+        <p class="eyebrow">1:1 agents</p>
+        {#each solo as a (a.id)}
+          <button class="scope" class:on={target?.kind === 'agent' && target.id === a.id} style:--hue={idVar(a.color)} onclick={() => (ui.diffTarget = { kind: 'agent', id: a.id })} onpointerenter={() => ui.setHover({ agentId: a.id })} onpointerleave={() => ui.setHover(null)} data-tip={a.worktree ?? undefined}>
+            <span class="dot"></span><span class="s-t truncate">{a.name}</span>
+            {#if target.kind === 'agent' && target.id === a.id && !lastTurn && loaded === key && files.length}<span class="s-n">{plural(files.length, 'file')}</span>{/if}
+          </button>
+        {/each}
       {/if}
       {#if target.kind === 'task'}
         <div class="lenses turn-pick" role="radiogroup" aria-label="Which changes of the task">
           <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip="Everything the task changed and Codly committed">Whole task</button>
           <button role="radio" aria-checked={turnOnly} onclick={() => (turnOnly = true)} data-tip="Only what the last turn in the task’s worktree changed, committed or not">Last turn</button>
         </div>
+      {:else if target.kind === 'agent'}
+        <div class="lenses turn-pick" role="radiogroup" aria-label="Which changes of the agent">
+          <button role="radio" aria-checked={!turnOnly} onclick={() => (turnOnly = false)} data-tip={inFolder ? IN_FOLDER_WORDS : `Its commits, its edits and its new files, since its branch left ${into}`}>All changes</button>
+          <button role="radio" aria-checked={turnOnly} onclick={() => (turnOnly = true)} data-tip="Only what its last turn changed, committed or not">Last turn</button>
+        </div>
       {/if}
       {#if files.length}
         <p class="eyebrow files-h">{plural(files.length, 'file')} ·<span class="num"><span class="add">+{totals.added}</span> <span class="del">−{totals.removed}</span></span>{#if viewedCount} · {viewedCount} viewed{/if}</p>
         <ul class="files">
           {#each files as f (f.path)}
-            {@const o = owners.get(f.path)}
             {@const n = byFile.get(f.path)?.length ?? 0}
             <li>
-              <button class="fl" class:on={active === f.path} class:seen={review.viewed(key, f)} style:--hue={o?.agent ? idVar(o.agent.color) : 'var(--line-3)'} onclick={() => jump(f.path)} onpointerenter={() => ui.setHover({ path: f.path })} onpointerleave={() => ui.setHover(null)} data-tip={f.path}>
+              <button class="fl" class:on={active === f.path} class:seen={review.viewed(key, f)} style:--hue={hueOf(f.path)} onclick={() => jump(f.path)} onpointerenter={() => ui.setHover({ path: f.path })} onpointerleave={() => ui.setHover(null)} data-tip={f.path}>
                 <span class="dot"></span><span class="f-n truncate">{f.path.split('/').pop()}</span>
                 {#if n}<span class="f-c num" aria-label="{n} {n === 1 ? 'comment' : 'comments'} not sent">{n}</span>{/if}
                 {#if review.viewed(key, f)}<span class="f-v" aria-label="Viewed"><Icon name="check" size={11} stroke={2} /></span>{/if}
@@ -326,11 +396,14 @@
     <div class="main" bind:this={main}>
       {#if error}<p class="err">Couldn’t load the diff: {error}<button class="btn sm" disabled={loading} onclick={() => retry++}>Try again</button></p>
       {:else if loading && !files.length}<EmptyState compact title="Loading the diff…" />
+      {:else if lastTurn && !turn && !loading && targetAgent}<EmptyState compact title="No turn to show for {targetAgent.name}." body={`Codly keeps the files before each turn in ${targetAgent.name}’s own worktree. No turn ran there yet, or it works in your project folder, where Codly keeps none.${turnNote}`} />
       {:else if lastTurn && !turn && !loading}<EmptyState compact title="No turn to show for this task." body={`Codly keeps the files before each turn in the task’s worktree. That worktree is gone or holds other work now, or no turn ran there yet.${turnNote}`} />
-      {:else if lastTurn && turn && !files.length && !loading}<EmptyState compact title="The last turn changed no file." body={`It started with “${turn.label}” (${ago(turn.ts, ui.now)}).${turnNote}`} />
+      {:else if lastTurn && turn && !files.length && !loading}<EmptyState compact title="The last turn changed no file." body={`It started with “${turn.label}” (${ago(turn.ts, ui.now)}).${turnTaskNote}${turnNote}`} />
+      {:else if !files.length && !loading && target.kind === 'agent'}<EmptyState compact title="Nothing changed yet." body={turnNote.trim() || undefined} />
       {:else if !files.length && !loading}<EmptyState compact title="No changes in this scope yet." />
       {:else}
-        {#if lastTurn && turn}<p class="turn-h">Since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}). To comment, switch to Whole task.{turnNote}</p>{/if}
+        {#if lastTurn && turn}<p class="turn-h">Since the turn that started with “{turn.label}” ({ago(turn.ts, ui.now)}). To comment, switch to {wholeLabel}.{turnTaskNote}{turnNote}</p>
+        {:else if target.kind === 'agent' && turnNote}<p class="turn-h">{turnNote.trim()}</p>{/if}
         {#each files as f (f.path)}
           {@const o = owners.get(f.path)}
           {@const why = heavy(f)}
@@ -338,7 +411,7 @@
           {@const editor = place.agentId}
           <DiffView
             file={f}
-            hue={o?.agent ? idVar(o.agent.color) : 'var(--line-3)'}
+            hue={hueOf(f.path)}
             who={target.kind === 'plan' && o ? `${o.task.key} · ${o.agent?.name ?? ''}` : undefined}
             kind={why ? HEAVY_LABEL[why] : undefined}
             root={main}
@@ -358,9 +431,9 @@
         <div class="review" role="region" aria-label="Your review">
           {#if gone.length}
             <ul class="gone" aria-label="Comments on files that left the diff">
-              {#each gone as c (c.path + ' ' + placeId(c) + c.quote)}
+              {#each gone as c, i (goneKeys[i])}
                 <li>
-                  <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. Send back still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
+                  <p class="g-w"><span class="mono">{c.path}{c.line == null ? '' : `:${c.line}`}</span> is not in this diff any more. {sendLabel} still sends your comment{c.quote == null ? '' : ', with the line as it was'}.</p>
                   {#if c.quote != null}<p class="g-q">{c.quote}</p>{/if}
                   <p class="g-t">{c.text}</p>
                   <button class="btn sm ghost" onclick={() => review.comment(notesKey, c, '')}>Remove</button>
@@ -370,16 +443,16 @@
           {/if}
           <div class="r-row">
             {#if lastTurn}
-              <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {comments.length === 1 ? 'It is' : 'They are'} on the whole task’s diff.</p>
-              <button class="btn sm" onclick={() => (turnOnly = false)}>Whole task</button>
+              <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {comments.length === 1 ? 'It is' : 'They are'} on {target.kind === 'agent' ? 'all its changes' : 'the whole task’s diff'}.</p>
+              <button class="btn sm" onclick={() => (turnOnly = false)}>{wholeLabel}</button>
             {:else}
-            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : reviewBarWords(comments.length, toWorker ? workerName : null, waiting ? review.inHand(notesKey) : null)}</p>
+            <p class="r-t"><b>{comments.length} {comments.length === 1 ? 'comment' : 'comments'} not sent.</b> {discarding ? discardWords(comments.length, discarding.draft) : targetAgent ? agentBarWords(comments.length, targetAgent.name) : split ? `Send back gives ${split}.` : sendBackBarWords(comments.length, toWorker ? workerName : null, goes, waiting ? review.inHand(notesKey) : null, toWriter)}</p>
             {#if discarding}
               <button class="btn sm danger" onclick={() => discardReview(notesKey)}>Discard {comments.length === 1 ? 'it' : `all ${comments.length}`}</button>
-              <button class="btn sm ghost" onclick={() => (discarding = null)}>Keep</button>
+              <button class="btn sm ghost" use:safeChoice={{ keep: () => (discarding = null), back: () => discardBtn }} onclick={() => (discarding = null)}>Keep</button>
             {:else}
-              <button class="btn sm ghost" onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
-              <button class="btn sm primary" disabled={sending} onclick={send}><Icon name="send" size={13} />Send back</button>
+              <button class="btn sm ghost" bind:this={discardBtn} onclick={() => (discarding = { draft: reviewDraft(notesKey) })}>Discard</button>
+              <button class="btn sm primary" disabled={sending || onlyWait} onclick={send} data-tip={split ?? (onlyWait ? 'The plan is still running: press Send back when it is done' : undefined)}><Icon name="send" size={13} />{sendLabel}</button>
             {/if}
             {/if}
           </div>
@@ -401,7 +474,7 @@
   .pk.muted:not([aria-selected='true']) { color: var(--ink-3); }
   .st { color: var(--ink-3); font-weight: var(--w-reg); white-space: nowrap; font-size: var(--t-xs); font-family: var(--font-mono); }
   .sub { padding-left: 12px; }
-  .land { margin: 6px 8px 2px; align-self: flex-start; }
+  .land { margin: 6px 8px 2px; align-self: flex-start; flex-shrink: 0; }
   .turn-pick { margin: 12px 8px 0; align-self: flex-start; flex-shrink: 0; }
   .turn-h { flex-shrink: 0; padding: 0 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-3); }
   .all-in { padding: 6px 10px; color: var(--ink-3); font-size: var(--t-sm); }

@@ -114,7 +114,10 @@ describe('what the question and Settings offer', () => {
     expect(trustStatus(nothing)).toMatch(/no configuration/);
     expect(trustStatus(base)).toMatch(/not chosen yet/);
     expect(trustStatus({ ...base, changed: true })).toMatch(/changed since your choice/);
-    expect(trustStatus({ ...base, state: 'trusted' })).toMatch(/Agents load them/);
+    // Trust is for the next start: a run that is up was started without the files, and says so itself.
+    expect(trustStatus({ ...base, state: 'trusted' })).toBe(
+      'You trusted these files. Agents load them from their next run on; an agent that runs now goes on without them until it starts again.',
+    );
     expect(trustStatus({ ...base, state: 'without' })).toMatch(/start without them/);
   });
 

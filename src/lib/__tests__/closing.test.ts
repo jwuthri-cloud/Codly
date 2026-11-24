@@ -9,7 +9,8 @@ import { openWorkspace } from '../state/actions';
 import { closeQuestion, closeWithUndo, flushClosing, UNDO_MS } from '../state/closing';
 import { prUi } from '../state/pullRequest.svelte';
 import { requests, type Request } from '../state/requests.svelte';
-import { store } from '../state/store.svelte';
+import { store, type Outgoing } from '../state/store.svelte';
+import { mkAgent } from '../../office/demo/script';
 import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 
@@ -263,6 +264,45 @@ describe('what a close asks first', () => {
     store.plans = [plan({ status: 'running' })];
     expect(await closeQuestion(request({ phase: 'running' }))).toMatchObject({ ask: 'Cancel its running plan and close?', yes: 'Close' });
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it('a Lead at work asks first: in a turn, or starting before it, or before it answered your message', async () => {
+    const working = { ask: 'The Lead is working: close and stop it?', detail: 'Its turn stops where it is. Nothing is deleted.', yes: 'Close' };
+    // The Lead starts or thinks and no turn of it runs yet, in a request with no plan: the request says "planning".
+    expect(await closeQuestion(request({ phase: 'planning' }))).toEqual(working);
+    // Your message is in, and the Lead has not begun: nothing answered it.
+    store.chats = [asked('lead:a', 'Explain sessions', 5)];
+    expect(await closeQuestion(request({ phase: 'talking' }))).toEqual({ ask: 'Your message has no answer yet: close anyway?', detail: 'The Lead stops before it answers. Nothing is deleted.', yes: 'Close' });
+    // Answered: it closes at once.
+    store.chats = [...store.chats, { ...asked('lead:a', 'Sessions live in Postgres.', 6), author: 'l3' }];
+    expect(await closeQuestion(request({ phase: 'talking' }))).toBeNull();
+    store.chats = [];
+  });
+
+  it('a message that no turn will answer does not ask: the turn failed or was stopped, or it was not sent', async () => {
+    const lead = mkAgent('l3', 'Lead 3', 'claude', 'lead', 0, 'idle', 'lead:a');
+    store.agents = [lead];
+    store.chats = [asked('lead:a', 'Explain sessions', 5)];
+    // The Lead's turn took it and ended with no reply (it failed, or you stopped it).
+    store.live[lead.id] = { ...store.liveFor(lead.id), turns: [{ start: 6, end: 9, input: 'Explain sessions' }] };
+    expect(await closeQuestion(request({ phase: 'talking' }))).toBeNull();
+    // A turn that began before it and took it in on the way, then ended.
+    store.live[lead.id] = { ...store.liveFor(lead.id), turns: [{ start: 4, end: 9, input: 'Look around', steers: [{ ts: 5, input: 'Explain sessions' }] }] };
+    expect(await closeQuestion(request({ phase: 'talking' }))).toBeNull();
+    // Only an older turn: the answer can still come, and the close asks.
+    store.live[lead.id] = { ...store.liveFor(lead.id), turns: [{ start: 1, end: 3, input: 'Fix A' }] };
+    expect((await closeQuestion(request({ phase: 'talking' })))?.ask).toBe('Your message has no answer yet: close anyway?');
+    // "Not sent": nothing is on its way.
+    store.chats = [];
+    const sent = store as unknown as { sent: Outgoing[] };
+    sent.sent = [{ id: 'o1', thread: 'lead:a', text: 'Explain sessions', ts: 7, ws: null, error: 'Lead 3 is not running' }];
+    expect(await closeQuestion(request({ phase: 'talking' }))).toBeNull();
+    // On its way: it asks.
+    sent.sent = [{ id: 'o1', thread: 'lead:a', text: 'Explain sessions', ts: 7, ws: null, error: null }];
+    expect((await closeQuestion(request({ phase: 'talking' })))?.ask).toBe('Your message has no answer yet: close anyway?');
+    sent.sent = [];
+    delete store.live[lead.id];
+    store.agents = [];
   });
 
   it('a draft asks only while its composer holds text, and the button says Discard', async () => {

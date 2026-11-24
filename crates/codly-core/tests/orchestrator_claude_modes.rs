@@ -15,8 +15,29 @@ use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOpti
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -149,7 +170,10 @@ impl Spawner for Fake {
                             if text.contains("LEAVE-RUNNING") {
                                 // Claude Code's whole list of background tasks, at each change.
                                 let listed = |ids: &[&str], ended: &[&str]| EventKind::BackgroundTasks {
-                                    tasks: ids.iter().map(|id| BackgroundTask { id: (*id).into(), kind: "command".into(), description: "npm run dev".into() }).collect(),
+                                    tasks: ids
+                                        .iter()
+                                        .map(|id| BackgroundTask { id: (*id).into(), kind: "command".into(), description: "npm run dev".into(), started_at: None })
+                                        .collect(),
                                     ended: ended
                                         .iter()
                                         .map(|id| BackgroundEnded { id: (*id).into(), kind: "command".into(), description: "npm run dev".into(), status: "completed".into() })
@@ -225,10 +249,11 @@ impl Spawner for Fake {
                                         Ok(json!({ "model": format!("claude-{name}-5-5") }))
                                     }
                                 }
+                                // (recorded: no level of its own gives Claude Code's default, "medium")
                                 SessionRequest::Effort(level) => {
-                                    s.log.push(format!("effort:{level}"));
+                                    s.log.push(format!("effort:{}", level.as_deref().unwrap_or("none")));
                                     if !s.drops_effort {
-                                        s.effort = Some(level);
+                                        s.effort = level;
                                     }
                                     Ok(serde_json::Value::Null)
                                 }
@@ -249,10 +274,27 @@ impl Spawner for Fake {
                                     s.log.push(format!("reconnect:{server}"));
                                     Err("Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}".to_string())
                                 }
-                                // (recorded: `{}`, whether or not a task ended)
+                                // (recorded: a success with no body, off and on. Not recorded: a
+                                // switch the CLI refuses; the error here is the connect error that a
+                                // reconnect of a dead stdio server answers with.)
+                                SessionRequest::McpEnabled(server, on) => {
+                                    s.log.push(format!("mcp-{}:{server}", if on { "on" } else { "off" }));
+                                    if server == "does-not-start" { Err("Connection closed".to_string()) } else { Ok(serde_json::Value::Null) }
+                                }
+                                // (recorded: `{}`, whether or not a task ended; for a helper found
+                                // by the id of its call the adapter adds its description; one that
+                                // was stopped before has ended, and the adapter refuses it)
                                 SessionRequest::StopTask(task_id) => {
-                                    s.log.push(format!("stop-task:{task_id}"));
-                                    Ok(json!({}))
+                                    let asked = format!("stop-task:{task_id}");
+                                    let ended = s.log.contains(&asked);
+                                    s.log.push(asked);
+                                    if ended {
+                                        Err(codly_core::adapters::claude::NOT_RUNNING.to_string())
+                                    } else if task_id.starts_with("toolu-") {
+                                        Ok(json!({ "helper": "Run the tests" }))
+                                    } else {
+                                        Ok(json!({}))
+                                    }
                                 }
                             };
                             let _ = reply.send(answer);
@@ -292,7 +334,7 @@ async fn hired_agent(dir: &Path, seen: &Arc<Mutex<Seen>>) -> (Arc<Core>, String)
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake(seen.clone()))),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -395,7 +437,7 @@ async fn a_mode_switches_the_live_session_and_is_set_again_on_the_next_run() {
     assert_eq!(seen.lock().unwrap().log.iter().filter(|l| l.starts_with("mode:")).count(), 2);
 
     assert!(core.set_agent_permission_mode("nobody", PermissionMode::Plan).await.is_err());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -411,7 +453,7 @@ async fn a_mode_chosen_while_the_agent_rests_is_set_when_it_starts() {
     let log = seen.lock().unwrap().log.clone();
     assert_eq!(log[0], "mode:acceptEdits", "{log:?}");
     assert!(log[1].starts_with("prompt:") && log[1].ends_with("hello"), "{log:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -436,7 +478,7 @@ async fn a_mode_the_cli_refuses_is_not_kept() {
             if message.contains("could not go back to the mode \"plan first\"") && message.contains("It asks before every edit instead"))),
         "{events:?}"
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -472,7 +514,7 @@ async fn a_live_claude_agent_changes_its_model_without_a_restart() {
         assert_eq!((s.runs.len(), s.shutdowns), (1, 0), "the same process goes on");
     }
     assert!(codly_said(&core, &id, "now works with opus and thinking effort high, in the same conversation").await);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Does the agent's thread have a line of Codly's with this text?
@@ -528,26 +570,59 @@ async fn a_live_claude_agent_changes_its_effort_and_takes_the_default_model_with
     assert!(!codly_said(&core, &id, "now works with thinking effort max").await, "nothing changed in place");
     seen.lock().unwrap().drops_effort = false;
 
-    // A word that is no level of Claude Code is not sent to the session, and a level cannot
-    // be taken away from it: those switches still restart.
+    // A word that is no level of Claude Code is not sent to the session: that switch still
+    // restarts. (Taking a level away does not: the next test.)
     turn(&core, &id, "again").await;
     assert_eq!(seen.lock().unwrap().runs.len(), 2, "the next message starts the agent again");
-    let asked = seen.lock().unwrap().log.len();
-    let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
-    assert_eq!(a.model.as_deref(), Some("opus"));
-    {
-        let s = seen.lock().unwrap();
-        assert_eq!(s.log.len(), asked, "nothing was asked of the session: {:?}", s.log);
-        assert_eq!(s.shutdowns, 2);
-    }
-    turn(&core, &id, "once more").await;
     core.set_agent_model(&id, Some("opus:minimal".into())).await.unwrap();
     {
         let s = seen.lock().unwrap();
         assert!(!s.log.iter().any(|l| l == "effort:minimal"), "{:?}", s.log);
-        assert_eq!(s.shutdowns, 3);
+        assert_eq!(s.shutdowns, 2);
     }
-    core.shutdown().await;
+    shut_down(&core).await;
+}
+
+/// Before, a thinking effort could not be taken away from a live session: the agent was
+/// stopped, and its next message started a new process. Recorded since (part 4 §4, n=2, on a
+/// process started with `--effort high`): `effortLevel: null` takes it away at once. The same
+/// run goes on, also when the change comes during a turn (part 6 §12: the CLI takes it there
+/// too, n=2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_claude_agent_gives_up_its_effort_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = hired_agent(dir.path(), &seen).await;
+    core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
+    turn(&core, &id, "hello").await;
+    let run = agent(&core, &id).await.run_id;
+    assert!(run.is_some());
+
+    // During a turn: the level goes away in the same run, at once.
+    core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
+    wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
+    let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus"), "the row shows no effort");
+    assert_eq!(last_seen(&seen), "effort:none");
+    assert!(!seen.lock().unwrap().log.iter().any(|l| l.starts_with("model:")), "the model was not asked for again");
+    assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+    assert!(
+        codly_said(
+            &core,
+            &id,
+            "now works with Claude Code's default thinking effort, in the same conversation: no restart was needed. Claude Code does not say whether the turn that runs already uses it."
+        )
+        .await
+    );
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
+
+    // Its next run starts with no effort.
+    stop(&core, &id).await;
+    turn(&core, &id, "again").await;
+    assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("opus".to_string())));
+    shut_down(&core).await;
 }
 
 /// A 1:1 agent with a short model name and an effort ("opus:high"). Claude Code names the
@@ -587,7 +662,7 @@ async fn the_agents_row_keeps_its_effort_and_an_effort_alone_is_no_change_of_mod
     turn(&core, &id, "again").await;
     assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("claude-opus-5-5:low".to_string())));
     assert_eq!(agent(&core, &id).await.model.as_deref(), Some("claude-opus-5-5:low"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Before, a model change was refused while a turn ran ("is still working"). Claude Code takes
@@ -609,10 +684,11 @@ async fn a_model_switch_reaches_the_live_session_during_a_turn() {
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
     assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
 
-    // The effort request is recorded between turns only: during one it is not sent.
-    let e = core.set_agent_model(&id, Some("sonnet:high".into())).await.unwrap_err().to_string();
-    assert!(e.contains("is still working: stop its turn first"), "{e}");
-    assert_eq!(last_seen(&seen), "model:sonnet");
+    // The effort too, in the same turn (part 6 §12: the CLI takes it there, n=2).
+    let a = core.set_agent_model(&id, Some("sonnet:high".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("sonnet:high"));
+    assert_eq!(last_seen(&seen), "effort:high", "the model was not asked for again");
+    assert_eq!(turns_done(&core, &id).await, 1, "the turn is still not over");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
 
     // The turn ends as any other, in the same process.
@@ -620,7 +696,7 @@ async fn a_model_switch_reaches_the_live_session_during_a_turn() {
     settled(&core, &id, 2).await;
     assert_eq!(agent(&core, &id).await.run_id, run);
     assert_eq!(seen.lock().unwrap().runs.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Before, a 1:1 agent on a task could not change its model ("is on a task": a restart would
@@ -649,12 +725,13 @@ async fn a_1_to_1_agent_on_a_task_changes_its_model_without_a_restart() {
     let a = core.set_agent_model(&id, None).await.unwrap();
     assert_eq!(a.model.as_deref(), Some("claude-opus-5-5"));
     assert_eq!(last_seen(&seen), "model:default");
-    // Another effort waits for the end of the turn, and a task's run is not restarted for it.
-    let e = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap_err().to_string();
-    assert!(e.contains("is on a task"), "{e}");
-    assert_eq!(last_seen(&seen), "model:default");
+    // Another effort reaches the task's run while its turn runs (part 6 §12), with no restart.
+    let a = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus:high"));
+    assert_eq!(last_seen(&seen), "effort:high");
     assert_eq!(seen.lock().unwrap().shutdowns, 0);
-    core.shutdown().await;
+    assert_eq!(agent(&core, &id).await.task_id.as_deref(), Some(task.id.as_str()), "still on its task");
+    shut_down(&core).await;
 }
 
 /// "Plan first" promises that nothing changes before you accept the plan. The approval rules
@@ -700,7 +777,7 @@ async fn an_agent_that_plans_first_gets_only_reads_approved_until_its_plan_is_ac
     wait_for("the agent's mode to follow the CLI", async || (agent(&core, &id).await.permission_mode == Some(PermissionMode::Ask)).then_some(())).await;
     turn(&core, &id, "ASK-TO-RUN: touch notes.txt").await;
     assert_eq!(last_seen(&seen), "allowed:touch notes.txt");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// In "accept edits" Claude Code does not ask about edits or file-writing shell commands in the
@@ -764,7 +841,7 @@ async fn accept_edits_is_refused_and_ends_where_every_change_asks_you() {
     core.set_request_prefs(&thread, own(ApprovalMode::Strict)).await.unwrap();
     assert_eq!(mode().await, Some(PermissionMode::Ask));
     assert_eq!(modes_asked(&seen).len(), asked);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// An agent in "accept edits" moves to an office where every change asks you. Its first run
@@ -801,7 +878,7 @@ async fn accept_edits_does_not_follow_an_agent_into_an_office_where_every_change
             if decision_type == "agent_control" && summary.contains("asks for edits again") && summary.contains("\"Ask first\""))),
         "the change is on record in the new office: {events:?}"
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -828,7 +905,7 @@ async fn compact_now_is_a_turn_of_its_own_between_turns() {
     stop(&core, &id).await;
     let e = core.compact_agent(&id).await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -845,7 +922,7 @@ async fn the_context_reading_comes_from_the_live_session() {
     stop(&core, &id).await;
     let e = core.agent_context_usage(&id).await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Your acts on a live agent, as the History shows them.
@@ -882,7 +959,7 @@ async fn a_reconnect_reaches_the_live_session_and_its_answer_is_yours() {
     stop(&core, &id).await;
     let e = core.reconnect_agent_mcp(&id, "linear").await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -891,17 +968,85 @@ async fn a_background_command_is_stopped_through_the_live_session() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (core, id) = live_agent(dir.path(), &seen).await;
     let name = agent(&core, &id).await.name;
+    // The run left work in the background: its last list names one command, "npm run dev".
+    turn(&core, &id, "LEAVE-RUNNING").await;
 
+    core.stop_agent_task(&id, "tid-1").await.unwrap();
+    assert_eq!(last_seen(&seen), "stop-task:tid-1");
+    // One the last list does not name (it ended meanwhile): the request still goes out, and
+    // the record names nothing.
     core.stop_agent_task(&id, "tid-2").await.unwrap();
     assert_eq!(last_seen(&seen), "stop-task:tid-2");
-    assert_eq!(your_acts(&core, &id).await, [format!("asked {name} to stop a command it left running in the background")]);
+    // A helper at work, by the id of its call (the id of its row): the adapter finds it, and
+    // its answer names it for the record.
+    core.stop_agent_task(&id, "toolu-1").await.unwrap();
+    assert_eq!(last_seen(&seen), "stop-task:toolu-1");
+    assert_eq!(
+        your_acts(&core, &id).await,
+        [
+            format!("asked {name} to stop what it left running in the background: npm run dev"),
+            format!("asked {name} to stop what it left running in the background"),
+            format!("asked {name} to stop its helper: Run the tests"),
+        ]
+    );
+    // Work that ended a moment before (the list on record still names "tid-1"), and a helper
+    // that ended: the adapter refuses, in its own words, and no stop is on record.
+    for gone in ["tid-1", "toolu-1"] {
+        let e = core.stop_agent_task(&id, gone).await.unwrap_err().to_string();
+        assert_eq!(e, "that work is not running any more", "{gone}");
+    }
+    assert_eq!(your_acts(&core, &id).await.len(), 3, "a refused stop is not on record");
     let e = core.stop_agent_task(&id, "").await.unwrap_err().to_string();
     assert_eq!(e, "which background command?");
 
     stop(&core, &id).await;
     let e = core.stop_agent_task(&id, "tid-2").await.unwrap_err().to_string();
     assert!(e.contains("is not running"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
+}
+
+/// "Turn off" and "Turn on" of an MCP server reach the live session, and each is on record
+/// as your act once Claude Code answered. A switch it refused is on record as what you asked,
+/// with its reason. Codly's own server stays on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_mcp_server_is_turned_off_and_on_through_the_live_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let name = agent(&core, &id).await.name;
+
+    core.set_agent_mcp_enabled(&id, " docs ", false).await.unwrap();
+    assert_eq!(last_seen(&seen), "mcp-off:docs");
+    core.set_agent_mcp_enabled(&id, "docs", true).await.unwrap();
+    assert_eq!(last_seen(&seen), "mcp-on:docs");
+    // Claude Code saves the switch for the folder the run works in: this agent's own worktree.
+    let worktree = agent(&core, &id).await.worktree.expect("a hired 1:1 agent's worktree");
+    assert!(Path::new(&worktree).starts_with(dir.path().join("data").join("worktrees")), "{worktree}");
+    let off = format!("you turned docs off for Claude Code in the folder {name} works in (this run and every later one there, until you turn it on)");
+    assert_eq!(your_acts(&core, &id).await, [off, format!("you turned docs on for Claude Code in the folder {name} works in")]);
+
+    // Claude Code refuses a switch: its reason is yours, and the record says what you asked
+    // and what came back. It does not say "you turned": the server was not turned on.
+    let e = core.set_agent_mcp_enabled(&id, "does-not-start", true).await.unwrap_err().to_string();
+    assert_eq!(e, "Claude Code answered: Connection closed");
+    assert_eq!(last_seen(&seen), "mcp-on:does-not-start");
+    let acts = your_acts(&core, &id).await;
+    assert_eq!(acts.len(), 3, "{acts:?}");
+    assert_eq!(acts[2], format!("asked {name} to turn does-not-start on: Claude Code answered: Connection closed"));
+    assert!(!acts.iter().any(|a| a.starts_with("you turned does-not-start")), "{acts:?}");
+
+    // Codly's own server, and no server named: nothing reaches the CLI, nothing is on record.
+    let e = core.set_agent_mcp_enabled(&id, "codly", false).await.unwrap_err().to_string();
+    assert_eq!(e, format!("codly is Codly's own server: {name} reports to Codly through it, so it stays on"));
+    let e = core.set_agent_mcp_enabled(&id, "  ", true).await.unwrap_err().to_string();
+    assert_eq!(e, "which MCP server?");
+    assert_eq!(last_seen(&seen), "mcp-on:does-not-start");
+    assert_eq!(your_acts(&core, &id).await.len(), 3);
+
+    stop(&core, &id).await;
+    let e = core.set_agent_mcp_enabled(&id, "docs", false).await.unwrap_err().to_string();
+    assert!(e.contains("is not running"), "{e}");
+    shut_down(&core).await;
 }
 
 /// Claude Code answers a reconnect when its try to connect is over, and a server can take
@@ -916,7 +1061,7 @@ async fn a_reconnect_waits_for_a_server_that_is_slow_to_connect() {
     assert_eq!(e, "Claude Code answered: Dynamic Client Registration rejected (HTTP 401): {\"error\":\"unauthorized\"}");
 
     stop(&core, &id).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The rows of a snapshot's `session_events`, as "<server> <state>" and, for a list of
@@ -968,7 +1113,7 @@ async fn a_fresh_snapshot_has_the_servers_and_the_background_work_of_a_long_run(
     // The process is gone, and its servers and its background work with it.
     stop(&core, &id).await;
     assert_eq!(session_lines(&core.snapshot().await.unwrap().session_events), Vec::<String>::new());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Every run reports each of its MCP servers when it starts. A server that stands where the
@@ -1019,5 +1164,124 @@ async fn a_new_run_with_the_same_servers_writes_no_rows_and_still_shows_them() {
     turn(&core, &id, "DOCS-FAILS").await;
     assert_eq!(server_rows().await.len(), 4);
     stop(&core, &id).await;
-    core.shutdown().await;
+    shut_down(&core).await;
+}
+
+/// Recorded (part 5 §8, `r7-effort-null-low-*` and `-max-*`, n=2 each; part 4 §4 for `high`):
+/// `effortLevel: null` gives "medium" at once, whatever level the process had. Before, Codly did
+/// not read the settings back after it: a session that kept its level would have left the
+/// agent's row with no effort while the session still worked with the old one. Now the settings
+/// are read: "medium" is the switch done; the old level still there is the switch not taken,
+/// the same way as for a level the session drops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taking_an_effort_away_reads_the_level_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = hired_agent(dir.path(), &seen).await;
+    core.set_agent_model(&id, Some("opus:max".into())).await.unwrap();
+    turn(&core, &id, "hello").await;
+    let run = agent(&core, &id).await.run_id;
+    assert!(run.is_some());
+
+    // The session answers "medium" after the null: the level is gone, in the same run.
+    let a = core.set_agent_model(&id, Some("opus".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus"));
+    assert_eq!(last_seen(&seen), "effort:none");
+    assert_eq!(agent(&core, &id).await.run_id, run, "the same run goes on");
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+
+    // The session still answers "max" after the null, with another model: the model changed,
+    // the effort did not, the agent says so, and its row keeps the effort.
+    core.set_agent_model(&id, Some("opus:max".into())).await.unwrap();
+    seen.lock().unwrap().drops_effort = true;
+    let e = format!("{:#}", core.set_agent_model(&id, Some("sonnet".into())).await.unwrap_err());
+    assert!(e.contains("changed its model, but not its thinking effort"), "{e}");
+    assert!(e.contains("Claude Code did not take the effort away: it still works with \"max\""), "{e}");
+    assert_eq!(agent(&core, &id).await.model.as_deref(), Some("sonnet:max"));
+    assert_eq!(agent(&core, &id).await.run_id, run);
+    assert_eq!(seen.lock().unwrap().shutdowns, 0);
+
+    // The null alone, not taken: as for a level the session drops, the agent restarts, and its
+    // next run starts with no effort.
+    let a = core.set_agent_model(&id, Some("sonnet".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("sonnet"));
+    assert_eq!(seen.lock().unwrap().shutdowns, 1);
+    seen.lock().unwrap().drops_effort = false;
+    turn(&core, &id, "again").await;
+    assert_eq!(seen.lock().unwrap().models.last(), Some(&Some("sonnet".to_string())));
+    shut_down(&core).await;
+}
+
+/// Recorded (part 6 §12, `r8-effort-mid-turn-high-*` and `-null-*`, n=2 each): Claude Code takes
+/// an effort level while a turn runs, and its settings name the new level at once. Before, the
+/// change was refused until the turn ended ("is still working"). Now it reaches the session,
+/// and the thread says that the CLI does not tell whether the running turn uses it yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_change_reaches_the_live_session_during_a_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    let run = agent(&core, &id).await.run_id;
+    core.set_agent_model(&id, Some("opus:low".into())).await.unwrap();
+
+    core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
+    wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
+    let a = core.set_agent_model(&id, Some("opus:high".into())).await.unwrap();
+    assert_eq!(a.model.as_deref(), Some("opus:high"));
+    assert_eq!(last_seen(&seen), "effort:high", "the effort alone went out");
+    assert_eq!(turns_done(&core, &id).await, 1, "the turn it was sent in is not over");
+    assert_eq!((agent(&core, &id).await.run_id, seen.lock().unwrap().shutdowns), (run, 0), "the same run goes on");
+    assert!(
+        codly_said(
+            &core,
+            &id,
+            "now works with thinking effort high, in the same conversation: no restart was needed. Claude Code does not say whether the turn that runs already uses it."
+        )
+        .await
+    );
+
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
+    // Between turns the thread does not say it.
+    core.set_agent_model(&id, Some("opus:max".into())).await.unwrap();
+    let events = core.events(Some(&id), None, 500).await.unwrap();
+    let last = events.iter().rev().find_map(|e| match &e.kind {
+        EventKind::Chat { message } if message.author == "codly" && message.text.contains("thinking effort max") => Some(message.text.clone()),
+        _ => None,
+    });
+    assert_eq!(last.as_deref(), Some(format!("{} now works with thinking effort max, in the same conversation: no restart was needed.", a.name).as_str()));
+    shut_down(&core).await;
+}
+
+/// The read-back holds during a turn as between turns: Claude Code answers "success" also for
+/// a level it drops, and only its settings say what the session works with. With another
+/// model too, the model changes and the agent says the effort did not; the effort alone is
+/// not taken in place, and a running turn is not stopped for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_effort_the_session_drops_during_a_turn_is_said_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (core, id) = live_agent(dir.path(), &seen).await;
+    core.set_agent_model(&id, Some("sonnet:low".into())).await.unwrap();
+    core.send_chat(&format!("agent:{id}"), "HOLD-THE-TURN").await.unwrap();
+    wait_for("the turn to start", async || (turns_started(&core, &id).await == 2).then_some(())).await;
+    seen.lock().unwrap().drops_effort = true;
+
+    let e = format!("{:#}", core.set_agent_model(&id, Some("opus:max".into())).await.unwrap_err());
+    assert!(e.contains("changed its model, but not its thinking effort") && e.contains("did not take the effort level \"max\""), "{e}");
+    assert!(e.contains("it works with \"low\""), "{e}");
+    assert_eq!(agent(&core, &id).await.model.as_deref(), Some("opus:low"));
+
+    let e = core.set_agent_model(&id, Some("opus:max".into())).await.unwrap_err().to_string();
+    assert!(e.contains("is still working: stop its turn first"), "{e}");
+    {
+        let s = seen.lock().unwrap();
+        assert_eq!(s.log[s.log.len() - 3..], ["model:opus", "effort:max", "effort:max"], "the session was asked each time");
+        assert_eq!(s.shutdowns, 0, "the running turn was not stopped");
+    }
+    assert!(!codly_said(&core, &id, "thinking effort max").await, "nothing changed in place");
+    seen.lock().unwrap().drops_effort = false;
+    seen.lock().unwrap().release.notify_one();
+    settled(&core, &id, 2).await;
+    shut_down(&core).await;
 }

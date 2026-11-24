@@ -4,13 +4,20 @@
 //! fixed list (the only variable is the `-C` directory, the agent's own worktree), and the
 //! worktree is checked to be a real linked worktree of the repo before git runs in it (an agent
 //! can rewrite its `.git` pointer; see `git.rs`). The parsers are pure and unit-tested.
+//!
+//! `agent_diff` is a 1:1 agent's whole work for the Changes room: what its branch and its files
+//! add to the branch it will merge into, read the way a checkpoint reads a worktree (a private
+//! index), so neither the worktree nor its index changes. Your own checkout (an agent that
+//! works in your project folder) is only read: no index and no object is written there.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::Core;
+use crate::model::Role;
 
 /// One changed path in the worktree (`git status --porcelain`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -129,6 +136,41 @@ impl Core {
             view.log = parse_log(&o);
         }
         Ok(view)
+    }
+
+    /// "All changes" of a 1:1 agent: its commits, its uncommitted edits and its new files, as
+    /// one diff from where its branch left the branch checked out in your project folder (the
+    /// branch its merge goes into) to its files as they are. Its files are read into a private
+    /// index (`Git::snapshot`), as a checkpoint reads them: the changed files are stored as git
+    /// objects, and neither the worktree nor its index changes. An agent that works in your
+    /// project folder itself: its uncommitted changes against HEAD and its new files, read
+    /// without writing anything (`Git::uncommitted_diff`). Either way, what a commit of Codly's
+    /// leaves out (a huge new folder or file) is not in it. No worktree: an empty diff.
+    pub async fn agent_diff(&self, agent_id: &str) -> anyhow::Result<String> {
+        let inner = &self.inner;
+        let agent = inner.agent(agent_id)?;
+        if agent.role != Role::Solo {
+            bail!("only a 1:1 agent has changes of its own; a task's changes are in its plan");
+        }
+        let Some(wt) = agent.worktree.as_deref().map(PathBuf::from).filter(|w| w.is_dir()) else { return Ok(String::new()) };
+        let ws_id = inner.store.agent_workspace(agent_id)?.ok_or_else(|| anyhow!("{} is in no office", agent.name))?;
+        let ws = inner.store.workspace(&ws_id)?.ok_or_else(|| anyhow!("unknown workspace {ws_id}"))?;
+        let repo = PathBuf::from(&ws.repo_path);
+        let git = &inner.git;
+        let target = git.head(&repo).await?.ok_or_else(|| anyhow!("your project has no commit yet, so there is nothing to compare with"))?;
+        if wt == repo {
+            // Your own checkout: read only, so no object of it goes into your repository.
+            return git.uncommitted_diff(&repo).await;
+        }
+        // An agent can rewrite its `.git` pointer (see `git.rs`): no git runs in such a worktree.
+        git.check_worktree(&repo, &wt).await?;
+        let tip = git.head(&wt).await?.ok_or_else(|| anyhow!("{}'s worktree has no commit", agent.name))?;
+        let base = git
+            .merge_base(&repo, &target, &tip)
+            .await?
+            .ok_or_else(|| anyhow!("{}'s branch shares no history with your checked-out branch", agent.name))?;
+        let now = git.worktree_tree(&wt).await?;
+        git.diff_trees(&wt, &base, &now).await
     }
 }
 

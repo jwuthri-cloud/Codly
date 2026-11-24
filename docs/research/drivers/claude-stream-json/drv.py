@@ -103,8 +103,9 @@ class Session:
             except ValueError:
                 self._log("recv", {"_unparsed": line})
                 continue
-            self._log("recv", msg)
+            # One step under the lock: a note taken under it sees a line in the raw file and in `events`, or in neither.
             with self.cv:
+                self._log("recv", msg)
                 self.events.append(msg)
                 self.cv.notify_all()
             if msg.get("type") == "control_request":

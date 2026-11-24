@@ -211,6 +211,7 @@ async fn main() {
         raw_log: raw_log.clone(),
         byok_command: None,
         sandbox_shell: false,
+        max_budget_usd: None,
     };
     println!("spawning {} ({:?}, model {:?}) in {}", spec.bin.display(), spec.role, spec.model, repo.display());
 

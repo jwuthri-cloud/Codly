@@ -6,12 +6,16 @@ import { api } from '../api';
 import type { MergeState } from '../gen/MergeState';
 import type { MergeWarning } from '../gen/MergeWarning';
 import type { PrSource } from '../gen/PrSource';
+import type { TaskStatus } from '../gen/TaskStatus';
+import { store } from './store.svelte';
 import { toast, toasts } from './toasts.svelte';
 import { ui } from './ui.svelte';
 
 class MergeUi {
   /** What the core last said, by `mergeKey` (missing: not read, or it could not be read). */
   states = $state<Record<string, MergeState>>({});
+  /** The plans whose merge is under way (`mergePlan`): no button starts a second one. */
+  merging = $state<string[]>([]);
 }
 export const mergeUi = new MergeUi();
 
@@ -26,6 +30,24 @@ export function conflictsWith(source: PrSource): string | null {
   const merge = mergeUi.states[mergeKey(source)];
   return merge?.conflicts.length ? merge.target : null;
 }
+
+/**
+ * What stands between a finished plan and your branch, as the core last said (null: not read,
+ * or nothing): files that conflict, checks that failed on the merge result, or checks that
+ * could not run there. While one stands, "Merge into" is a plain button: the way out (an agent
+ * resolves it, an agent fixes the checks) is the one main button, and checks that could not run
+ * have no main button at all. Pure.
+ */
+export function mergeBlock(merge: Pick<MergeState, 'conflicts' | 'failed_checks' | 'checks_not_run'> | null | undefined): 'conflict' | 'checks-failed' | 'checks-not-run' | null {
+  if (!merge) return null;
+  if (merge.conflicts.length) return 'conflict';
+  if (merge.failed_checks.length) return 'checks-failed';
+  return merge.checks_not_run ? 'checks-not-run' : null;
+}
+
+/** A task that is not at work any more: done, failed or cancelled. One the window does not know
+ *  yet (its row comes after the answer that named it) is not over. Pure. */
+export const taskOver = (status: TaskStatus | undefined): boolean => status === 'done' || status === 'failed' || status === 'cancelled';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : typeof e === 'string' ? e : 'Unknown error');
 
@@ -114,7 +136,8 @@ export async function resolveMergeConflict(source: PrSource, who: string | null 
           ? 'A task of the plan resolves it. When the plan is checked again, you can merge it.'
           : `${who ?? 'The agent'} resolves it in its conversation. Merge again when its turn ends.`;
     const title = fixing ? 'An agent is fixing the checks' : merge.conflicts.length ? 'An agent is resolving the conflict' : `${merge.target} is in Codly’s branch now`;
-    const action = task ? { label: 'Open the task', run: () => ui.selectTask(task) } : undefined;
+    // The toast says an agent is on it: it goes once that task is over.
+    const action = task ? { label: 'Open the task', run: () => ui.selectTask(task), gone: () => taskOver(store.taskMap.get(task)?.status) } : undefined;
     toasts.update(id, { kind: 'success', title, body, action });
     return true;
   } catch (e) {

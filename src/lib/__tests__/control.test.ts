@@ -106,7 +106,8 @@ describe('Claude session controls', () => {
     const core = vi.spyOn(api, 'compactAgent').mockResolvedValue(undefined);
     expect(await compactAgent('bo', 'Bo')).toBe(true);
     expect(core).toHaveBeenCalledWith('bo');
-    expect(toasts.list.map((t) => [t.kind, t.title])).toEqual([['success', 'Compacting Bo’s conversation']]);
+    // The thread shows the core's record of the request: no toast.
+    expect(toasts.list).toEqual([]);
     for (const t of toasts.list) toasts.dismiss(t.id);
   });
 

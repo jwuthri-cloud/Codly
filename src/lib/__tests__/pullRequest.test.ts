@@ -19,7 +19,10 @@ import {
   prKey,
   prUi,
   pushPrBranch,
+  readsByItself,
+  readWhileShown,
   refreshPullRequest,
+  type Page,
 } from '../state/pullRequest.svelte';
 import { toasts } from '../state/toasts.svelte';
 
@@ -119,6 +122,70 @@ describe('the pull-request step', () => {
     await refreshPullRequest(plan);
     expect(prUi.opened[prKey(plan)]?.checks?.passed).toBe(2);
     expect(said()).toEqual([['error', 'Couldn’t read the pull request', 'gh could not read the pull request: HTTP 502']]);
+  });
+
+  it('reads by itself only an open pull request whose row is in view, and not after you merged it here', () => {
+    expect(readsByItself(pr, true, false)).toBe(true);
+    expect(readsByItself(pr, false, false)).toBe(false);
+    expect(readsByItself(pr, true, true)).toBe(false);
+    expect(readsByItself({ ...pr, state: 'merged' }, true, false)).toBe(false);
+    expect(readsByItself(null, true, false)).toBe(false);
+    expect(readsByItself(undefined, true, false)).toBe(false);
+  });
+
+  it('one timer per pull request, however many of its rows are in view, and none once they all left', () => {
+    const ticks: (() => void)[] = [];
+    const focus: (() => void)[] = [];
+    let stopped = 0;
+    let visible = true;
+    const page: Page = {
+      every: (_ms, run) => {
+        ticks.push(run);
+        return () => void stopped++;
+      },
+      onFocus: (run) => {
+        focus.push(run);
+        return () => {};
+      },
+      visible: () => visible,
+    };
+    const refresh = vi.spyOn(api, 'refreshPullRequest').mockResolvedValue(pr);
+    const first = readWhileShown(plan, page);
+    const second = readWhileShown(plan, page);
+    expect(ticks).toHaveLength(1);
+    ticks[0]();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    // The page hidden: no read.
+    visible = false;
+    ticks[0]();
+    focus[0]();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    first();
+    first(); // a second release of the same row counts once
+    expect(stopped).toBe(0);
+    second();
+    expect(stopped).toBe(1);
+    // Another pull request has its own timer.
+    readWhileShown({ kind: 'agent', id: 'a1' }, page)();
+    expect(ticks).toHaveLength(2);
+  });
+
+  it('a read the row makes by itself that fails shows no toast: the row keeps the last reading and its age', async () => {
+    prUi.opened[prKey(plan)] = { ...pr, checks: checks({ passed: 1, read_at: 5 }) };
+    vi.spyOn(api, 'refreshPullRequest').mockRejectedValue(new Error('gh could not read the pull request: HTTP 502'));
+    await refreshPullRequest(plan, true);
+    expect(said()).toEqual([]);
+    expect(prUi.opened[prKey(plan)]?.checks).toEqual(checks({ passed: 1, read_at: 5 }));
+  });
+
+  it('a read by itself is not made while a read of that pull request is on its way', async () => {
+    let answer!: (p: PullRequest) => void;
+    const refresh = vi.spyOn(api, 'refreshPullRequest').mockReturnValue(new Promise<PullRequest>((r) => (answer = r)));
+    const asked = refreshPullRequest(plan);
+    await refreshPullRequest(plan, true);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    answer(pr);
+    await asked;
   });
 
   it('the checks read as one line, the worst news first', () => {

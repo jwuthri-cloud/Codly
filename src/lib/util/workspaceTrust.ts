@@ -42,7 +42,7 @@ export function trustStatus(t: WorkspaceTrust): string {
     case 'nothing':
       return 'This repo has no configuration that an agent CLI loads by itself.';
     case 'trusted':
-      return 'You trusted these files. Agents load them.';
+      return 'You trusted these files. Agents load them from their next run on; an agent that runs now goes on without them until it starts again.';
     case 'without':
       return 'You opened this repo without these files. Agents start without them.';
     case 'ask':

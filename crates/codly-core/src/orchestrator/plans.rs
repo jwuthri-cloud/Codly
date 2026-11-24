@@ -425,7 +425,14 @@ impl Inner {
                 return Ok(());
             }
         }
-        let what = if resolving { "conflict resolution" } else { "plan" };
+        // The task on the plan's own branch made the changes you asked for in review: no
+        // conflict was there.
+        let review = resolving && self.open_resolution(plan)?.as_ref().is_some_and(merge_conflict::answers_review);
+        let what = match (resolving, review) {
+            (true, true) => "review changes",
+            (true, false) => "conflict resolution",
+            (false, _) => "plan",
+        };
         for t in self.store.plan_tasks(&plan.id)? {
             if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
                 continue;
@@ -442,6 +449,7 @@ impl Inner {
         }
         // Branches and worktrees are kept: never delete unmerged work.
         let summary = match resolving {
+            true if review => format!("the changes you asked for in review were {why}; the plan finishes again as it was"),
             true => format!("the conflict resolution of plan \"{}\" was {why}; the plan finishes again as it was", prompts::clip(&plan.summary, 60)),
             false => format!("plan \"{}\" {why}", prompts::clip(&plan.summary, 60)),
         };
@@ -1147,6 +1155,7 @@ impl Inner {
             }
             Err(e) => tracing::warn!("crash recovery incomplete: {e}"),
         }
+        self.rechecks_at_launch();
     }
 
     /// Had the task's worker ended its last turn, completed, with no turn started after it?
@@ -1285,6 +1294,17 @@ impl Inner {
                 let res = self.decide(Some(&p.workspace_id), None, "merge", "aborted a merge left half-done by a crash", json!({ "plan_id": p.id }));
                 each("plan", &p.id, res.map(drop));
             }
+        }
+        // A resolution whose start Codly closed in the middle of: its merge is taken back now,
+        // so the plan is where it was at once, not at its next merge, finish or resolution.
+        match self.starts_cut_short() {
+            Ok(plans) => {
+                let _g = self.repo_lock.lock().await;
+                for p in plans {
+                    each("plan", &p.id, self.settle_resolution(&p).await.map(drop));
+                }
+            }
+            Err(e) => tracing::warn!("crash recovery: the starts of conflict resolutions cannot be read: {e}"),
         }
         Ok(regate)
     }

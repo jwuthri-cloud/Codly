@@ -1299,7 +1299,7 @@ mod tests {
     /// Feed the agent→client side of an ACP probe capture through the normalizer, answering
     /// permissions with allow-once like the probe did. Returns events and the answers.
     fn replay(provider: Provider, name: &str) -> (Vec<EventKind>, Vec<Value>) {
-        let mut norm = AcpNormalizer::new(provider, "a1", "r1", PathBuf::from("/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/fixture-repo2"));
+        let mut norm = AcpNormalizer::new(provider, "a1", "r1", PathBuf::from("/tmp/scratch/fixture-repo2"));
         let mut events = norm.turn_started("prompt");
         let mut answers = Vec::new();
         let mut prompt_id = None;
@@ -1571,6 +1571,7 @@ mod tests {
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
         };
         let (a, env) = launch(&spec, Some(Path::new("/tmp/r/gemini-policy.toml")));
         assert_eq!(a, ["--acp", "--skip-trust", "-m", "gemini-2.5-flash", "--policy", "/tmp/r/gemini-policy.toml"]);
@@ -1632,6 +1633,7 @@ mod tests {
             raw_log: dir.join("raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
         };
         let (events, events_rx) = mpsc::unbounded_channel();
         let actor = Actor {

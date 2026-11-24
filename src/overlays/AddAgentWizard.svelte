@@ -14,7 +14,7 @@
   import type { ModelCatalog } from '../lib/gen/ModelCatalog';
   import type { Provider } from '../lib/gen/Provider';
   import { api } from '../lib/api';
-  import { askForHire, startHire } from '../lib/state/hireWizard';
+  import { askForHire, quickStart, startHire } from '../lib/state/hireWizard';
   import { store } from '../lib/state/store.svelte';
   import { toast } from '../lib/state/toasts.svelte';
   import { ui } from '../lib/state/ui.svelte';
@@ -231,6 +231,15 @@
     if (done) close();
   }
 
+  /** Quick start: the defaults of the CLI picked here, nothing else of the form. */
+  async function quick() {
+    if (busy || custom) return;
+    busy = true;
+    const done = await quickStart(m.provider as Provider);
+    busy = false;
+    if (done) close();
+  }
+
   const stepBlocked = $derived(step === 0 && !m.name.trim());
   const portrait = (seed: string) => ({ id: `wizard-${seed}`, color: m.color ?? 0, look_seed: seed, provider: (custom ? 'claude' : m.provider) as Provider, role: 'solo' as const, name: m.name });
 </script>
@@ -385,7 +394,7 @@
               <button type="button" class="choice" role="radio" aria-checked={picked.name === option.id} class:on={picked.name === option.id} onclick={() => pickModel(option.id)}><span class="radio"></span>{optionLabel(option)}</button>
             {/each}
           </div>
-          <input value={picked.name} oninput={(e) => pickModel(e.currentTarget.value)} placeholder="Other model name" spellcheck="false" autocomplete="off" />
+          <input value={picked.name} oninput={(e) => pickModel(e.currentTarget.value)} placeholder="Other model name" aria-label="Other model name" spellcheck="false" autocomplete="off" />
           {#if modelNote}<span class="muted small">{modelNote}</span>{/if}
         </div>
         {#if efforts.length}
@@ -447,6 +456,11 @@
 
   <footer>
     <button type="button" class="btn sm ghost save" onclick={saveFile} disabled={!m.name.trim()} data-tip="Download these settings as a .json hire file">Save as .json</button>
+    {#if step === 0 && !custom}
+      <!-- One step: the CLI's defaults, a name the office does not use yet; the wizard is for choosing. -->
+      <button type="button" class="btn sm" disabled={busy || !!unavailable(m.provider as Provider)} onclick={quick}
+        data-tip={unavailable(m.provider as Provider) ? `${PROVIDER_LABEL[m.provider as Provider]}: ${unavailable(m.provider as Provider)?.toLowerCase()}` : `Start it now with ${PROVIDER_LABEL[m.provider as Provider]}’s defaults: a new name, its default look and model`}>Quick start with {PROVIDER_LABEL[m.provider as Provider]}</button>
+    {/if}
     <button type="button" class="btn sm ghost" onclick={() => (step > 0 ? (step -= 1) : close())}>{step > 0 ? 'Back' : 'Cancel'}</button>
     {#if step < STEPS.length - 1}
       <button type="button" class="btn sm primary" disabled={stepBlocked} onclick={next}>Next</button>

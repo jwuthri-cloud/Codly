@@ -1154,7 +1154,9 @@ impl CodexAgent {
                     self.start_turn(text).await;
                 }
             }
-            AgentCmd::Interrupt => self.interrupt().await,
+            AgentCmd::Interrupt => {
+                self.interrupt().await;
+            }
             AgentCmd::Approval { approval_id, decision } => match self.norm.answer(&approval_id, &decision) {
                 Some((reply, events)) => match self.server.send(&reply, &self.raw).await {
                     Ok(()) => self.emit_all(events),
@@ -1228,43 +1230,55 @@ impl CodexAgent {
         self.request("turn/steer", params, Pending::Steer(text)).await;
     }
 
-    async fn interrupt(&mut self) {
+    /// False: a request could not be written. The server takes no more lines, the error of
+    /// that request said so (`request`), and no further one was tried: it would only fail
+    /// with the same words.
+    async fn interrupt(&mut self) -> bool {
         match (self.thread_id.clone(), self.active_turn.clone()) {
             (Some(tid), Some(turn)) => {
                 self.norm.interrupt_requested = true;
-                self.request("turn/interrupt", json!({ "threadId": tid, "turnId": turn }), Pending::Interrupt).await;
-                self.interrupt_subagents().await;
+                let own = self.request("turn/interrupt", json!({ "threadId": tid, "turnId": turn }), Pending::Interrupt).await;
+                let sent = own && self.interrupt_subagents().await;
                 self.wait_at_most(INTERRUPT_TIMEOUT);
+                sent
             }
             // The limit of its `turn/start` still runs.
-            _ if self.turn_pending => self.interrupt_after_start = true,
+            _ if self.turn_pending => {
+                self.interrupt_after_start = true;
+                true
+            }
             // No turn of its own, but its subagents may still work.
             _ => self.interrupt_subagents().await,
         }
     }
 
     /// A subagent's turn runs on its own thread: stopping the agent's turn does not stop it,
-    /// and nobody else can.
-    async fn interrupt_subagents(&mut self) {
+    /// and nobody else can. False: as for `interrupt`.
+    async fn interrupt_subagents(&mut self) -> bool {
         for (thread, turn) in self.norm.subagent_turns() {
-            self.request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), Pending::Interrupt).await;
+            if !self.request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }), Pending::Interrupt).await {
+                return false;
+            }
         }
+        true
     }
 
     /// interrupt the turn (≤ 5 s) → thread/unsubscribe (≤ 3 s) → done. The server keeps
-    /// running for the other agents.
+    /// running for the other agents. A server that takes no more lines is asked nothing
+    /// after the first request that fails: the run ends at once, with that one error.
     async fn begin_shutdown(&mut self) {
         if self.stage != Stage::Running {
             return;
         }
         self.queue.clear();
         self.steer_queue.clear();
+        if !self.interrupt().await {
+            return self.finish();
+        }
         if self.active_turn.is_some() || self.turn_pending {
-            self.interrupt().await;
             self.stage = Stage::Interrupting;
             self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
         } else {
-            self.interrupt_subagents().await;
             self.unsubscribe().await;
         }
     }
@@ -1429,8 +1443,8 @@ enum AnswerShape {
     Decisions(Vec<(ApprovalChoice, Value)>),
     /// `{permissions, scope}`
     Permissions(Value),
-    /// `{answers}`
-    UserInput,
+    /// `{answers}`, keyed by the id of each question asked: (id, text).
+    UserInput(Vec<(String, String)>),
     /// `{action, content}`
     Elicitation,
 }
@@ -2163,7 +2177,13 @@ impl CodexNormalizer {
             "item/permissions/requestApproval" => {
                 (ApprovalSubject::Permissions { detail: p.clone() }, AnswerShape::Permissions(p["permissions"].clone()), p["reason"].as_str().map(str::to_owned))
             }
-            "item/tool/requestUserInput" => (ApprovalSubject::Question { questions: p["questions"].clone() }, AnswerShape::UserInput, None),
+            "item/tool/requestUserInput" => {
+                let asked = p["questions"].as_array().into_iter().flatten();
+                let ids = asked
+                    .filter_map(|q| Some((q["id"].as_str()?.to_owned(), q["question"].as_str().unwrap_or_default().to_owned())))
+                    .collect();
+                (ApprovalSubject::Question { questions: p["questions"].clone() }, AnswerShape::UserInput(ids), None)
+            }
             "mcpServer/elicitation/request" => {
                 let reason = p["message"].as_str().map(str::to_owned);
                 (ApprovalSubject::Question { questions: p.clone() }, AnswerShape::Elicitation, reason)
@@ -2177,7 +2197,7 @@ impl CodexNormalizer {
         let choices = match &shape {
             AnswerShape::Decisions(list) => list.iter().map(|(c, _)| *c).collect(),
             AnswerShape::Permissions(_) => vec![ApprovalChoice::AllowOnce, ApprovalChoice::AllowSession, ApprovalChoice::Deny],
-            AnswerShape::UserInput => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Cancel],
+            AnswerShape::UserInput(_) => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Cancel],
             AnswerShape::Elicitation => vec![ApprovalChoice::AllowOnce, ApprovalChoice::Deny, ApprovalChoice::Cancel],
         };
         // A subagent's request is the agent's to get answered: the card says who asks.
@@ -2221,7 +2241,7 @@ impl CodexNormalizer {
                 ApprovalChoice::AllowSession | ApprovalChoice::AllowAlways => json!({ "permissions": perms, "scope": "session" }),
                 _ => json!({ "permissions": {}, "scope": "turn" }),
             },
-            AnswerShape::UserInput => json!({ "answers": if allow { d.answers.clone().unwrap_or_else(|| json!({})) } else { json!({}) } }),
+            AnswerShape::UserInput(asked) => json!({ "answers": if allow { user_input_answers(&asked, d.answers.as_ref()) } else { json!({}) } }),
             AnswerShape::Elicitation => match d.choice {
                 _ if allow => json!({ "action": "accept", "content": d.answers.clone().unwrap_or(Value::Null) }),
                 ApprovalChoice::Deny => json!({ "action": "decline" }),
@@ -2421,6 +2441,31 @@ fn pick_decision(list: &[(ApprovalChoice, Value)], choice: ApprovalChoice) -> Va
         .unwrap_or_else(|| json!(if matches!(choice, AllowOnce | AllowSession | AllowAlways) { "accept" } else { "decline" }))
 }
 
+/// The `answers` of a `requestUserInput` response: for every question asked (id, text), its
+/// id → `{ answers: [..] }` (`ToolRequestUserInputResponse`, `ToolRequestUserInputAnswer` of
+/// codex-cli 0.166.0; from the generated types, not verified on a live run). The card files an
+/// answer under the question's text, as a string or a list of strings; one filed under the id
+/// is read too, also in Codex's own `{ answers }` form. A question with no answer gets an empty
+/// list, and an answer that names no question asked is dropped.
+fn user_input_answers(asked: &[(String, String)], given: Option<&Value>) -> Value {
+    let strings = |v: &Value| -> Vec<Value> {
+        let picked = match v {
+            Value::Object(o) => o.get("answers").and_then(Value::as_array).cloned().unwrap_or_default(),
+            Value::Array(a) => a.clone(),
+            other => vec![other.clone()],
+        };
+        picked.into_iter().filter(|a| a.as_str().is_some_and(|s| !s.is_empty())).collect()
+    };
+    let out: serde_json::Map<String, Value> = asked
+        .iter()
+        .map(|(id, text)| {
+            let answer = given.and_then(|g| g.get(id.as_str()).or_else(|| g.get(text.as_str())));
+            (id.clone(), json!({ "answers": answer.map(strings).unwrap_or_default() }))
+        })
+        .collect();
+    Value::Object(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2441,7 +2486,7 @@ mod tests {
     /// an interrupt) through the normalizer, answering approvals like the probe did.
     #[test]
     fn replays_the_app_server_fixture() {
-        let mut norm = CodexNormalizer::new("a1", "r1", PathBuf::from("/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/fixture-repo"), false);
+        let mut norm = CodexNormalizer::new("a1", "r1", PathBuf::from("/tmp/scratch/fixture-repo"), false);
         let mut events = Vec::new();
         let mut replies = Vec::new();
         for line in fixture() {
@@ -2609,6 +2654,55 @@ mod tests {
         let a = approval_of(&ev);
         let ev = norm.on_notification("serverRequest/resolved", &json!({ "threadId": "t", "requestId": 9 }));
         assert!(ev.iter().any(|e| matches!(e, EventKind::ApprovalResolved { approval_id, status: ApprovalStatus::Cancelled, .. } if *approval_id == a.id)));
+    }
+
+    /// The card files your answers under each question's text, as a string or a list. Codex
+    /// reads them under each question's id, as `{ answers: [..] }`. The request and the
+    /// responses are written from the generated types of codex-cli 0.166.0
+    /// (`ToolRequestUserInputParams`, `ToolRequestUserInputResponse`), not from a live run.
+    #[test]
+    fn the_answers_to_a_codex_question_are_filed_under_its_ids() {
+        let mut norm = CodexNormalizer::new("a", "r", PathBuf::from("/w"), false);
+        let option = |label: &str| json!({ "label": label, "description": "" });
+        let qs = json!([
+            { "id": "db", "header": "DB", "question": "Which database?", "isOther": false, "isSecret": false, "options": [option("sqlite"), option("postgres")] },
+            { "id": "parts", "header": "Parts", "question": "Which parts?", "isOther": false, "isSecret": false, "options": [option("api"), option("ui")] },
+            { "id": "name", "header": "Name", "question": "Its name?", "isOther": true, "isSecret": false, "options": null },
+            { "id": "skip", "header": "More", "question": "Anything else?", "isOther": true, "isSecret": false, "options": null },
+            { "id": "none", "header": "Notes", "question": "Notes?", "isOther": true, "isSecret": false, "options": null },
+        ]);
+        let params = json!({ "threadId": "t", "turnId": "u", "itemId": "i", "questions": qs, "isBlocking": true, "autoResolutionMs": null });
+        let ask = |norm: &mut CodexNormalizer, n: i64| approval_of(&norm.on_request(&json!(n), "item/tool/requestUserInput", &params).0).id;
+
+        // The card's shape: one pick, several picks, a typed answer, an empty one, one not
+        // given, and a key that names no question.
+        let card = json!({
+            "Which database?": "sqlite",
+            "Which parts?": ["api", "ui"],
+            "Its name?": "billing",
+            "Anything else?": "",
+            "Who asked?": "me",
+        });
+        let codex = json!({
+            "db": { "answers": ["sqlite"] },
+            "parts": { "answers": ["api", "ui"] },
+            "name": { "answers": ["billing"] },
+            "skip": { "answers": [] },
+            "none": { "answers": [] },
+        });
+        let id = ask(&mut norm, 1);
+        let (r, _) = norm.answer(&id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: Some(card) }).unwrap();
+        assert_eq!(r["result"]["answers"], codex);
+
+        // Answers filed under the ids, in Codex's own form, mean the same.
+        let id = ask(&mut norm, 2);
+        let (r, _) = norm.answer(&id, &ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: Some(codex.clone()) }).unwrap();
+        assert_eq!(r["result"]["answers"], codex);
+
+        // A cancel answers nothing.
+        let id = ask(&mut norm, 3);
+        let (r, _) = norm.answer(&id, &ApprovalDecision { choice: ApprovalChoice::Cancel, message: None, answers: Some(codex) }).unwrap();
+        assert_eq!(r["result"], json!({ "answers": {} }));
     }
 
     #[test]
@@ -3099,6 +3193,7 @@ mod tests {
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: cmd.map(str::to_owned),
             sandbox_shell: false,
+            max_budget_usd: None,
         };
         let off = spec(&[("CODEX_HOME", "/h")], None);
         assert!(byok_overrides(&off).is_empty());
@@ -3145,6 +3240,7 @@ mod tests {
             raw_log: PathBuf::from("/tmp/r/raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
         };
         let (model, effort) = classify::split_model_effort(spec.model.as_deref());
         let (m, p) = thread_request(&spec, model.as_deref(), effort.as_deref(), &[], &[]);
@@ -3521,6 +3617,40 @@ mod tests {
         assert!(server.state.lock().unwrap().routes.is_empty(), "the agent's threads are let go");
     }
 
+    /// The same server when the stopped agent's subagent is in a turn: one cause, said once,
+    /// and nothing is waited for. Before, every request of the stop failed with the same
+    /// words: the interrupt of the agent's turn, the one of the subagent's turn, then (5 s
+    /// later, with a turn of the agent's own) the request that lets the thread go.
+    /// (`thread/started` and `turn/started` lines of a subagent's thread, written from the
+    /// codex-cli 0.166.0 schema types. Not verified live.)
+    #[tokio::test]
+    async fn a_server_that_takes_no_more_lines_is_said_once_when_a_subagent_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        // the agent's own turn runs too (true), or only its subagent's (false)
+        for own_turn in [true, false] {
+            let server = fake_server(dir.path()); // every write fails
+            let (mut agent, mut events) = fake_agent(&server);
+            (agent.started, agent.thread_id) = (true, Some("t".into()));
+            agent.active_turn = own_turn.then(|| "u".to_string());
+            agent.norm.thread = agent.thread_id.clone();
+            server.state.lock().unwrap().routes.insert("t".into(), agent.route.clone());
+            server.route_line(br#"{"method":"thread/started","params":{"thread":{"id":"s","parentThreadId":"t"}}}"#);
+            agent.on_notification("turn/started", &json!({ "threadId": "s", "turn": { "id": "su" } })).await;
+            assert_eq!(agent.norm.subagent_turns(), [("s".to_string(), "su".to_string())]);
+            emitted(&mut events);
+
+            agent.on_cmd(AgentCmd::Shutdown).await;
+            assert_eq!(agent.stage, Stage::Done, "own turn {own_turn}: nothing to wait for, no request went out");
+            let kinds = emitted(&mut events);
+            let errors: Vec<&str> = kinds.iter().filter_map(|e| if let EventKind::Error { message, .. } = e { Some(message.as_str()) } else { None }).collect();
+            assert_eq!(errors, ["turn/interrupt: codex app-server stdin is closed"], "own turn {own_turn}");
+            // The agent's own turn is closed as interrupted: a failed one would send a stopped worker to the gate.
+            assert_eq!(turn_ends(&kinds), if own_turn { vec![TurnStatus::Interrupted] } else { vec![] }, "own turn {own_turn}: {kinds:?}");
+            assert!(matches!(kinds.last(), Some(EventKind::Exited { .. })), "{kinds:?}");
+            assert!(server.state.lock().unwrap().routes.is_empty(), "the agent's threads are let go");
+        }
+    }
+
     /// A subagent's turn ends on its own thread: the agent's turn goes on. Its end is neither
     /// kept back behind a steer nor taken for the end of the agent's turn.
     #[tokio::test]
@@ -3845,7 +3975,11 @@ mod tests {
     #[tokio::test]
     async fn shutdown_closes_the_open_turn_as_interrupted() {
         let dir = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        // an app-server that takes every line and answers none
+        let mut sink = proc::command(Path::new("/bin/sh"), &["-c".into(), "cat > /dev/null".into()], dir.path(), &env).spawn().unwrap();
         let server = fake_server(dir.path());
+        *server.stdin.lock().await = sink.stdin.take();
         // the turn runs (false), or its `turn/start` is not answered yet (true)
         for pending in [false, true] {
             let (mut agent, mut events) = fake_agent(&server);
@@ -3854,6 +3988,8 @@ mod tests {
             agent.turn_pending = pending;
             agent.on_cmd(AgentCmd::Shutdown).await;
             assert_eq!(agent.stage, Stage::Interrupting);
+            agent.on_deadline().await;
+            assert_eq!(agent.stage, Stage::Unsubscribing, "the thread is let go, and that request gets no answer either");
             agent.on_deadline().await;
             assert_eq!(agent.stage, Stage::Done);
             let kinds = emitted(&mut events);
@@ -4012,6 +4148,7 @@ mod tests {
             raw_log: cwd.join("raw.ndjson"),
             byok_command: None,
             sandbox_shell: false,
+            max_budget_usd: None,
             cwd,
         }
     }

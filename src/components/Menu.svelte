@@ -1,7 +1,11 @@
 <!--
-  Anchored menu (popover). Keyboard: ↑/↓ (or J/K), ↵ runs, Esc closes. An item with `stay` keeps
+  Anchored menu (popover). Keyboard: ↑/↓ (or J/K), ↵ runs, Esc closes. Closed by Esc or by a
+  press outside, it gives the focus back to the button that opened it (a press on something that
+  takes the focus itself keeps it there). An item with `stay` keeps
   the menu open (a picker you may change several times); the menu follows its new items. Positions under the anchor,
-  flips above when there's no room. Rendered fixed so it escapes clipping containers.
+  flips above when there's no room. Rendered fixed so it escapes clipping containers. With `wrap`, a
+  row whose hint does not fit beside its label puts the hint on a second line under the label,
+  whole; other menus keep one line per row and cut the hint.
 -->
 <script lang="ts" module>
   export type MenuItem =
@@ -26,8 +30,10 @@
     /** A search field on top (the caller filters its items); null for none. */
     search?: string | null;
     searchPlaceholder?: string;
+    /** A hint that does not fit goes to a second line, whole (the mode menus: their help must be read). */
+    wrap?: boolean;
   }
-  let { anchor, items, onclose, align = 'start', width = 240, search = $bindable(null), searchPlaceholder = 'Search' }: Props = $props();
+  let { anchor, items, onclose, align = 'start', width = 240, search = $bindable(null), searchPlaceholder = 'Search', wrap = false }: Props = $props();
 
   let el: HTMLDivElement | undefined = $state();
   let input: HTMLInputElement | undefined = $state();
@@ -75,13 +81,26 @@
 
   function outside(e: PointerEvent) {
     const t = e.target as Node;
-    if (el && !el.contains(t) && !anchor.contains(t)) onclose();
+    if (!el || el.contains(t) || anchor.contains(t)) return;
+    onclose();
+    // After the press has moved the focus: it went nowhere (the menu is gone, the place pressed
+    // takes no focus), so it goes back to the button, as after Esc.
+    setTimeout(() => {
+      const at = document.activeElement;
+      if (anchor.isConnected && (!at || at === document.body || !at.isConnected || el?.contains(at))) anchor.focus();
+    });
   }
 
   // New items can change its height: an upward menu keeps its bottom on the anchor.
   $effect(() => {
     void items;
     tick().then(place);
+  });
+
+  // An open menu hides the controls under it: the toast stack looks again when it comes and when it goes.
+  onMount(() => {
+    ui.layoutRev++;
+    return () => void ui.layoutRev++;
   });
 
   onMount(() => {
@@ -109,6 +128,7 @@
   bind:this={el}
   class="menu"
   class:up={pos.up}
+  class:wrap
   role="menu"
   tabindex="-1"
   style:left="{pos.x}px"
@@ -118,7 +138,7 @@
   out:fade={{ duration: ui.reducedMotion ? 0 : 90 }}
 >
   {#if search !== null}
-    <input class="search" bind:this={input} bind:value={search} placeholder={searchPlaceholder} spellcheck="false" autocomplete="off" oninput={() => (active = -1)} />
+    <input class="search" bind:this={input} bind:value={search} placeholder={searchPlaceholder} aria-label={searchPlaceholder} spellcheck="false" autocomplete="off" oninput={() => (active = -1)} />
   {/if}
   {#each items as it, i (i)}
     {#if it.kind === 'separator'}
@@ -139,7 +159,7 @@
           {#if it.checked}<Icon name="check" size={14} />{:else if it.icon}<Icon name={it.icon} size={14} />{/if}
         </span>
         <span class="lbl truncate">{it.label}</span>
-        {#if it.hint}<span class="hint truncate">{it.hint}</span>{/if}
+        {#if it.hint}<span class="hint" class:truncate={!wrap}>{it.hint}</span>{/if}
         {#if it.kbd}<Kbd keys={it.kbd} />{/if}
       </button>
     {/if}
@@ -156,6 +176,10 @@
   .item.danger .ic { color: var(--bad); }
   .lbl { flex: 1; }
   .hint { color: var(--ink-3); font-size: var(--t-sm); max-width: 45%; }
+  /* The hint stays beside the label while both fit; else it wraps to a line of its own, under the label (past the icon's 14 px and the 9 px gap). */
+  .wrap .item { flex-wrap: wrap; row-gap: 1px; height: auto; min-height: 32px; padding-top: 6px; padding-bottom: 6px; }
+  .wrap .lbl { flex: 1 0 auto; }
+  .wrap .hint { max-width: none; min-width: 0; margin-left: 23px; line-height: var(--lh-sm); }
   .sep { height: 1px; margin: 4px 8px; background: var(--line); }
   .hdr { padding: 8px 10px 3px; }
   .search { position: sticky; top: -5px; z-index: 1; width: 100%; height: 32px; margin: -5px 0 4px; padding: 0 10px; border-radius: var(--r-md) var(--r-md) 0 0; background: var(--pop); box-shadow: inset 0 -1px 0 var(--line); font-size: var(--t-md); color: var(--ink-1); outline: none; }

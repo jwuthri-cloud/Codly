@@ -76,7 +76,7 @@
                 <span class="desc grow">Stored in your Keychain</span>
                 <button class="btn ghost sm" onclick={() => removeKey(c, s.env)} disabled={busy === c.id}>Remove</button>
               {:else}
-                <input class="field grow" type="password" autocomplete="off" spellcheck="false" placeholder={s.env} bind:value={draft[k]} onkeydown={(e) => e.key === 'Enter' && saveKey(c, s.env)} />
+                <input class="field grow" type="password" autocomplete="off" spellcheck="false" placeholder={s.env} aria-label="Value of {s.env}" bind:value={draft[k]} onkeydown={(e) => e.key === 'Enter' && saveKey(c, s.env)} />
                 <button class="btn sm" onclick={() => saveKey(c, s.env)} disabled={busy === c.id || !(draft[k] ?? '').trim()}>Save</button>
               {/if}
             </div>

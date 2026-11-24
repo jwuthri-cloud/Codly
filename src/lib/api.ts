@@ -57,6 +57,7 @@ import type { PreviewSource } from './gen/PreviewSource';
 import type { ByokSource } from './gen/ByokSource';
 import type { ByokStatus } from './gen/ByokStatus';
 import type { Vendor } from './gen/Vendor';
+import type { ChatMessage } from './gen/ChatMessage';
 import type { CliInfo } from './gen/CliInfo';
 import type { ClosedRequest } from './gen/ClosedRequest';
 import type { ClosedTranscript } from './gen/ClosedTranscript';
@@ -155,15 +156,39 @@ class TauriTransport implements Transport {
   }
 }
 
+/** A browser page lost its event stream from `codly serve` (src/lib/state/connection.ts tries
+ *  again). `signedOut`: Codly answers, but this page has no valid sign-in. */
+export class LinkLost extends Error {
+  constructor(readonly signedOut: boolean) {
+    super(signedOut ? 'This page is signed out of Codly. Open the link that `codly serve` printed.' : 'Can’t reach Codly. Is `codly serve` still running?');
+  }
+}
+
+/** An event stream does not say why it failed: one cheap command does. Codly answers 401 to
+ *  every path for a page without its sign-in cookie; no answer at all means it is down. */
+async function signedOut(): Promise<boolean> {
+  try {
+    const r = await fetch('/api/cmd/start_problem', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+    return r.status === 401;
+  } catch {
+    return false;
+  }
+}
+
 /** `codly serve`: the same commands over HTTP, the bus and terminals as server-sent events. */
-class WebTransport implements Transport {
+export class WebTransport implements Transport {
   private events: EventSource | null = null;
+  /** Ends the wait of the last `subscribe`: a closed stream fires no event, so a newer
+   *  subscribe that closes it says so here (else that connect would wait for ever). */
+  private replaced: (() => void) | null = null;
   subscribe(onBatch: (b: UiBatch) => void): Promise<Snapshot> {
     this.events?.close();
+    this.replaced?.();
     const es = (this.events = new EventSource('/api/events'));
     const data = (e: Event) => JSON.parse((e as MessageEvent<string>).data);
     return new Promise<Snapshot>((resolve, reject) => {
       let open = false;
+      this.replaced = () => reject(new Error('A newer connection to Codly took over.'));
       es.addEventListener('batch', (e) => onBatch(data(e)));
       es.addEventListener('snapshot', (e) => {
         open = true;
@@ -175,9 +200,9 @@ class WebTransport implements Transport {
       });
       es.onerror = () => {
         es.close();
-        // Codly stopped or restarted: take a fresh snapshot (the store retries via resync).
-        if (open) setTimeout(() => onBatch({ events: [], resync: true }), 1000);
-        else reject(new Error('Can’t reach Codly. Is `codly serve` still running?'));
+        // Codly stopped or restarted: take a fresh snapshot (the store tries again, and waits).
+        if (open) onBatch({ events: [], resync: true });
+        else void signedOut().then((out) => reject(new LinkLost(out)));
       };
     });
   }
@@ -188,14 +213,27 @@ class WebTransport implements Transport {
     return post<string>(cmd, bytes, { 'content-type': 'application/octet-stream', 'x-name': encodeURIComponent(name) });
   }
   attachPty(ptyId: string, onData: (bytes: Uint8Array) => void): Promise<void> {
+    return this.ptyStream(ptyId, onData, false);
+  }
+  /** One terminal's stream; `again`: it replaces one that ended. */
+  private ptyStream(ptyId: string, onData: (bytes: Uint8Array) => void, again: boolean): Promise<void> {
     // ponytail: one connection per terminal; browsers allow 6 per host over HTTP/1.1.
     const es = new EventSource(`/api/pty/${encodeURIComponent(ptyId)}`);
     es.addEventListener('data', (e) => onData(Uint8Array.from(atob((e as MessageEvent<string>).data), (c) => c.charCodeAt(0))));
     return new Promise((resolve, reject) => {
-      es.onopen = () => resolve();
+      let open = false;
+      es.onopen = () => {
+        open = true;
+        // The stream starts with the terminal's scrollback: attached again, the screen starts clean (ESC c).
+        if (again) onData(new Uint8Array([0x1b, 0x63]));
+        resolve();
+      };
       es.onerror = () => {
-        es.close(); // the terminal closed, or Codly went away
-        reject(new Error('no such terminal'));
+        es.close();
+        // The stream ended: Codly let this tab go (it fell behind the output), the terminal
+        // closed, or Codly went away. Attach again; a terminal that is gone answers 404, and that ends it.
+        if (open) setTimeout(() => this.ptyStream(ptyId, onData, true).catch(() => {}), 1000);
+        else reject(new Error('no such terminal'));
       };
     });
   }
@@ -292,9 +330,13 @@ export const api = {
   setAgentPermissionMode: (agentId: string, mode: PermissionMode) => call<Agent>('set_agent_permission_mode', { agentId, mode }),
   /** Ask a running Claude or Codex agent to compact its conversation now. Resolves when the CLI took the request. */
   compactAgent: (agentId: string) => call<void>('compact_agent', { agentId }),
+  /** `/new` in a 1:1 chat: the agent's next message starts a new session of its CLI. Rejects with the core's reason. */
+  newConversation: (agentId: string) => call<void>('new_conversation', { agentId }),
   agentContextUsage: (agentId: string) => call<ContextUsage>('agent_context_usage', { agentId }),
   /** Try again to connect one MCP server of a live Claude agent. Rejects with Claude Code's own reason when it still does not connect. */
   reconnectAgentMcp: (agentId: string, server: string) => call<void>('reconnect_agent_mcp', { agentId, server }),
+  /** Turn one MCP server of a live Claude agent off or on, for this run of the agent. Its next `mcp_server` event says where it stands. */
+  setAgentMcpEnabled: (agentId: string, server: string, enabled: boolean) => call<void>('set_agent_mcp_enabled', { agentId, server, enabled }),
   /** Stop a command a live Claude agent left running in the background. Its next `background_tasks` event says that it was stopped. */
   stopAgentTask: (agentId: string, taskId: string) => call<void>('stop_agent_task', { agentId, taskId }),
   /** "Open in my terminal" (agent sheet). Is the agent in your terminal, and if not, may it go there now? */
@@ -406,8 +448,10 @@ export const api = {
   taskDiff: (taskId: string) => call<string>('task_diff', { taskId }),
   planDiff: (planId: string) => call<string>('plan_diff', { planId }),
   /** Send back: the review comments on a task's diff, as one message, go to the agent that did the work.
-   *  Refused for a done task (its work is merged: the changes are a new request). */
+   *  Refused for a done task: on a plan that is not merged, the comments go on the plan (`sendBackPlan`,
+   *  one more task of it, once it is finished); on merged work they are a new request. */
   sendBackTask: (taskId: string, comments: string) => call<Task>('send_back_task', { taskId, comments }),
+  sendBackPlan: (planId: string, comments: string, files: string[]) => call<Task>('send_back_plan', { planId, comments, files }),
   /** Merge a plan into your checked-out branch. `into`: the branch you confirmed after `mergePlanWarning`.
    *  When your branch has commits the plan was never checked with, the plan's checks run on the merge
    *  result first and a failure stops the merge; `unchecked`: you merge without them. */
@@ -465,6 +509,8 @@ export const api = {
   triples: (entity: string | null = null) => call<Triple[]>('list_triples', { entity }),
   /** Literal, case-insensitive text search across the whiteboard, tasks and memories. */
   exactSearch: (query: string) => call<ExactHit[]>('exact_search', { query }),
+  /** The messages of the open repo whose text holds `query`, newest first (at most 40; fewer than 2 characters find nothing). */
+  searchChats: (query: string) => call<ChatMessage[]>('search_chats', { query }),
   /** Agents and the messages between them (edges by act), from the chats and notes Codly recorded. */
   messageGraph: () => call<MessageGraph>('message_graph'),
   /** An agent's memory file (a starter template until first saved); the core confines it to its memory folder. */
@@ -489,6 +535,9 @@ export const api = {
   dictationTranscribe: (audio: string, mime: string) => call<string>('dictation_transcribe', { audio, mime }),
   /** Read-only git state (status, branches, recent log) of an agent's worktree. */
   agentGit: (agentId: string) => call<AgentGit>('agent_git', { agentId }),
+  /** A 1:1 agent's whole work as one diff: its commits, its uncommitted edits and its new files,
+   *  from where its branch left yours. Empty: no worktree, or nothing changed. */
+  agentDiff: (agentId: string) => call<string>('agent_diff', { agentId }),
   /** An agent's checkpoints: the files of its worktree before each of its turns, newest first. */
   agentCheckpoints: (agentId: string) => call<AgentCheckpoints>('agent_checkpoints', { agentId }),
   /** Put the files of the agent's worktree back to a checkpoint, or with `path` that one file

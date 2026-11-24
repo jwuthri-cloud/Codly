@@ -7,6 +7,7 @@
   import { ago } from '../lib/util/format';
   import { mergeAgent } from '../lib/state/actions';
   import { store } from '../lib/state/store.svelte';
+  import { rewindLayer } from '../home/rewindLayer.svelte';
   import Icon from '../components/Icon.svelte';
   import MergeConflictStep from '../components/MergeConflictStep.svelte';
   import RepoSyncBar from '../components/RepoSyncBar.svelte';
@@ -15,6 +16,7 @@
   import AgentCheckpoints from './AgentCheckpoints.svelte';
   import AgentChecks from './AgentChecks.svelte';
   import AgentLastTurn from './AgentLastTurn.svelte';
+  import { hasSomethingToMerge } from './taskWords';
 
   interface Props {
     agent: Agent;
@@ -41,9 +43,11 @@
       busy = false;
     }
   }
-  // Load when opened, and again when the agent changes or its status does (it just did something).
+  // Load when opened, and again when the agent changes or its status does (it just did something),
+  // and when files were put back ("Undo a turn", Last turn, or the Undo of their toast): the
+  // parts below (Last turn, Checkpoints) read again with it.
   $effect(() => {
-    void agent.status;
+    void [agent.status, rewindLayer.restored];
     void load(agent.id);
   });
 
@@ -66,13 +70,15 @@
   <div class="top">
     <span class="br"><Icon name="branch" size={12} /><code>{view?.branch ?? (view?.worktree ? 'detached HEAD' : 'no worktree')}</code></span>
     <span class="acts">
-      {#if agent.role === 'solo' && view?.branch}
+      {#if agent.role === 'solo' && view?.worktree}<button class="btn sm" onclick={() => ui.openDiff({ kind: 'agent', id: agent.id })} data-tip="Read all its changes, comment on lines and send them to {agent.name}"><Icon name="diff" size={12} />View in Changes</button>{/if}
+      {#if agent.role === 'solo' && view?.branch && hasSomethingToMerge(view, target)}
         <button class="btn sm primary" disabled={merging || !resting} onclick={merge} data-tip={resting ? `Merge ${view.branch} into ${target}` : 'Wait until its turn ends'}><Icon name="merge" size={12} />Merge into {target}</button>
       {/if}
       <button class="icon-btn" aria-label="Refresh" data-tip="Refresh" disabled={busy} onclick={() => load(agent.id)}><Icon name="refresh" size={13} /></button>
     </span>
   </div>
   <!-- A solo agent's own worktree only: a task's worktree is the gate's (also while a solo agent has the task), and in your project folder your own terminal is the place. -->
+  {#if agent.role === 'solo' && view?.branch && !hasSomethingToMerge(view, target)}<p class="small">Nothing to merge yet.</p>{/if}
   {#if agent.role === 'solo' && !agent.task_id && view?.worktree && view.worktree !== store.workspace?.repo_path}<PreviewStep source={{ kind: 'agent', id: agent.id }} worktree={view.worktree} agentId={agent.id} />{/if}
   {#if agent.role === 'solo' && view?.worktree}<AgentChecks {agent} {resting} refresh={view} />{/if}
   {#if agent.role === 'solo' && view?.branch}<MergeConflictStep source={{ kind: 'agent', id: agent.id }} refresh={`${merges}:${agent.status}`} who={agent.name} wait={resting ? null : 'Wait until its turn ends'} />{/if}

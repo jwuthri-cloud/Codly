@@ -58,9 +58,9 @@ describe('buildTraces', () => {
     for (const end of [{ type: 'turn_completed', status: 'interrupted', result_text: null, duration_ms: null }, { type: 'exited', code: null }]) {
       const t = buildTraces([started('a', T0, 'c1'), ev('a', T0 + 400, end), started('a', T0 + 60_000, 'c1', 'Read'), done('a', T0 + 60_300, 'c1')], 'a');
       // The later call has its own start: its duration is not measured from the turn before.
-      expect(t.map((c) => [c.name, c.start, c.durationMs, c.ok])).toEqual([
-        ['Bash', T0, null, null],
-        ['Read', T0 + 60_000, 300, true],
+      expect(t.map((c) => [c.name, c.start, c.durationMs, c.ok, c.stopped])).toEqual([
+        ['Bash', T0, null, null, true],
+        ['Read', T0 + 60_000, 300, true, false],
       ]);
       expect(summarize(t)).toMatchObject({ calls: 2, totalMs: 300 });
     }
@@ -69,13 +69,66 @@ describe('buildTraces', () => {
   it('still pairs a result that comes after the turn with the call it belongs to', () => {
     const t = buildTraces([started('a', T0, 'c1'), ev('a', T0 + 400, { type: 'turn_completed', status: 'completed', result_text: null, duration_ms: null }), done('a', T0 + 900, 'c1')], 'a');
     expect(t).toHaveLength(1);
-    expect(t[0]).toMatchObject({ start: T0, durationMs: 900, ok: true });
+    expect(t[0]).toMatchObject({ start: T0, durationMs: 900, ok: true, stopped: false });
+  });
+
+  describe('a call with no completion', () => {
+    const turnEnd = (ts: number, status = 'completed') => ev('a', ts, { type: 'turn_completed', status, result_text: null, duration_ms: null });
+    const helper = (ts: number, call_id: string, status: string) => ev('a', ts, { type: 'sub_agent', call_id, description: 'Run the tests', status });
+    /** `call` is a call of the helper that the call `of` started. */
+    const ofHelper = (ts: number, of: string, call: string) =>
+      ev('a', ts, { type: 'sub_agent_progress', call_id: of, name: null, step: null, tool_call_id: call, tool_uses: null, tokens: null, report: null });
+
+    it('is running while its turn runs', () => {
+      const t = buildTraces([ev('a', T0 - 10, { type: 'turn_started', input: null }), started('a', T0, 'c1')], 'a');
+      expect(t[0]).toMatchObject({ ok: null, durationMs: null, stopped: false });
+      expect(summarize(t)).toEqual({ calls: 1, failed: 0, running: 1, totalMs: 0 });
+    });
+
+    it('is stopped once its turn or its process ended: not running, not failed, no duration', () => {
+      for (const end of [turnEnd(T0 + 400), turnEnd(T0 + 400, 'interrupted'), ev('a', T0 + 400, { type: 'exited', code: null })]) {
+        const t = buildTraces([started('a', T0, 'c1'), end, started('a', T0 + 9000, 'c2')], 'a');
+        expect(t.map((c) => [c.callId, c.ok, c.durationMs, c.source, c.stopped])).toEqual([
+          ['c1', null, null, null, true],
+          ['c2', null, null, null, false], // a call of the next turn runs
+        ]);
+        expect(summarize(t)).toEqual({ calls: 2, failed: 0, running: 1, totalMs: 0 });
+      }
+      // Another agent's turn end stops nothing here.
+      const other = buildTraces([started('a', T0, 'c1'), ev('b', T0 + 400, { type: 'turn_completed', status: 'completed', result_text: null, duration_ms: null })], 'a');
+      expect(other[0].stopped).toBe(false);
+    });
+
+    it("stays running when it is a helper's and the helper works on after the turn", () => {
+      // A helper in the background: the call that started it returned, the turn ended, the helper works on.
+      const launched = [helper(T0, 'h1', 'running'), started('a', T0, 'h1', 'Agent'), done('a', T0 + 100, 'h1'), started('a', T0 + 200, 'c1'), ofHelper(T0 + 200, 'h1', 'c1'), started('a', T0 + 300, 'own')];
+      const after = buildTraces([...launched, turnEnd(T0 + 400)], 'a');
+      // The agent's own call ended with the turn; the helper's did not.
+      expect(after.map((c) => [c.callId, c.stopped])).toEqual([['h1', false], ['c1', false], ['own', true]]);
+      expect(summarize(after)).toMatchObject({ running: 1, failed: 0 });
+
+      // Its result comes later: a finished call.
+      const finished = buildTraces([...launched, turnEnd(T0 + 400), done('a', T0 + 900, 'c1')], 'a');
+      expect(finished[1]).toMatchObject({ callId: 'c1', ok: true, durationMs: 700, stopped: false });
+
+      // The helper is over with the call still open: no result comes any more.
+      const over = buildTraces([...launched, turnEnd(T0 + 400), helper(T0 + 900, 'h1', 'completed')], 'a');
+      expect(over[1]).toMatchObject({ callId: 'c1', ok: null, stopped: true });
+      expect(summarize(over)).toMatchObject({ running: 0, failed: 0 });
+
+      // A turn that was interrupted, and a process that ended, take the helper with them.
+      for (const end of [turnEnd(T0 + 400, 'interrupted'), turnEnd(T0 + 400, 'failed'), ev('a', T0 + 400, { type: 'exited', code: 1 })]) {
+        const t = buildTraces([...launched, end], 'a');
+        expect(t.map((c) => c.stopped)).toEqual([false, true, true]);
+        expect(summarize(t)).toMatchObject({ running: 0, failed: 0 });
+      }
+    });
   });
 
   it("says which calls a subagent made, and leaves the agent's own unmarked", () => {
     const by = (input: unknown) => ev('a', T0, { type: 'tool_started', call_id: `c${id}`, name: 'commandExecution', activity: 'execute', target, input, confidence: 'observed' });
     const t = buildTraces([by({ command: 'ls' }), by({ command: 'ls', subagent: { thread: 't1', name: 'Ada (explorer)' } }), by({ command: 'ls', subagent: { thread: 't2', name: null } })], 'a');
-    expect(t.map((c) => c.subagent)).toEqual(['', 'subagent Ada (explorer)', 'subagent']);
+    expect(t.map((c) => c.subagent)).toEqual(['', 'helper Ada (explorer)', 'helper']);
   });
 
   it('summarizes calls, failures, running and total time; empty for no events', () => {

@@ -1,24 +1,28 @@
 <!--
   The agent sheet. First screen answers: what is it doing (the same sentence as everywhere) and
   why, does it need me, what is its task. Then its own steps, the files it touched (and why),
-  its subagents, live output, honest cost, and the full history. Every fact carries its
+  its helpers (subagents), live output, honest cost, and the full history. Every fact carries its
   provenance: Observed (CLI event) · Inferred (Codly heuristic) · Provided (Codly put it in
   context) · Model-stated (its own words).
 -->
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { Agent } from '../lib/gen/Agent';
   import type { EventRow } from '../lib/gen/EventRow';
   import { copyText, interruptAgent, letGo, refreshAccounts, stopAgent } from '../lib/state/actions';
   import { accounts } from '../lib/state/accounts.svelte';
   import { yourAnswers } from '../lib/state/answers';
   import { narrate } from '../lib/state/narration';
-  import { MCP_LABEL } from '../lib/state/session';
+  import { MCP_LABEL, HOLD_MS, STOP_BUSY, ofLiveRun, stopBackgroundTask, stopLabel, stopOnItsWay } from '../lib/state/session';
+  import { killRefusal } from '../lib/state/killRule';
+  import { takeovers } from '../lib/state/takeover.svelte';
+  import { turnRuns } from '../lib/narrate';
   import { store, type FileTouch } from '../lib/state/store.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { contextFraction, costLine as costLineOf } from '../lib/util/cost';
   import { clock, clockSec, dur, pct, plural, resetsIn, timer, tokens } from '../lib/util/format';
-  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, phrase, prettyModel, PROVIDER_LABEL, subagentMark, TASK_STATUS_LABEL, targetLabel } from '../lib/util/labels';
+  import { BILLING_LABEL, COMPANY_LABEL, GLOSSARY, idVar, methodProvenance, pastVerb, prettyModel, PROVIDER_LABEL, TASK_STATUS_LABEL } from '../lib/util/labels';
+  import { openInConversation } from '../lib/util/approvalCard';
   import { askedLine, settledLine } from '../lib/util/outcome';
   import { basename, clean, dirname, oneLine, tildify } from '../lib/util/sanitize';
   import ApprovalCard from '../home/cards/ApprovalCard.svelte';
@@ -30,12 +34,19 @@
   import Portrait from '../components/Portrait.svelte';
   import Provenance from '../components/Provenance.svelte';
   import Say from '../components/Say.svelte';
+  import RetryButton from '../components/RetryButton.svelte';
+  import { safeChoice } from '../lib/util/confirm';
   import Section from '../components/Section.svelte';
   import Why, { type WhyLine } from '../components/Why.svelte';
   import UsageBars from '../components/UsageBars.svelte';
   import AgentBackground from './AgentBackground.svelte';
   import AgentControls from './AgentControls.svelte';
-  import { backgroundLine, historyFacts, repeatsReply, taskChangedLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
+  import { helperEndWord, helperStop, helpersSummary } from './helperRows';
+  import { backgroundLine, closedLine, compactionRowLine, decisionLine, foldActs, helperRowLine, historyFacts, quietStatus, repeatsReply, restartLine, savedRuleOf, stoppedWithHelper, taskChangedLine, toolDoneLine, toolEndLine, toolStartLine, tripleLine, withoutRepeatedTaskRows, type Names } from './historyWords';
+  import { FOCUS_LOOK_MS, FOCUS_LOOK_TRIES, focusPlace, withTab } from './sheetFocus';
+  import { modelChangeOff } from './modelRow';
+  import { agentLogKey, logWork } from './agentLog';
+  import { splitModel } from '../lib/util/team';
   import { isPlanCall, planCallEnd, planStep } from '../lib/util/planRequest';
   import AgentMcp from './AgentMcp.svelte';
   import AgentTakeover from './AgentTakeover.svelte';
@@ -45,6 +56,9 @@
   import { agentTitle } from '../lib/util/team';
   import { canTrust, trustOf } from '../lib/util/career';
   import { ide } from '../ide/ide.svelte';
+  import { keyTargetApproval } from '../lib/state/keys';
+  import { LAYOUT_REST_MS, meets, revealTop } from '../home/threadScroll';
+  import { keysAnswerOther, keysAnswerOtherLine } from './needsWords';
 
   interface Props {
     agent: Agent;
@@ -68,14 +82,21 @@
   const approvals = $derived(store.pendingApprovals.filter((a) => a.agent_id === agent.id));
   /** The same card is already on screen in the Lead conversation: point at it instead of repeating it. */
   const inConversation = $derived(ui.room === 'home' && ui.mode !== 'office' && !!approvals.length && approvals.every((a) => store.approvalThread(a) === ui.thread));
+  /** The keys answer the oldest request on screen: when that is another agent's, the sheet says whose. */
+  const keysOther = $derived.by(() => {
+    const id = approvals.length ? keysAnswerOther(keyTargetApproval(), approvals) : null;
+    return id ? (store.agentMap.get(id)?.name ?? null) : null;
+  });
   const cli = $derived(store.clis.find((c) => c.provider === agent.provider) ?? null);
   /** The model picked for it, else the one its CLI reported at session start, else the one its CLI
-   *  runs by default (its config, else its built-in default: `env::default_model`). */
-  const model = $derived(prettyModel(agent.model ?? live?.session?.model ?? cli?.default_model) || 'default model');
+   *  runs by default (its config, else its built-in default: `env::default_model`). A model
+   *  picked with a thinking effort ("opus:high") is named without it: Controls says the effort. */
+  const model = $derived(prettyModel(splitModel(agent.model).name || live?.session?.model || cli?.default_model) || 'default model');
   const todo = $derived(live?.todo ?? []);
   const todoDone = $derived(todo.filter((s) => s.status === 'completed').length);
   const step = $derived(todo.findIndex((s) => s.status === 'in_progress'));
-  const since = $derived(n?.since ?? live?.statusSince ?? agent.updated_at);
+  // (a stop changes the agent's row and no status: "Stopped" is since that change)
+  const since = $derived(n?.since ?? (n?.tone === 'off' ? agent.updated_at : (live?.statusSince ?? agent.updated_at)));
 
   // ── Why? ──
   const why = $derived.by((): WhyLine[] => {
@@ -117,10 +138,29 @@
   }
   const fileState = (f: FileTouch) => (f.created ? 'created' : f.deleted ? 'deleted' : f.modified ? 'changed' : f.read ? 'read' : 'provided');
 
-  // ── subagents ──
+  // ── helpers (subagents) ──
   const subs = $derived(live?.subagents ?? []);
   const subsRunning = $derived(subs.filter((s) => s.status === 'running'));
-  const subsDone = $derived(subs.filter((s) => s.status !== 'running'));
+  /** The ones that are over, however they ended: each row says its own word (helperRows.ts). */
+  const subsEnded = $derived(subs.filter((s) => s.status !== 'running'));
+  /** The live run's background work: a helper in it is stopped by its id there (`helperStop`). */
+  const background = $derived(ofLiveRun(live?.background ?? [], agent.run_id));
+  /** A stop is a request to the agent's live Claude session: another CLI's helper has no "Stop". */
+  const canStopHelpers = $derived(agent.provider === 'claude' && !!agent.run_id);
+  /** The helpers a stop is on its way for, by call id: `helperSent` until Claude Code answers, then
+   *  `helperTaken` with when it took the stop. The row reads "Stopping…" until the helper ends
+   *  (its row leaves the running ones) or 10 s pass (`stopOnItsWay`). */
+  let helperSent = $state<string[]>([]);
+  let helperTaken = $state<Record<string, number>>({});
+  const helperStopping = (callId: string) => helperSent.includes(callId) || stopOnItsWay(helperTaken[callId], ui.now);
+  /** A helper you stopped just ended and the rows closed up: the "Stop" now under the pointer is off for a moment. */
+  const helpersSettling = $derived(subsEnded.some((s) => (helperSent.includes(s.callId) || s.callId in helperTaken) && ui.now - s.ts < HOLD_MS));
+  async function stopHelper(callId: string, id: string) {
+    helperSent = [...helperSent, callId];
+    const took = await stopBackgroundTask(agent.id, { id, kind: 'helper' });
+    helperSent = helperSent.filter((c) => c !== callId);
+    if (took) helperTaken = { ...helperTaken, [callId]: ui.now };
+  }
   let moreSubs = $state(false);
   let moreFiles = $state(false);
   const SHOW = 4;
@@ -176,37 +216,77 @@
   // ── history ──
   let filter = $state<'all' | 'tools' | 'files' | 'decisions' | 'errors'>('all');
   let rawOpen = $state<number | null>(null);
-  const facts = $derived.by(() => {
-    void store.revBy.get(agent.id);
-    return historyFacts(store.events, agent.id, agent.provider);
-  });
-  const log = $derived.by(() => {
+  // History works out its rows only while it is open, and again only when an event of this
+  // agent came, its filter changed, or a decision of its task by someone else came (agentLog.ts).
+  const historyOpen = $derived(ui.sections.history ?? true);
+  /** The newest decision of its task that is not this agent's own: such a row is in History too. */
+  const taskDecided = $derived.by(() => {
+    if (!historyOpen || !task) return null;
     void store.rev;
+    for (let i = store.decisions.length - 1; i >= 0; i--) {
+      const d = store.decisions[i];
+      if (d.taskId === task.id && d.agentId !== agent.id) return d.eventId;
+    }
+    return null;
+  });
+  const factsWork = logWork(() => historyFacts(store.events, agent.id, agent.provider));
+  const facts = $derived(factsWork.read(historyOpen, agentLogKey(agent.id, agent.provider)));
+  const foldedWork = logWork(() => {
+    const fx = facts!;
     const out: EventRow[] = [];
     for (let i = store.events.length - 1; i >= 0 && out.length < 250; i--) {
       const e = store.events[i];
       if (e.agent_id !== agent.id && !(task && e.task_id === task.id && e.kind.type === 'decision')) continue;
+      // (what you said with an answer is no row of its own: the answer's row ends with it)
+      if (e.kind.type === 'approval_said') continue;
       const t = e.kind.type;
       // (a helper's progress is no step of its own: its calls and its end are rows already)
       if (t === 'usage_updated' || t === 'rate_limit' || t === 'agent_changed' || t === 'control_changed' || t === 'sub_agent_progress') continue;
+      // (a state its turn's and its calls' rows say already: "Status → idle")
+      if (e.kind.type === 'status_changed' && quietStatus(e.kind.status)) continue;
       if (filter === 'tools' && t !== 'tool_started' && t !== 'tool_completed') continue;
       if (filter === 'files' && t !== 'files_changed' && !(t === 'tool_started' && ['read', 'edit', 'create', 'delete'].includes((e.kind as { activity: string }).activity))) continue;
       if (filter === 'decisions' && t !== 'decision') continue;
-      if (filter === 'errors' && t !== 'error' && !(e.kind.type === 'tool_completed' && !e.kind.ok && !facts.planCalls.has(e.kind.call_id))) continue;
-      if (repeatsReply(e, agent.id, facts)) continue;
+      // (a call that ended because you stopped its helper did not fail)
+      const withHelper = e.kind.type === 'tool_completed' && !e.kind.ok ? stoppedWithHelper(e.kind.call_id, fx) : null;
+      if (filter === 'errors' && t !== 'error' && !(e.kind.type === 'tool_completed' && !e.kind.ok && !fx.planCalls.has(e.kind.call_id) && !withHelper)) continue;
+      // (the end of the call that started a helper you stopped: the helper's own row says it stopped)
+      if (withHelper === 'helper') continue;
+      if (repeatsReply(e, agent.id, fx)) continue;
+      // (a list of background work that only drops a helper says nothing: the helper's own row says its end)
+      if (e.kind.type === 'background_tasks' && backgroundLine(e.kind, fx.backgroundBefore.get(e.id) ?? null) == null) continue;
       out.push(e);
     }
-    // (a task's row says its status: one that repeats the row before it says nothing)
-    return withoutRepeatedTaskRows(out);
+    // (a task's row says its status: one that repeats the row before it says nothing; an act is
+    // one row: a send-back, a request and its answer, a tool call from its start to its end)
+    return foldActs(withoutRepeatedTaskRows(out), fx.planCalls);
   });
+  const folded = $derived(foldedWork.read(historyOpen, agentLogKey(agent.id, agent.provider, filter, task?.id, taskDecided)));
+  const log = $derived(folded?.rows ?? []);
   const names: Names = { agent: (id) => store.agentMap.get(id)?.name, task: (id) => store.taskMap.get(id)?.key };
-  function describe(e: EventRow): { icon: string; text: string; tone?: 'bad' | 'good' | 'warn' } {
+  /** A decision's summary keeps its first word when it is a task's key or an agent's name ("t1 …", "eli …"). */
+  const isName = (word: string) => store.tasks.some((t) => t.key === word) || store.agents.some((a) => a.name === word);
+  type Row = { icon: string; text: string; tone?: 'bad' | 'good' | 'warn'; tip?: string };
+  type CallEnd = Extract<EventRow['kind'], { type: 'tool_completed' }>;
+  /** A tool call's one row: what it does while it runs, then what it did and how it ended. */
+  function callRow(callId: string, end: CallEnd | undefined): Row {
+    const fx = facts!;
+    const start = fx.starts.get(callId) ?? null;
+    if (!end) return { icon: 'play', text: start ? toolStartLine(start, agent.provider) : 'Tool call' };
+    if (fx.planCalls.has(callId)) return { icon: end.ok ? 'check' : 'refresh', text: `${planCallEnd(end.ok, store.approvals.find((a) => a.call_id === callId)?.status ?? null)}${end.duration_ms != null ? ` · ${dur(end.duration_ms)}` : ''}` };
+    const withHelper = end.ok ? null : stoppedWithHelper(callId, fx);
+    // (it started a helper you stopped: the helper's own row says that it stopped)
+    if (withHelper === 'helper') return { icon: 'play', text: start ? toolDoneLine(start, agent.provider) : 'Started a helper' };
+    if (withHelper === 'own') return { icon: 'stop', text: start ? `${toolDoneLine(start, agent.provider)} · stopped with its helper` : 'Stopped with its helper' };
+    return { icon: end.ok ? 'check' : 'x-circle', text: toolEndLine(start, end, agent.provider), tone: end.ok ? undefined : 'bad' };
+  }
+  /** A row of History: called only while it is open, so its facts and rows are there. */
+  function describe(e: EventRow): Row {
+    const fx = facts!;
     const k = e.kind;
     switch (k.type) {
-      case 'tool_started': return { icon: 'play', text: isPlanCall(k.name, agent.provider) ? planStep(false) : `${phrase(k.activity, targetLabel(k.target, k.activity))} · ${k.name}${subagentMark(k.input)}` };
-      case 'tool_completed':
-        if (facts.planCalls.has(k.call_id)) return { icon: k.ok ? 'check' : 'refresh', text: `${planCallEnd(k.ok, store.approvals.find((a) => a.call_id === k.call_id)?.status ?? null)}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}` };
-        return { icon: k.ok ? 'check' : 'x-circle', text: `${k.ok ? 'Finished' : 'Failed'}${k.exit_code != null ? ` · exit ${k.exit_code}` : ''}${k.tests_passed != null ? ` · ${k.tests_passed} passed${k.tests_failed ? `, ${k.tests_failed} failed` : ''}` : ''}${k.duration_ms != null ? ` · ${dur(k.duration_ms)}` : ''}`, tone: k.ok ? undefined : 'bad' };
+      case 'tool_started': return callRow(k.call_id, fx.ends.get(k.call_id));
+      case 'tool_completed': return callRow(k.call_id, k);
       case 'files_changed': return { icon: 'diff', text: `Changed ${k.paths.map(basename).join(', ')}` };
       case 'message': return { icon: 'chat', text: oneLine(k.text, 120) };
       case 'reasoning': return { icon: 'chat', text: `Thought: ${oneLine(k.text, 110)}` };
@@ -216,15 +296,22 @@
       case 'status_changed': return { icon: 'refresh', text: `Status → ${k.status.replace('_', ' ')}` };
       case 'plan_updated': return { icon: 'list', text: `Its list: ${k.steps.filter((s) => s.status === 'completed').length} of ${k.steps.length} done` };
       case 'approval_requested': return { icon: 'flag', text: askedLine(k.approval, agent.provider), tone: 'warn' };
-      case 'approval_resolved': return { icon: 'flag', text: settledLine(k.status, k.by, store.approvals.find((a) => a.id === k.approval_id) ?? null, yourAnswers.get(k.approval_id) ?? null, agent.provider), tone: k.status === 'approved' ? 'good' : 'bad' };
+      case 'approval_resolved': {
+        // (the request's own row went into this one: it says what was asked, then the answer)
+        const asked = store.approvals.find((a) => a.id === k.approval_id) ?? folded?.asked.get(k.approval_id) ?? null;
+        const settled = settledLine(k.status, k.by, asked, yourAnswers.get(k.approval_id) ?? null, agent.provider, savedRuleOf(store.decisions, k.approval_id));
+        const text = closedLine(asked, settled, agent.provider);
+        // (the row is cut: the whole of a long request is on its tip)
+        return { icon: 'flag', text, tone: k.status === 'approved' ? 'good' : 'bad', tip: text };
+      }
       case 'retrieval': return { icon: 'link', text: `Codly provided ${k.citations.length} citations for “${oneLine(k.query, 50)}”` };
       case 'session_started': return { icon: 'bolt', text: `Session started · ${PROVIDER_LABEL[k.provider]} ${k.cli_version ?? ''}` };
-      case 'sub_agent': return { icon: 'crew', text: `Subagent ${k.status}: ${oneLine(k.description, 90)}` };
+      case 'sub_agent': return { icon: 'crew', text: helperRowLine(k) };
       case 'mcp_server': return { icon: 'link', text: `MCP server ${k.name}: ${MCP_LABEL[k.status].toLowerCase()}${k.error ? ` (${oneLine(k.error, 90)})` : ''}` };
       case 'error': return { icon: 'alert', text: oneLine(k.message, 120), tone: 'bad' };
       case 'notice': return { icon: 'info', text: oneLine(k.text, 160) };
-      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k) };
-      case 'decision': return { icon: 'help', text: k.summary };
+      case 'background_tasks': return { icon: 'terminal', text: backgroundLine(k, fx.backgroundBefore.get(e.id) ?? null) ?? '' }; // (one with nothing to say is not in `log`)
+      case 'decision': return { icon: 'help', text: (fx.restarts.has(e.id) && restartLine(k.summary)) || decisionLine(k, isName) };
       case 'committed': return { icon: 'commit', text: `Committed ${k.sha.slice(0, 7)} · ${plural(k.files.length, 'file')}` };
       case 'verified': return { icon: k.ok ? 'check-circle' : 'x-circle', text: `Verified ${k.command}`, tone: k.ok ? 'good' : 'bad' };
       case 'merged': return { icon: 'merge', text: `Merged into ${k.branch}`, tone: 'good' };
@@ -233,28 +320,87 @@
       case 'triple_added': return { icon: 'graph', text: tripleLine(k.triple, names) };
       case 'task_changed': return { icon: 'plan', text: taskChangedLine(k.task) };
       case 'exited': return { icon: 'stop', text: `Process exited${k.code != null ? ` (${k.code})` : ''}` };
-      case 'compacting': return { icon: 'layers', text: `Compacted context${k.pre_tokens ? ` ${tokens(k.pre_tokens)} → ${tokens(k.post_tokens)}` : ''}` };
+      case 'compacting': return { icon: 'layers', text: compactionRowLine(k, agent.provider) };
       case 'retrying': return { icon: 'refresh', text: `Retrying (${k.attempt}): ${k.reason}`, tone: 'warn' };
       case 'chat': return { icon: 'chat', text: oneLine(k.message.text, 100) };
       default: return { icon: 'info', text: k.type.replace(/_/g, ' ') };
     }
   }
 
-  // Jump targets: a timeline click (eventId) opens History; a subagent companion opens Subagents.
+  // Jump targets: a timeline click (eventId) opens History; a helper's companion opens Helpers.
+  // A row that History folded into another (`foldActs`) is found at the row that stands for it.
   let root: HTMLDivElement | undefined = $state();
+  const jumpedTo = $derived.by(() => {
+    const id = ui.selection?.kind === 'agent' ? ui.selection.eventId : undefined;
+    return id ? (folded?.at.get(id) ?? id) : undefined;
+  });
   $effect(() => {
     const id = ui.selection?.kind === 'agent' ? ui.selection.eventId : undefined;
     if (!id) return;
     if (!ui.sections.history) ui.toggleSection('history');
     filter = 'all';
-    tick().then(() => root?.querySelector(`[data-ev="${id}"]`)?.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
+    tick().then(() => root?.querySelector(`[data-ev="${untrack(() => folded?.at.get(id)) ?? id}"]`)?.scrollIntoView({ block: 'center', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
   });
+  /** The newest focus: a place inside a tab that is still loading stops being looked for when another focus comes. */
+  let focusRun = 0;
   $effect(() => {
     const f = ui.sheetFocus;
     if (!f) return;
     ui.sheetFocus = null;
-    if (ui.sections[f] === false) ui.toggleSection(f);
-    tick().then(() => root?.querySelector(`[data-section="${f}"]`)?.scrollIntoView({ block: 'start', behavior: ui.reducedMotion ? 'auto' : 'smooth' }));
+    // A section inside a tab (the Git tab's checkpoints): that tab opens first.
+    const at = focusPlace(f);
+    if (at.tab) ui.sheetTab = withTab(ui.sheetTab, agent.id, at.tab);
+    if (ui.sections[at.section] === false) ui.toggleSection(at.section);
+    const behavior = ui.reducedMotion ? 'auto' : 'smooth';
+    const run = ++focusRun;
+    tick().then(() => root?.querySelector(`[data-section="${at.section}"]`)?.scrollIntoView({ block: 'start', behavior }));
+    // The place inside the tab shows once the tab has read what it shows (the Git tab reads the worktree first).
+    const inner = at.inner;
+    if (inner) {
+      const look = (tries: number) => {
+        if (run !== focusRun) return;
+        const el = root?.querySelector(`[data-section="${inner}"]`);
+        if (el) el.scrollIntoView({ block: 'start', behavior });
+        else if (tries > 0) setTimeout(() => look(tries - 1), FOCUS_LOOK_MS);
+      };
+      tick().then(() => look(FOCUS_LOOK_TRIES));
+    }
+  });
+
+  // A change of layout (the window is resized, a panel opens) moves the sheet's rows: once its
+  // size has stayed the same for a moment, "Needs you" comes back into view if it showed before.
+  // Scrolling only, as the thread does it (home/threadScroll.ts); the keys are not touched.
+  $effect(() => {
+    if (!root) return;
+    const sc = root;
+    const span = (el: Element) => {
+      const r = el.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom };
+    };
+    const card = () => sc.querySelector('[data-section="needs"]');
+    let size = [sc.clientWidth, sc.clientHeight];
+    let shown = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => {
+      if (sc.clientWidth === size[0] && sc.clientHeight === size[1]) return;
+      size = [sc.clientWidth, sc.clientHeight];
+      if (timer === undefined) {
+        const el = card();
+        shown = !!el && meets(span(sc), span(el));
+      }
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        const el = card();
+        // (48 px: the top the sheet keeps for its name bar, `scroll-padding-top`)
+        if (shown && el) sc.scrollTop = revealTop(sc.scrollTop, span(sc), span(el), 48, 12);
+      }, LAYOUT_REST_MS);
+    });
+    ro.observe(sc);
+    return () => {
+      ro.disconnect();
+      clearTimeout(timer);
+    };
   });
 
   /** The agent's name in the head has scrolled out of view: a slim bar keeps saying whose sheet this is. */
@@ -267,6 +413,8 @@
   let confirmStop = $state(false);
   let confirmLetGo = $state(false);
   const working = $derived(n?.tone === 'live' || n?.tone === 'wait');
+  /** Why it cannot be stopped from here (it is in your terminal), else null. */
+  const killOff = $derived(killRefusal(agent.name, takeovers.has(agent.id)));
   /** Interrupt and Stop land when the CLI lets go: the button says so until then. */
   let interrupting = $state(false);
   let stopping = $state(false);
@@ -286,10 +434,10 @@
   const moreItems = $derived<MenuItem[]>([
     { label: 'Open a terminal in its worktree', icon: 'terminal', disabled: !agent.worktree, run: () => { ui.terminalTakeover = null; ui.terminalCwd = agent.worktree; ui.go('terminal'); } },
     { label: 'Copy worktree path', icon: 'copy', disabled: !agent.worktree, run: () => copyText(agent.worktree ?? '', 'Path copied') },
-    { label: 'Change model…', icon: 'sparkle', disabled: agent.role !== 'solo', run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
+    { label: 'Change model…', icon: 'sparkle', disabled: modelChangeOff(agent) != null, run: () => (ui.modelDialog = { provider: agent.provider, agentId: agent.id }) },
     { kind: 'separator' },
     { label: 'Interrupt this turn', icon: 'pause', disabled: !working || interrupting, run: interrupt },
-    { label: 'Stop the agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline', run: () => (confirmStop = true) },
+    { label: 'Kill agent…', icon: 'stop', danger: true, disabled: agent.status === 'offline' || killOff != null, hint: killOff ? 'In your terminal' : undefined, run: () => (confirmStop = true) },
     // The Lead goes with its request, a team member with Settings → Team.
     ...(agent.role === 'lead' ? [] : agent.member
       ? [{ label: 'Remove from team…', icon: 'settings', run: () => { ui.settingsTab = 'team'; ui.settingsOpen = true; } } as MenuItem]
@@ -322,22 +470,23 @@
   </div>
   {#if confirmStop}
     <div class="confirm">
-      <span>Stop {agent.name}? The process ends; its worktree is kept.</span>
-      <button class="btn sm danger" disabled={stopping} onclick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button>
-      <button class="btn sm ghost" disabled={stopping} onclick={() => (confirmStop = false)}>Keep</button>
+      <span>Kill {agent.name}? The process ends now; its worktree is kept.</span>
+      <button class="btn sm danger" disabled={stopping} onclick={stop}>{stopping ? 'Killing…' : 'Kill'}</button>
+      <button class="btn sm ghost" disabled={stopping} use:safeChoice={{ keep: () => (confirmStop = false) }} onclick={() => (confirmStop = false)}>Keep</button>
     </div>
   {/if}
   {#if confirmLetGo}
     <div class="confirm">
       <span>Let {agent.name} go? They leave the office as a ghost by the memory archive, with their career and memory; you can bring them back.</span>
       <button class="btn sm danger" onclick={() => { confirmLetGo = false; letGo(agent.id); }}>Let go</button>
-      <button class="btn sm ghost" onclick={() => (confirmLetGo = false)}>Keep</button>
+      <button class="btn sm ghost" use:safeChoice={{ keep: () => (confirmLetGo = false) }} onclick={() => (confirmLetGo = false)}>Keep</button>
     </div>
   {/if}
 
   <div class="sections">
     <Section id="now" title="Now">
       <p class="now tone-{n?.tone}">{#if n}<Say parts={n.parts} />{/if}</p>
+      <RetryButton {task} />
       <p class="now-meta num">{#if !n?.parts.some((p) => p.timer)}{n?.tone === 'live' ? `for ${timer(ui.now - since)}` : `since ${clock(since)}`}{#if agent.worktree}{' · '}{/if}{/if}{#if agent.worktree}<code data-tip={GLOSSARY.worktree}>{task?.branch ?? tildify(agent.worktree)}</code>{/if}</p>
       <div class="why"><Why lines={why} /></div>
     </Section>
@@ -358,18 +507,19 @@
       <Section id="needs" title="Needs you" tone="attention" collapsible={false}>
         {#if inConversation}
           <div class="needs-ptr">
-            <span>{approvals.length === 1 ? 'Its approval is open in the conversation.' : `${approvals.length} approvals are open in the conversation.`}</span>
+            <span>{openInConversation(approvals.map((a) => a.subject.kind === 'question'))}</span>
             <button class="btn sm amber" onclick={() => (ui.revealApproval = approvals[0].id)}>Show it</button>
           </div>
         {:else}
           <div class="needs">{#each approvals as ap (ap.id)}<ApprovalCard approval={ap} showAgent={false} />{/each}</div>
         {/if}
+        {#if keysOther}<p class="keys-other">{keysAnswerOtherLine(clean(keysOther), inConversation)}</p>{/if}
       </Section>
     {/if}
 
     {#if canTrust(agent.role)}<AgentTrust {agent} />{/if}
 
-    <AgentControls {agent} />
+    <AgentControls {agent} {model} />
 
     <!-- The Lead works through Codly's own tools, which a terminal does not have: it never goes. -->
     {#if agent.role !== 'lead'}<AgentTakeover {agent} />{/if}
@@ -420,9 +570,11 @@
     </Section>
 
     {#if subs.length}
-      <Section id="subagents" title="Subagents" summary={subsRunning.length ? `${subsRunning.length} running` : `${subs.length} finished`}>
+      <Section id="subagents" title="Helpers" summary={helpersSummary(subs)}>
         <ul class="subs">
           {#each moreSubs ? subsRunning : subsRunning.slice(0, SHOW) as s (s.callId)}
+            {@const halt = canStopHelpers ? helperStop(s, subsRunning, background, clean(agent.name), turnRuns(agent, live)) : null}
+            {@const halting = helperStopping(s.callId)}
             <li>
               <div class="s-row">
                 <Icon name="crew" size={15} />
@@ -430,23 +582,28 @@
                 <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
                 <span class="s-meta num">{timer(ui.now - s.startedAt)}</span>
                 <span class="s-dot on"></span>
+                {#if halt?.id}
+                  {@const id = halt.id}
+                  <button class="btn sm ghost" disabled={halting || helpersSettling} aria-label={stopLabel({ kind: 'helper', description: s.description }, halting)} data-tip={halt.hint} data-tip-place="below" onclick={() => stopHelper(s.callId, id)}><Icon name="stop" size={12} />{halting ? STOP_BUSY : 'Stop'}</button>
+                {/if}
               </div>
               {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
+              {#if halt && !halt.id}<p class="s-now">{halt.hint}</p>{/if}
             </li>
           {/each}
         </ul>
         {#if subsRunning.length > SHOW}<button class="more" onclick={() => (moreSubs = !moreSubs)}>{moreSubs ? 'Show less' : 'Show more'}</button>{/if}
-        {#if subsDone.length}
-          <button class="more done" onclick={() => (moreSubs = !moreSubs)}><Icon name="crew" size={15} />{subsDone.length} finished</button>
+        {#if subsEnded.length}
+          <button class="more done" onclick={() => (moreSubs = !moreSubs)}><Icon name="crew" size={15} />{helpersSummary(subsEnded)}</button>
           {#if moreSubs}
             <ul class="subs">
-              {#each subsDone as s (s.callId)}
+              {#each subsEnded as s (s.callId)}
                 <li class="fin">
                   <div class="s-row">
                     <Icon name={s.status === 'completed' ? 'check' : 'x-circle'} size={15} />
                     {#if s.name}<span class="s-kind">{clean(s.name)}</span>{/if}
                     <span class="s-txt truncate selectable" data-tip={s.description}>{s.description}</span>
-                    <span class="s-meta num">{dur(s.ts - s.startedAt)}</span>
+                    <span class="s-meta num">{helperEndWord(s.status)} · {dur(s.ts - s.startedAt)}</span>
                   </div>
                   {#if helperLine(s)}<p class="s-now truncate">{helperLine(s)}</p>{/if}
                   {#if clean(s.report).trim()}<p class="s-report selectable">{clean(s.report).trim()}</p>{/if}
@@ -509,7 +666,7 @@
       </div>
     </Section>
 
-    <Section id="history" title="History" summary="{log.length} events">
+    <Section id="history" title="History">
       <div class="filters lenses" role="radiogroup" aria-label="Filter">
         {#each ['all', 'tools', 'files', 'decisions', 'errors'] as f (f)}
           <button role="radio" aria-checked={filter === f} onclick={() => (filter = f as typeof filter)}>{f[0].toUpperCase() + f.slice(1)}</button>
@@ -518,10 +675,10 @@
       <div class="log">
         {#each log as e (e.id)}
           {@const d = describe(e)}
-          <button class="ev" class:hl={ui.selection?.kind === 'agent' && ui.selection.eventId === e.id} data-ev={e.id} onclick={() => (rawOpen = rawOpen === e.id ? null : e.id)}>
+          <button class="ev" class:hl={jumpedTo === e.id} data-ev={e.id} onclick={() => (rawOpen = rawOpen === e.id ? null : e.id)}>
             <time class="num">{clockSec(e.ts)}</time>
             <span class="ev-ic tone-{d.tone ?? 'n'}"><Icon name={d.icon} size={12} /></span>
-            <span class="ev-t truncate">{d.text}</span>
+            <span class="ev-t truncate" data-tip={d.tip}>{d.text}</span>
             {#if e.kind.type === 'decision'}<Provenance kind={methodProvenance(e.kind.method)} compact />{/if}
           </button>
           {#if rawOpen === e.id}<pre class="raw selectable">{JSON.stringify(e, null, 2)}</pre>{/if}
@@ -567,6 +724,7 @@
   .needs { display: flex; flex-direction: column; gap: 10px; }
   .needs-ptr { display: flex; align-items: center; gap: 10px; font-size: var(--t-md); color: var(--amber-ink); }
   .needs-ptr span { flex: 1; }
+  .keys-other { margin-top: 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--ink-2); }
   .task { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-1); text-align: left; }
   .task:hover { background: var(--surface-2); }
   .tk { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); }
@@ -609,7 +767,7 @@
   .s-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-4); flex-shrink: 0; }
   .s-dot.on { background: color-mix(in srgb, var(--hue) 75%, white); box-shadow: 0 0 8px var(--hue); }
   .s-txt { flex: 1; min-width: 0; font-size: var(--t-md); }
-  .s-meta { font-size: var(--t-xs); color: var(--ink-3); }
+  .s-meta { font-size: var(--t-xs); color: var(--ink-3); white-space: nowrap; }
   .subs li { flex-direction: column; align-items: stretch; gap: 2px; }
   .s-row { display: flex; gap: 10px; align-items: center; min-width: 0; }
   .s-row > :global(svg) { flex-shrink: 0; color: var(--ink-3); }

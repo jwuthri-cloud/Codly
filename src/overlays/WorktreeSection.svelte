@@ -7,7 +7,7 @@
   on, or turn the script off (without first turning the new text on).
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { WorktreeSetup } from '../lib/gen/WorktreeSetup';
   import { Loader } from '../lib/state/loader.svelte';
@@ -15,9 +15,18 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { setupChoices } from '../lib/util/worktree';
   import LoadError from '../components/LoadError.svelte';
+  import MoreAbout from './MoreAbout.svelte';
+
+  /** Called with each value the section shows, as it is read or saved: the line under the
+   *  page's name in the list follows it. */
+  let { onvalue }: { onvalue?: (setup: WorktreeSetup) => void } = $props();
 
   const setup = new Loader<WorktreeSetup>(() => api.worktreeSetup());
   const s = $derived(setup.value);
+  $effect(() => {
+    const now = s;
+    if (now) untrack(() => onvalue?.(now));
+  });
   onMount(() => {
     if (store.workspace) void setup.load();
   });
@@ -40,30 +49,44 @@
     <p class="desc">
       Each agent works in its own copy of {store.workspace.name} (a git worktree). git puts only tracked files there, so Codly also copies
       what git ignores and an agent needs: <code>node_modules</code>, <code>.venv</code>, <code>venv</code> and the <code>.env</code> files at the top of the repo.
-      To copy more, list it in a <code>.worktreeinclude</code> file at the top of the repo (same syntax as <code>.gitignore</code>). Codly copies only what git ignores,
-      in your checkout and in the worktree: commit the <code>.gitignore</code> line first.
     </p>
+    <MoreAbout id="worktrees">
+      <p class="desc">
+        To copy more, list it in a <code>.worktreeinclude</code> file at the top of the repo (same syntax as <code>.gitignore</code>). Codly copies only what git ignores,
+        in your checkout and in the worktree: commit the <code>.gitignore</code> line first.
+      </p>
+    </MoreAbout>
     {#if s}
       {@const can = setupChoices(s)}
       {#if s.include.length}
         <p class="desc">.worktreeinclude adds: {#each s.include as line, i (i)}<code class="chip">{line}</code>{/each}</p>
       {/if}
-      <label class="row toggle">
+      <!-- The name and the first paragraph are the switch's label; "More about this" is not: a press there opens the text. -->
+      <div class="row">
         <div class="r-text">
-          <span class="r-title">Run the repo’s setup script</span>
-          <span class="desc">
-            {#if s.problem}
-              Codly does not run this repo’s setup script: {s.problem}.
-            {:else if s.script === null}
-              This repo has no <code>.codly/setup.sh</code>. Add one to install packages or write local settings in each new worktree.
-            {:else}
-              Codly runs a copy of <code>.codly/setup.sh</code> from your checkout once in each new worktree, before the agent starts (10 minute limit).
-              It runs in the worktree’s top folder, with the program its first line names (<code>#!/usr/bin/env bash</code>) or <code>/bin/sh</code>. It can read
-              <code>$CODLY_PORT_BASE</code> (10 ports of its own) and <code>$CODLY_REPO_PATH</code> (your checkout). If it fails, the task waits for you.
-            {/if}
-          </span>
+          <label class="r-label" for="worktree-setup-switch">
+            <span class="r-title">Run the repo’s setup script</span>
+            <span class="desc">
+              {#if s.problem}
+                Codly does not run this repo’s setup script: {s.problem}.
+              {:else if s.script === null}
+                This repo has no <code>.codly/setup.sh</code>. Add one to install packages or write local settings in each new worktree.
+              {:else}
+                Codly runs a copy of <code>.codly/setup.sh</code> from your checkout once in each new worktree, before the agent starts (10 minute limit).
+                It runs in the worktree’s top folder, with the program its first line names (<code>#!/usr/bin/env bash</code>) or <code>/bin/sh</code>.
+              {/if}
+            </span>
+          </label>
+          {#if !s.problem && s.script !== null}
+            <MoreAbout id="worktree-setup-run">
+              <span class="desc">
+                It can read <code>$CODLY_PORT_BASE</code> (10 ports of its own) and <code>$CODLY_REPO_PATH</code> (your checkout). If it fails, the task waits for you.
+              </span>
+            </MoreAbout>
+          {/if}
         </div>
         <input
+          id="worktree-setup-switch"
           type="checkbox"
           class="switch"
           checked={s.on}
@@ -71,7 +94,7 @@
           aria-label="Run the repo’s setup script"
           onchange={(e) => turn(e.currentTarget.checked ? can.on : null)}
         />
-      </label>
+      </div>
       {#if can.ask}
         <div class="changed" role="status">
           <p>
@@ -92,8 +115,10 @@
         <p class="desc">
           This is code from the repo, and once it is on it runs without asking again.
           {#if s.risks.length}The approval rules see in it: {s.risks.join(', ')}.{:else}The approval rules see no risk in it.{/if}
-          You turn on this script as it is written now: if the file changes, it is off until Codly has asked you again.
         </p>
+        <MoreAbout id="worktree-setup-text">
+          <p class="desc">You turn on this script as it is written now: if the file changes, it is off until Codly has asked you again.</p>
+        </MoreAbout>
       {/if}
     {:else if setup.error}
       <LoadError what="the worktree setup" error={setup.error} loading={setup.loading} onretry={() => setup.load()} />
@@ -109,6 +134,8 @@
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
+  /* The name and the first paragraph of the switch's row: a press there flips the switch. */
+  .r-label { display: flex; flex-direction: column; gap: 2px; }
   .chip { margin-left: 6px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--surface-1); }
   .changed { display: flex; flex-direction: column; gap: 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--bad); }
   .choices { display: flex; gap: 8px; }

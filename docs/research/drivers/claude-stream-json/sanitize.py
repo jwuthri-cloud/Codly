@@ -1,6 +1,7 @@
 """raw/<scenario>.ndjson -> fixtures/<scenario>.ndjson (sanitized for a public repo).
 
 Usage: python3 sanitize.py [raw file ...]      (default: every file in $CAPTURE_DIR/raw)
+       python3 sanitize.py --refresh <fixture ...>   (applies the newer file-name rule, machine_names(), to fixtures in place)
 Environment: CAPTURE_DIR (folder with raw/, fixtures/, work/; default: the parent of this folder),
              FIXTURES_DIR (where to write; default: $CAPTURE_DIR/fixtures),
              CLI_VERSION (text for the first line of each fixture; default: what `claude --version` prints),
@@ -16,19 +17,29 @@ Fixture format, one JSON object per line:
   {"_meta": {...}}                    a note of the driver (stdin closed, exit code, files found on disk)
   anything else                       a line of the CLI's stdout, as written (after sanitizing)
 
-Sanitizing: user name and temp paths, every id (session, request, message, tool use, task, run, hook, uuid),
+Sanitizing: user name, host name and temp paths, every id (session, request, message, tool use, task, run, hook, uuid),
 thinking signatures, account fields, and the lists that describe the machine (slash commands, skills, plugins,
-agents, model catalog, usage report) are replaced or shortened. Key names and structure are kept.
+agents, model catalog, usage report, skills in a context report, the output of the machine's own SessionStart hooks)
+are replaced or shortened. Key names and structure are kept.
 """
-import datetime, getpass, glob, json, os, re, shutil, subprocess, sys
+import datetime, getpass, glob, json, os, re, shutil, socket, subprocess, sys
 
 OUT = os.path.abspath(os.environ.get("CAPTURE_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 USER = getpass.getuser()
 HOME = os.path.expanduser("~")
+# The machine's network name ("Someones-MacBook-Pro.local") and its short form: the CLI can write them (remote control).
+HOSTNAMES = sorted({h for h in (socket.gethostname(), socket.gethostname().split(".")[0]) if len(h) >= 6 and h != "localhost"}, key=len, reverse=True)
+HOOK_GONE = "<removed: output of a hook of the recording machine>"
 DOC_NAME = os.environ.get("DOC_NAME", "the document next to the fixtures")
 # MCP servers the scenarios themselves configure. Every other server name is this machine's and is removed.
 OWN_MCP = ("exits-at-once", "no-such-command", "needs-login", "ping-project",
-           "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user")
+           "ping-slow", "ping-flaky", "ping-config", "ping-same", "ping-user", "ping-live", "ping-http", "ping-local",
+           "plugin:ping-plugin:ping-plugged", "plugin_ping-plugin_ping-plugged")
+# Plugins the scenarios themselves install (in a throw-away HOME). Every other plugin is this machine's and is removed,
+# also from a driver note that copied a list of plugins out of `init` (own_plugins_in_notes).
+OWN_PLUGINS = ("ping-plugin",)
+# Slash commands and skills the scenarios themselves write (part 7). Every other one is this machine's and is removed.
+OWN_COMMANDS = ("codly-hello", "codly-proj", "codly-skill", "codly-proj-skill")
 
 
 def cli_version():
@@ -97,12 +108,27 @@ def prescan(v, ids, key=None, sent=False):
 
 
 def keep_commands(cmds):
-    out = []
+    """The first two of the built-in commands in KEEP_COMMANDS, and every command of the scenario's own."""
+    out, own = [], []
     for c in cmds:
         name = c.get("name") if isinstance(c, dict) else c
         if name in KEEP_COMMANDS:
             out.append(c)
-    return out[:2]
+        elif name in OWN_COMMANDS:
+            own.append(c)
+    return out[:2] + own
+
+
+def own_plugins_in_notes(v, key=None):
+    """A driver note: every list under a key named `plugins` or `*_plugins` keeps only the scenario's own plugins (a
+    plain name or an object with a `name`)."""
+    if isinstance(v, dict):
+        return {k: own_plugins_in_notes(x, k) for k, x in v.items()}
+    if isinstance(v, list):
+        if key is not None and (key == "plugins" or key.endswith("_plugins")):
+            return [p for p in v if (p.get("name") if isinstance(p, dict) else p) in OWN_PLUGINS]
+        return [own_plugins_in_notes(x) for x in v]
+    return v
 
 
 def redact_usage(u):
@@ -141,13 +167,23 @@ def transform(v, ids, sig, key=None):
     d = dict(v)
     if d.get("type") == "system" and d.get("subtype") == "init":
         d["slash_commands"] = keep_commands(d.get("slash_commands", []))
-        d["skills"] = []
-        d["plugins"] = []
+        d["skills"] = [x for x in d.get("skills", []) if (x.get("name") if isinstance(x, dict) else x) in OWN_COMMANDS]
+        d["plugins"] = [p for p in d.get("plugins", []) if isinstance(p, dict) and p.get("name") in OWN_PLUGINS]
         d["agents"] = [a for a in d.get("agents", []) if a == "general-purpose"]
         if "terminal_slash_commands" in d:
             d["terminal_slash_commands"] = d["terminal_slash_commands"][:1]
         d["mcp_servers"] = [s for s in d.get("mcp_servers", []) if s.get("name") in OWN_MCP]
         d["tools"] = [t for t in d.get("tools", []) if not t.startswith("mcp__") or t.split("__")[1] in OWN_MCP]
+        if d.get("output_style", "default") != "default":  # a run that reads the user's own settings names their output style
+            d["output_style"] = "<output-style>"
+    if d.get("type") == "system" and d.get("subtype") == "hook_response" and d.get("hook_event") == "SessionStart":
+        # The scenarios configure no SessionStart hook: these are the machine's own, and print its skills and rules.
+        for k in ("output", "stdout", "stderr"):
+            if d.get(k):
+                d[k] = HOOK_GONE
+    if isinstance(d.get("skills"), dict) and "skillFrontmatter" in d["skills"]:  # get_context_usage
+        d["skills"] = dict(d["skills"], skillFrontmatter=[])
+        d["agents"] = [a for a in d.get("agents", []) if not isinstance(a, dict) or a.get("source") == "built-in"]
     if d.get("type") == "system" and d.get("subtype") == "commands_changed":
         d["commands"] = keep_commands(d.get("commands", []))
     if "commands" in d and "models" in d and "account" in d:  # initialize response
@@ -180,6 +216,15 @@ def transform(v, ids, sig, key=None):
     return {k: transform(x, ids, sig, k) for k, x in d.items()}
 
 
+def machine_names(s):
+    """File names that the CLI makes from a process id, a hash or the clock (they say nothing about the protocol and
+    differ on every machine): its session lock files, the backups of ~/.claude.json, the MCP log files."""
+    s = re.sub(r"sessions/\d+\.[0-9a-f]{64}\.key", "sessions/<pid>.<hash>.key", s)
+    s = re.sub(r"sessions/\d+\.json", "sessions/<pid>.json", s)
+    s = re.sub(r"\.claude\.json\.backup\.\d{10,}", ".claude.json.backup.<time>", s)
+    return re.sub(r"(mcp-logs-[^/\"]+/)\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z\.jsonl", r"\1<time>.jsonl", s)
+
+
 def scrub(s, ids, name_map):
     u = re.escape(USER)
     for p in WORK_DASHED:
@@ -189,6 +234,8 @@ def scrub(s, ids, name_map):
     s = re.sub(r"(?:/private)?/tmp/claude-\d+/", "/tmp/claude-tmp/", s)
     s = re.sub(r"(?:/private)?/var/folders/[\w+]+/[\w+]+/", "/var/folders/xx/yy/", s)
     s = s.replace(HOME, "/Users/me").replace(re.sub(r"[^A-Za-z0-9]", "-", HOME) + "-", "-Users-me-")
+    for h in HOSTNAMES:
+        s = s.replace(h, "my-mac")
     s = re.sub(u, "me", s, flags=re.I)
     s = re.sub(r"/tmp/cc-socks/\d+\.sock", "/tmp/cc-socks/12345.sock", s)
     s = re.sub(r"[\w.+-]+@[\w-]+\.[A-Za-z][\w.-]*", lambda m: m.group(0) if m.group(0) == "demo@example.invalid" else "user-email", s)
@@ -201,7 +248,7 @@ def scrub(s, ids, name_map):
     s = re.sub(r"\b(?:srv)?toolu_[A-Za-z0-9]{10,}", lambda m: ids.get(m.group(0), "toolu"), s)
     s = re.sub(r"\breq_[A-Za-z0-9]{10,}", lambda m: ids.get(m.group(0), "apireq"), s)
     s = UUID_RE.sub(lambda m: m.group(0) if m.group(0) == ZERO_UUID else ids.get(m.group(0), "uuid"), s)
-    return s
+    return machine_names(s)
 
 
 def rechunk_stream_deltas(recs, ids):
@@ -265,7 +312,7 @@ def sanitize(path):
                              "models and usage reports are shortened. See %s." % (VERSION, RECORDED.get(path, TODAY), DOC_NAME),
                     "_argv": ["claude"] + m["argv"][1:], "_cwd": m["cwd"]}
         elif d == "meta":
-            line = {"_meta": m, "_t": t}
+            line = {"_meta": own_plugins_in_notes(m), "_t": t}
         elif d == "send":
             line = {"_sent": transform(m, ids, sig), "_t": t}
         elif d == "stderr":
@@ -295,7 +342,22 @@ LEGACY_TIME_MARKS = bool(os.environ.get("LEGACY_TIME_MARKS"))  # set it to rebui
 TODAY = datetime.date.today().isoformat()
 RECORDED = {}
 
+def refresh(path):
+    """Apply machine_names() to a fixture that was sanitized before that rule existed (its raw file is gone)."""
+    lines = open(path).read().splitlines()
+    out = [machine_names(l) for l in lines]
+    for l in out:
+        json.loads(l)
+    with open(path, "w") as f:
+        f.write("\n".join(out) + "\n")
+    return sum(1 for a, b in zip(lines, out) if a != b)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--refresh"]:
+        for p in sys.argv[2:]:
+            print("%-50s %3d lines changed" % (os.path.basename(p), refresh(p)))
+        sys.exit(0)
     VERSION = cli_version()
     paths = sys.argv[1:] or sorted(glob.glob(os.path.join(OUT, "raw", "*.ndjson")))
     RECORDED = {p: datetime.date.fromtimestamp(os.path.getmtime(p)).isoformat() for p in paths}

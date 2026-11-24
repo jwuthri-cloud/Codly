@@ -9,6 +9,7 @@
   import { requests } from '../lib/state/requests.svelte';
   import { store } from '../lib/state/store.svelte';
   import { isClosedThread, isRequestThread, ui } from '../lib/state/ui.svelte';
+  import { wantsTo } from '../lib/util/planRequest';
   import { oneLine } from '../lib/util/sanitize';
   import Icon from '../components/Icon.svelte';
   import PlanHeader from './cards/PlanHeader.svelte';
@@ -48,7 +49,7 @@
     {#if waiting}
       <button class="d-wait" onclick={review}>
         <Icon name="flag" size={13} /><b>{waitingAgent?.name ?? 'An agent'}</b> needs you:
-        <code class="truncate">{waiting.subject.kind === 'command' ? oneLine(waiting.subject.command, 48) : waiting.subject.kind === 'question' ? 'a question' : waiting.subject.kind.replace('_', ' ')}</code>
+        <code class="truncate">{waiting.subject.kind === 'command' ? oneLine(waiting.subject.command, 48) : waiting.subject.kind === 'question' ? 'a question' : wantsTo(waiting.subject, waitingAgent?.provider ?? null, 48)}</code>
         <span class="go">Review</span>
       </button>
     {/if}

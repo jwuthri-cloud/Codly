@@ -67,6 +67,7 @@ impl AccountQuery {
             local_settings: false,
             raw_log: self.raw_log.clone(),
             byok_command: self.byok_command.clone(),
+            max_budget_usd: None,
         }
     }
 

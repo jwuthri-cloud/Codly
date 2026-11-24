@@ -1,7 +1,8 @@
-// The pull-request step, from the buttons' side. Nothing here runs by itself: a draft is asked
+// The pull-request step, from the buttons' side. Nothing is sent by itself: a draft is asked
 // for when you press Create pull request, and a push or a pull request is sent only from the
 // dialog that named the remote, the branch and the base (`confirm`). A failure says in a toast
-// what was sent and what was not.
+// what was sent and what was not. Only reads run by themselves: an open pull request's checks,
+// while one of its rows is on screen (`readWhileShown`).
 import { api } from '../api';
 import type { PrChecks } from '../gen/PrChecks';
 import type { PrConfirm } from '../gen/PrConfirm';
@@ -78,14 +79,91 @@ export async function pushPrBranch(source: PrSource, confirm: PrConfirm): Promis
   }
 }
 
-/** Refresh: read the pull request's state and checks once more. */
-export async function refreshPullRequest(source: PrSource) {
+/** How often an open pull request's checks are read again while its row is on screen, in ms. */
+export const PR_REFRESH_MS = 30_000;
+
+/** The pull requests being read now, by `prKey`: a read by itself waits for none of them. */
+const reading = new Set<string>();
+
+/**
+ * Refresh: read the pull request's state and checks once more. A read you asked for (the
+ * button) that fails says why in a toast. One the row makes by itself (`byItself`: every 30 s,
+ * when the window gets the focus) says nothing when it fails: the row keeps the last reading and
+ * says how old it is, and the next one tries again. It is not made while a read of that pull
+ * request is on its way.
+ */
+export async function refreshPullRequest(source: PrSource, byItself = false) {
+  const key = prKey(source);
+  if (byItself && reading.has(key)) return;
+  reading.add(key);
   try {
     const pr = await api.refreshPullRequest(source);
-    prUi.opened[prKey(source)] = pr;
+    prUi.opened[key] = pr;
   } catch (e) {
-    toast({ kind: 'error', title: 'Couldn’t read the pull request', body: msg(e) });
+    if (!byItself) toast({ kind: 'error', title: 'Couldn’t read the pull request', body: msg(e) });
+  } finally {
+    reading.delete(key);
   }
+}
+
+/**
+ * Whether a row of a pull request reads it again by itself: it is open as last read, the row is
+ * on screen, and you did not merge its work here (then the row says where the pull request
+ * stood when last read, and Refresh reads it again). Pure.
+ */
+export function readsByItself(pr: PullRequest | null | undefined, onScreen: boolean, mergedHere: boolean): boolean {
+  return pr?.state === 'open' && onScreen && !mergedHere;
+}
+
+/** The page's clock and focus, for the reads a pull request makes by itself. */
+export type Page = { every: (ms: number, run: () => void) => () => void; onFocus: (run: () => void) => () => void; visible: () => boolean };
+const browserPage: Page = {
+  every: (ms, run) => {
+    const timer = setInterval(run, ms);
+    return () => clearInterval(timer);
+  },
+  onFocus: (run) => {
+    window.addEventListener('focus', run);
+    return () => window.removeEventListener('focus', run);
+  },
+  visible: () => document.visibilityState === 'visible',
+};
+
+/** By `prKey`: how many of its rows ask it to be read by itself, and how to stop its reads. */
+const readers = new Map<string, { rows: number; stop: () => void }>();
+
+/**
+ * A row of the pull request is on screen and asks it to be read by itself (`readsByItself`):
+ * every 30 s and when the window gets the focus, while the page shows. One timer per pull
+ * request, however many of its rows ask. Call the result when the row asks no more.
+ */
+export function readWhileShown(source: PrSource, page: Page = browserPage): () => void {
+  const key = prKey(source);
+  const held = readers.get(key);
+  if (held) held.rows++;
+  else {
+    const read = () => {
+      if (page.visible()) void refreshPullRequest(source, true);
+    };
+    const stopTimer = page.every(PR_REFRESH_MS, read);
+    const stopFocus = page.onFocus(read);
+    readers.set(key, {
+      rows: 1,
+      stop: () => {
+        stopTimer();
+        stopFocus();
+      },
+    });
+  }
+  let asks = true;
+  return () => {
+    const r = readers.get(key);
+    if (!asks || !r) return;
+    asks = false;
+    if (--r.rows > 0) return;
+    r.stop();
+    readers.delete(key);
+  };
 }
 
 /**

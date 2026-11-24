@@ -1,6 +1,9 @@
 // The browser demo's transport (mock.ts) from the outside, as the UI uses it: a URL parameter
 // of docs/DEMO.md starts it in its state, and the commands of that screen are answered.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import resumeRs from '../../../crates/codly-core/src/orchestrator/resume.rs?raw';
+import { demoDraft, reviewHire } from '../demo/hire';
+import type { Agent } from '../gen/Agent';
 import type { Approval } from '../gen/Approval';
 import type { EventRow } from '../gen/EventRow';
 import type { LotSlot } from '../gen/LotSlot';
@@ -8,12 +11,19 @@ import type { MergeState } from '../gen/MergeState';
 import type { Office } from '../gen/Office';
 import type { Plan } from '../gen/Plan';
 import type { Preview } from '../gen/Preview';
+import type { PullRequest } from '../gen/PullRequest';
+import type { RepoSync } from '../gen/RepoSync';
 import type { RequiredChecks } from '../gen/RequiredChecks';
+import type { ResumeOffer } from '../gen/ResumeOffer';
 import type { Snapshot } from '../gen/Snapshot';
+import type { Task } from '../gen/Task';
 import type { Workspace } from '../gen/Workspace';
+import { HELD, REQUEST, REQUEST_B, REQUEST_B_THREAD } from '../demo/story';
+import { REPO } from '../demo/sim';
 import { MockTransport } from '../mock';
 import { intakeUi } from '../state/intake.svelte';
-import { ofLiveRun, withMcpServer, type McpServer } from '../state/session';
+import { ofLiveRun, startedWithoutFolderConfig, withMcpServer, type McpServer } from '../state/session';
+import { rustStr } from './support/source';
 
 /** The demo, as the page with this query string starts it. */
 function open(search: string): MockTransport {
@@ -64,6 +74,9 @@ describe('the demo transport', () => {
     expect(s.workspace?.name).toBe('acme/web');
     expect(s.chats).toEqual([]);
     expect((await call<RequiredChecks>(t, 'required_checks', { set: null })).on).toBe(true);
+    // "Run plans at once" is on there, so the plan of a request from GitHub is one that waits with its reason.
+    expect(s.settings.auto_run_plans).toBe(true);
+    expect((await snapshot(open(''))).settings.auto_run_plans).toBe(false);
   });
 
   it('`?merge=conflict&preview=running`: a finished plan is not merged until an agent resolved the conflict, and its preview runs', async () => {
@@ -92,13 +105,162 @@ describe('the demo transport', () => {
     expect(await call<string>(t, 'merge_plan', { planId: plan!.id, into: null, unchecked: false })).toMatch(/^[0-9a-f]{40}$/);
   });
 
-  it('answers Close office: a quiet office closes and its plot is free, one with agents at work stays', async () => {
+  it('has two offices, and Close office is refused while one has agents at work or unfinished tasks', async () => {
     const t = open('?ws=1');
-    const docs = (await call<LotSlot[]>(t, 'lots')).find((l) => l.name === 'docs-site')!;
-    await expect(call(t, 'close_office', { workspaceId: 'demo-office-billing' })).rejects.toThrow('is in the middle of a turn in billing-api');
-    const after = await call<LotSlot[]>(t, 'close_office', { workspaceId: docs.workspace_id });
-    expect(after.find((l) => l.id === docs.id)).toMatchObject({ owned: true, workspace_id: null, name: null });
+    const lots = await call<LotSlot[]>(t, 'lots');
+    // No third office: a tab that opened nothing is gone.
+    expect(lots.filter((l) => l.owned).map((l) => l.name).sort()).toEqual(['acme/web', 'billing-api']);
     expect((await call<Office[]>(t, 'offices')).map((o) => o.name)).toEqual(['billing-api']);
+    await expect(call(t, 'close_office', { workspaceId: 'demo-office-billing' })).rejects.toThrow('is in the middle of a turn in billing-api');
+    const home = lots.find((l) => l.name === 'acme/web')!;
+    await expect(call(t, 'close_office', { workspaceId: home.workspace_id })).rejects.toThrow('acme/web still has unfinished work (a1 "Upgrade ESLint to v10"): finish or cancel it first');
+  });
+
+  describe('`?resume=ask`: work was under way when Codly last closed', () => {
+    const offer = (t: MockTransport, go = false) => call<ResumeOffer | null>(t, 'resume_work', { go });
+    /** The first plan's tasks, by key. */
+    const tasks = async (t: MockTransport) => {
+      const s = await snapshot(t);
+      const plan = s.plans.find((p) => p.thread === 'lead')!;
+      return Object.fromEntries(s.tasks.filter((x) => x.plan_id === plan.id).map((x) => [x.key, x])) as Record<string, Task>;
+    };
+
+    it('holds two tasks and their plan when the page loads, and "Resume work" starts them', async () => {
+      const t = open('?resume=ask');
+      expect(await offer(t)).toEqual({ tasks: 2 });
+      // Nothing starts by itself, however long the question is on screen.
+      await vi.advanceTimersByTimeAsync(10_000);
+      const s = await snapshot(t);
+      expect(s.workspace?.name).toBe('acme/web');
+      expect(s.plans.map((p) => p.status)).toEqual(['running']);
+      const held = await tasks(t);
+      // Each says why it waits, in the core's own words (`HELD` of resume.rs).
+      expect(HELD).toBe(rustStr(resumeRs, 'HELD'));
+      expect([held.t1, held.t2].map((x) => [x.status, x.status_reason, x.attempt, x.branch])).toEqual([
+        ['ready', HELD, 1, 'codly/dark-mode/t1'],
+        ['ready', HELD, 1, 'codly/dark-mode/t2'],
+      ]);
+      expect(held.t3.status).toBe('pending');
+      // Each keeps its worker of the last run: offline (its process ended with Codly), in the task's worktree.
+      const workers = (await snapshot(t)).agents.filter((x) => x.role === 'worker');
+      const of = (task: Task) => workers.find((x) => x.id === task.assignee);
+      expect([of(held.t1), of(held.t2)].map((x) => [x?.name, x?.status, x?.run_id, x?.task_id, x?.worktree])).toEqual([
+        ['Ada', 'offline', null, held.t1.id, held.t1.worktree],
+        ['Bo', 'offline', null, held.t2.id, held.t2.worktree],
+      ]);
+
+      // Your Resume: nothing waits any more, the tasks go on with the same workers and attempt, and their history says so.
+      expect(await offer(t, true)).toBeNull();
+      await vi.advanceTimersByTimeAsync(3000);
+      const now = await tasks(t);
+      expect([now.t1, now.t2].map((x) => [x.status, x.assignee, x.attempt, x.worktree])).toEqual([
+        ['running', held.t1.assignee, 1, held.t1.worktree],
+        ['running', held.t2.assignee, 1, held.t2.worktree],
+      ]);
+      const after = await snapshot(t);
+      expect(after.agents.filter((x) => x.role === 'worker').map((x) => x.name).sort()).toEqual(['Ada', 'Bo']);
+      // No new route: the worker goes on where it stopped.
+      expect(after.events.filter((e) => e.kind.type === 'decision' && e.kind.decision_type === 'route' && [held.t1.id, held.t2.id].includes(e.task_id ?? ''))).toEqual([]);
+      const resumed = (await snapshot(t)).events.filter((e) => e.kind.type === 'decision' && e.kind.decision_type === 'retry');
+      expect(resumed.map((e) => [e.task_id, e.kind.type === 'decision' && e.kind.summary])).toEqual([
+        [held.t1.id, 'Resumed after restart: its worker goes on where it stopped'],
+        [held.t2.id, 'Resumed after restart: its worker goes on where it stopped'],
+      ]);
+      expect(await offer(t)).toBeNull();
+    });
+
+    it('keeps the hold after "Not now": nothing starts, also not a plan you run meanwhile', async () => {
+      // ("Not now" sends nothing: the bar keeps its button, and the core is only read)
+      const t = open('?resume=ask');
+      expect(await offer(t)).toEqual({ tasks: 2 });
+      // The second request is planned meanwhile (the script opens it): run its plan.
+      let second: Plan | undefined;
+      for (let i = 0; i < 120 && !second; i++) {
+        await vi.advanceTimersByTimeAsync(1000);
+        second = (await snapshot(t)).plans.find((p) => p.thread !== 'lead' && p.status === 'awaiting_approval');
+      }
+      expect(second, 'the second plan is ready').toBeDefined();
+      await call(t, 'run_plan', { planId: second!.id });
+      await vi.advanceTimersByTimeAsync(20_000);
+      const s = await snapshot(t);
+      expect(s.tasks.filter((x) => ['running', 'verifying', 'merging', 'done'].includes(x.status) && x.plan_id)).toEqual([]);
+      expect(s.agents.filter((a) => a.role === 'worker' && a.status !== 'offline')).toEqual([]);
+      // Its first task says why it waits, in the core's words; the count is still of the two that were in work.
+      expect(s.tasks.find((x) => x.plan_id === second!.id && x.key === 't1')).toMatchObject({ status: 'ready', status_reason: HELD });
+      expect(await offer(t)).toEqual({ tasks: 2 });
+
+      expect(await offer(t, true)).toBeNull();
+      await vi.advanceTimersByTimeAsync(5000);
+      const after = await snapshot(t);
+      expect(after.tasks.filter((x) => x.status === 'running').map((x) => x.key).sort()).toEqual(['t1', 't1', 't2']);
+    });
+
+    /** The tasks of the first plan that were started since the page loaded. */
+    const started = async (t: MockTransport) => Object.values(await tasks(t)).filter((x) => !['pending', 'ready', 'cancelled'].includes(x.status)).map((x) => x.key);
+    /** The workers at work now (the held tasks' workers of the last run are offline). */
+    const working = async (t: MockTransport) => (await snapshot(t)).agents.filter((x) => x.role === 'worker' && x.status !== 'offline').map((x) => x.name);
+
+    it('counts one less when you cancel a waiting task, and ends by itself when none is left', async () => {
+      const t = open('?resume=ask');
+      // You read the question first: the plan's coordinator waits for your answer by then.
+      await vi.advanceTimersByTimeAsync(2000);
+      const held = await tasks(t);
+      // t3 waits for t1: it is cancelled with it. One task still waits.
+      await call(t, 'cancel_task_tree', { taskId: held.t1.id });
+      expect(await offer(t)).toEqual({ tasks: 1 });
+      await call(t, 'move_task', { taskId: held.t2.id, status: 'cancelled' });
+      expect(await offer(t)).toBeNull();
+      // The hold is over, and what you cancelled stays cancelled: no worker starts on it.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(Object.values(await tasks(t)).map((x) => x.status)).toEqual(['cancelled', 'cancelled', 'cancelled']);
+      expect(await started(t)).toEqual([]);
+      expect(await working(t)).toEqual([]);
+      // No hold is left: a task you start from here on needs no Resume.
+      const task = await call<Task>(t, 'create_task', { title: 'Sort the imports', goal: '' });
+      await call(t, 'move_task', { taskId: task.id, status: 'ready' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect((await snapshot(t)).tasks.find((x) => x.id === task.id)?.status).toBe('running');
+    });
+
+    it('does not start a waiting task that you cancelled before your Resume', async () => {
+      const t = open('?resume=ask');
+      await vi.advanceTimersByTimeAsync(2000);
+      const held = await tasks(t);
+      await call(t, 'move_task', { taskId: held.t2.id, status: 'cancelled' });
+      expect(await offer(t)).toEqual({ tasks: 1 });
+      expect(await offer(t, true)).toBeNull();
+      await vi.advanceTimersByTimeAsync(5000);
+      // The other one goes on; t3 needs both, so it waits on.
+      const now = await tasks(t);
+      expect([now.t1.status, now.t2.status, now.t3.status]).toEqual(['running', 'cancelled', 'pending']);
+      expect(await started(t)).toEqual(['t1']);
+      expect(await working(t)).toEqual(['Ada']);
+    });
+
+    it('holds nothing without the parameter', async () => {
+      expect(await offer(open('?ws=1'))).toBeNull();
+    });
+  });
+
+  it('`?requests=two`: after a reload the request you left is in the first snapshot, under the same office', async () => {
+    // The browser's storage, as the page before the reload left it: the demo office's id and
+    // the request you were on in it (state/ui.svelte.ts keeps it per office).
+    const kept = new Map([['codly.demo.workspace', 'ws-0198-7abc'], ['codly.request.ws-0198-7abc', REQUEST_B_THREAD]]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => kept.get(key) ?? null,
+      setItem: (key: string, value: string) => void kept.set(key, value),
+      removeItem: (key: string) => void kept.delete(key),
+      key: (i: number) => [...kept.keys()][i] ?? null,
+      get length() {
+        return kept.size;
+      },
+    });
+    const s = await snapshot(open('?requests=two'));
+    expect(s.workspace).toMatchObject({ id: 'ws-0198-7abc', name: 'acme/web' });
+    const asked = s.chats.filter((c) => c.author === 'user').map((c) => [c.thread, c.text]);
+    expect(asked).toEqual([['lead', REQUEST], [kept.get('codly.request.ws-0198-7abc'), REQUEST_B]]);
+    // Without it, the second request comes later in the script: the first snapshot has only the repo.
+    expect((await snapshot(open('?ws=1'))).chats.filter((c) => c.author === 'user')).toEqual([]);
   });
 
   it('opens billing-api as an office of its own, and acme/web is as you left it when you come back', async () => {
@@ -193,6 +355,26 @@ describe('the demo transport', () => {
     expect(await reconnect('postgres')).toBeNull();
     await expect(reconnect('linear')).rejects.toThrow('linear still needs a sign-in');
     expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'connected']]);
+
+    // "Turn off" and "Turn on": the server's state follows. Codly's own server stays on.
+    expect(await call(t, 'set_agent_mcp_enabled', { agentId: lead.id, server: 'postgres', enabled: false })).toBeNull();
+    expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'disabled']]);
+    expect(await call(t, 'set_agent_mcp_enabled', { agentId: lead.id, server: 'postgres', enabled: true })).toBeNull();
+    expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'connected']]);
+    await expect(call(t, 'set_agent_mcp_enabled', { agentId: lead.id, server: 'codly', enabled: false })).rejects.toThrow("codly is Codly's own server");
+    expect(await servers()).toEqual([['codly', 'connected'], ['linear', 'needs_sign_in'], ['postgres', 'connected']]);
+  });
+
+  it('`?hour=23.995`: the last minute of today, not the first of tomorrow', () => {
+    const before = Date;
+    const today = new Date().getDate();
+    try {
+      open('?hour=23.995');
+      const now = new Date();
+      expect([now.getDate(), now.getHours(), now.getMinutes()]).toEqual([today, 23, 59]);
+    } finally {
+      globalThis.Date = before;
+    }
   });
 
   it('`?hour=13.5`: the demo’s clock starts at that hour of the day, and goes on from there', async () => {
@@ -210,5 +392,205 @@ describe('the demo transport', () => {
     } finally {
       globalThis.Date = before;
     }
+  });
+
+  /** Let the scripted story play until its first plan is done (`?autoplay=1`). */
+  async function finished(t: MockTransport): Promise<Plan> {
+    let plan: Plan | undefined;
+    for (let i = 0; i < 300 && !plan; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      plan = (await snapshot(t)).plans.find((p) => p.thread === 'lead' && p.status === 'done');
+    }
+    expect(plan, 'a plan finished').toBeDefined();
+    return plan!;
+  }
+
+  it('counts the commits not on origin yet from what you did: a merge adds them, an undo and a push take them away', async () => {
+    const t = open('?autoplay=1&ws=1');
+    const plan = await finished(t);
+    const ahead = async () => (await call<RepoSync>(t, 'repo_sync')).ahead;
+    /** What `git status` says in the terminal. */
+    const status = async () => {
+      const id = await call<string>(t, 'pty_open', { cwd: null });
+      let out = '';
+      await t.attachPty(id, (bytes) => (out += new TextDecoder().decode(bytes)));
+      await call(t, 'pty_write', { ptyId: id, data: 'git status\r' });
+      return out.split('\n').find((l) => l.startsWith('Your branch'))?.trim();
+    };
+    expect(await ahead()).toBe(0);
+    expect(await status()).toBe("Your branch is up to date with 'origin/main'.");
+
+    // The commit of each of its three tasks, and the merge commit.
+    const sha = await call<string>(t, 'merge_plan', { planId: plan.id, into: null, unchecked: false });
+    expect(await ahead()).toBe(4);
+    expect(await status()).toBe("Your branch is ahead of 'origin/main' by 4 commits.");
+    expect((await call<RepoSync>(t, 'undo_merge', { sha })).ahead).toBe(0);
+
+    await call(t, 'merge_plan', { planId: plan.id, into: null, unchecked: false });
+    expect((await call<RepoSync>(t, 'push_checkout')).ahead).toBe(0);
+    expect(await status()).toBe("Your branch is up to date with 'origin/main'.");
+  });
+
+  it('"Keep the branch" answers with the kept plan', async () => {
+    const t = open('?autoplay=1&ws=1');
+    const plan = await finished(t);
+    expect(plan.kept).toBe(false);
+    expect(await call<Plan>(t, 'keep_plan', { planId: plan.id })).toMatchObject({ id: plan.id, kept: true, status: 'done' });
+    expect((await snapshot(t)).plans.find((p) => p.id === plan.id)!.kept).toBe(true);
+    await expect(call(t, 'keep_plan', { planId: 'p-nobody' })).rejects.toThrow('Unknown plan');
+  });
+
+  it('`?pr=open`: the finished plan has an open pull request, and Refresh reads its checks running, then passed', async () => {
+    const t = open('?pr=open&autoplay=1');
+    const plan = await finished(t);
+    const source = { kind: 'plan', id: plan.id };
+    const pr = await call<PullRequest>(t, 'pull_request', { source });
+    expect(pr).toMatchObject({ state: 'open', checks: null, branch: plan.integration_branch, base: 'main' });
+    // The same one each time it is read, also from the dialog.
+    expect((await call<PullRequest>(t, 'pull_request', { source })).url).toBe(pr.url);
+    expect((await call<{ pr_state: string | null }>(t, 'draft_pull_request', { source })).pr_state).toBe('open');
+    expect((await call<PullRequest>(t, 'refresh_pull_request', { source })).checks).toMatchObject({ passed: 1, pending: 2, failed: 0 });
+    expect((await call<PullRequest>(t, 'refresh_pull_request', { source })).checks).toMatchObject({ passed: 3, pending: 0, failed: 0 });
+    // Without the parameter no pull request is open before you open one.
+    const plain = open('?autoplay=1&ws=1');
+    const done = await finished(plain);
+    expect(await call(plain, 'pull_request', { source: { kind: 'plan', id: done.id } })).toBeNull();
+  });
+
+  it('`?search=fail`: a code search fails with a reason; without it, it answers', async () => {
+    await expect(call(open('?search=fail'), 'search_code', { query: 'theme' })).rejects.toThrow('the code index could not be read');
+    expect((await call<{ query: string }>(open('?ws=1'), 'search_code', { query: 'theme' })).query).toBe('theme');
+  });
+
+  it('`?merge=checks`: the merge is refused for a check that fails on the merge result, and "merge anyway" merges', async () => {
+    const t = open('?merge=checks&autoplay=1');
+    const plan = await finished(t);
+    expect((await call<MergeState>(t, 'merge_state', { source: { kind: 'plan', id: plan.id } })).behind).toBe(1);
+    await expect(call(t, 'merge_plan', { planId: plan.id, into: null, unchecked: false })).rejects.toThrow('`npx playwright test settings-theme` failed, so nothing was merged');
+    expect((await call<RepoSync>(t, 'repo_sync')).ahead).toBe(0);
+    expect(await call<string>(t, 'merge_plan', { planId: plan.id, into: null, unchecked: true })).toMatch(/^[0-9a-f]{40}$/);
+    // Without the parameter nothing fails on the merge.
+    const plain = open('?autoplay=1&ws=1');
+    expect(await call<string>(plain, 'merge_plan', { planId: (await finished(plain)).id, into: null, unchecked: false })).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it('`?turn=failed`: the first turn of the 1:1 agent you hire fails; without it, it does not', async () => {
+    /** Hire a Codex agent (it only answers), send it a message, and read how its first turn ended. */
+    const firstTurn = async (search: string) => {
+      const t = open(search);
+      const manifest = { ...reviewHire(demoDraft('Keep the docs up to date')).manifest, provider: 'codex' };
+      const agent = await call<Agent>(t, 'hire_from_manifest', { manifest, confirmShell: false });
+      await call(t, 'send_chat', { thread: `agent:${agent.id}`, text: 'Are you free?' });
+      let ended: EventRow | undefined;
+      for (let i = 0; i < 30 && !ended; i++) {
+        await vi.advanceTimersByTimeAsync(1000);
+        ended = (await snapshot(t)).events.find((e) => e.agent_id === agent.id && e.kind.type === 'turn_completed');
+      }
+      return ended?.kind.type === 'turn_completed' ? ended.kind.status : null;
+    };
+    expect(await firstTurn('?turn=failed')).toBe('failed');
+    expect(await firstTurn('?intake=issue')).toBe('completed');
+  });
+
+  it('merging a 1:1 agent’s branch with no commit of its own brings no commit onto main', async () => {
+    const t = open('?intake=issue');
+    const agent = await call<Agent>(t, 'hire_from_manifest', { manifest: reviewHire(demoDraft('Keep the docs up to date')).manifest, confirmShell: false });
+    expect(await call<string>(t, 'merge_agent', { agentId: agent.id })).toMatch(/^[0-9a-f]{10}$/);
+    expect((await call<RepoSync>(t, 'repo_sync')).ahead).toBe(0);
+  });
+
+  it('`?cards=3&autoplay=1`: three cards of one plan wait, and its fourth task finishes meanwhile', async () => {
+    const t = open('?cards=3&autoplay=1');
+    let s = await snapshot(t);
+    for (let i = 0; i < 60 && !s.tasks.some((x) => x.plan_id && x.key === 't4' && x.status === 'done'); i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      s = await snapshot(t);
+    }
+    const plan = s.plans.find((p) => p.thread === 'lead')!;
+    expect(plan.summary).toBe('Release checklist');
+    expect(s.approvals.filter((a) => a.status === 'pending').map((a) => s.tasks.find((x) => x.id === a.task_id)?.key).sort()).toEqual(['t1', 't2', 't3']);
+  });
+
+  it('`?trust=ask`: after "Open without…", a Claude agent’s run says it started without the repo’s own configuration', async () => {
+    const t = open('?trust=ask');
+    const asked = await call<{ state: string }>(t, 'workspace_trust', { set: null });
+    expect(asked.state).toBe('ask');
+    expect((await call<{ state: string }>(t, 'workspace_trust', { set: { trust: null } })).state).toBe('without');
+    await call(t, 'open_workspace', { repoPath: REPO });
+    let notice: EventRow | undefined;
+    for (let i = 0; i < 10 && !notice; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      notice = (await snapshot(t)).events.find((e) => e.kind.type === 'notice' && e.kind.text.startsWith('Started without this folder'));
+    }
+    const lead = (await snapshot(t)).agents.find((a) => a.role === 'lead')!;
+    expect(notice).toMatchObject({ agent_id: lead.id, run_id: lead.run_id });
+    // Trusted (the plain demo): no run says so.
+    const plain = open('?ws=1');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((await snapshot(plain)).events.some((e) => e.kind.type === 'notice')).toBe(false);
+  });
+
+  it('`/new` with a 1:1 agent: its thread says so and its context meter is empty; an agent at work is refused', async () => {
+    const t = open('?intake=issue');
+    const agent = await call<Agent>(t, 'hire_from_manifest', { manifest: { ...reviewHire(demoDraft('Keep the docs up to date')).manifest, provider: 'codex' }, confirmShell: false });
+    await call(t, 'send_chat', { thread: `agent:${agent.id}`, text: 'Are you free?' });
+    const turns = async (type: 'turn_started' | 'turn_completed') => (await snapshot(t)).events.filter((e) => e.agent_id === agent.id && e.kind.type === type).length;
+    for (let i = 0; i < 50 && !(await turns('turn_started')); i++) await vi.advanceTimersByTimeAsync(100);
+    expect([await turns('turn_started'), await turns('turn_completed')]).toEqual([1, 0]);
+    await expect(call(t, 'new_conversation', { agentId: agent.id })).rejects.toThrow(`${agent.name} is still working: stop its turn first`);
+    let before: Agent | undefined;
+    for (let i = 0; i < 30 && !before; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      const s = await snapshot(t);
+      if (s.events.some((e) => e.agent_id === agent.id && e.kind.type === 'turn_completed')) before = s.agents.find((a) => a.id === agent.id);
+    }
+    expect(before?.usage.context_used).toBeGreaterThan(0);
+    expect(await call(t, 'new_conversation', { agentId: agent.id })).toBeNull();
+    const s = await snapshot(t);
+    expect(s.agents.find((a) => a.id === agent.id)).toMatchObject({ session_id: null, usage: { context_used: null } });
+    expect(s.chats.filter((c) => c.thread === `agent:${agent.id}`).at(-1)).toMatchObject({
+      author: 'codly',
+      text: `New conversation. ${agent.name} starts without what was said above. Files and checkpoints are as they are.`,
+    });
+    await expect(call(t, 'new_conversation', { agentId: 'nope' })).rejects.toThrow('unknown agent nope');
+  });
+
+  // The app opens the repo first and asks after (TrustDialog): the Lead's run has started before
+  // your answer, without the repo's configuration, as in the core. Before, the demo said so only
+  // for a run that started after "Open without…", so the Lead's sheet had no line.
+  it('`?trust=ask`: the Lead that starts before you answer says in its sheet that it runs without the repo’s configuration', async () => {
+    const t = open('?trust=ask');
+    await call(t, 'open_workspace', { repoPath: REPO });
+    expect((await call<{ state: string }>(t, 'workspace_trust', { set: null })).state).toBe('ask');
+    let s = await snapshot(t);
+    let lead = s.agents.find((a) => a.role === 'lead');
+    for (let i = 0; i < 10 && !(lead && startedWithoutFolderConfig(s.events, lead.id, lead.run_id)); i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      s = await snapshot(t);
+      lead = s.agents.find((a) => a.role === 'lead');
+    }
+    expect(startedWithoutFolderConfig(s.events, lead!.id, lead!.run_id)).toBe(true);
+    // "Open without…" keeps the run as it started: its line stays.
+    expect((await call<{ state: string }>(t, 'workspace_trust', { set: { trust: null } })).state).toBe('without');
+    s = await snapshot(t);
+    expect(startedWithoutFolderConfig(s.events, lead!.id, s.agents.find((a) => a.id === lead!.id)!.run_id)).toBe(true);
+  });
+
+  // The last test of this file: the demo's neighbourhood is one for the page, and an office that closed stays closed.
+  it('answers Close office: the open office closes once its tasks are over, and its plot is free', async () => {
+    // (`?intake=issue` opens the repo and starts no scripted request: no agent is in a turn)
+    const t = open('?intake=issue');
+    const s = await snapshot(t);
+    const home = (await call<LotSlot[]>(t, 'lots')).find((l) => l.name === 'acme/web')!;
+    expect(home.workspace_id).toBe(s.workspace!.id);
+    for (const task of s.tasks.filter((x) => x.status !== 'done')) await call(t, 'move_task', { taskId: task.id, status: 'cancelled' });
+    // An agent you hired is at rest, with its run.
+    const dot = await call<Agent>(t, 'hire_from_manifest', { manifest: reviewHire(demoDraft('Keep the docs up to date')).manifest, confirmShell: false });
+    expect(dot.run_id).toBeTruthy();
+    const after = await call<LotSlot[]>(t, 'close_office', { workspaceId: home.workspace_id });
+    expect(after.find((l) => l.id === home.id)).toMatchObject({ owned: true, workspace_id: null });
+    // Its agents stopped, and no run is left: their processes ended with the office.
+    expect((await snapshot(t)).agents.map((x) => [x.name, x.status, x.run_id])).toEqual([['Dot', 'offline', null]]);
+    expect(after.find((l) => l.name === 'billing-api')).toMatchObject({ owned: true, workspace_id: 'demo-office-billing' });
   });
 });

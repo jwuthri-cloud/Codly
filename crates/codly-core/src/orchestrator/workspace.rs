@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
+use super::lead::Said;
 use super::{Inner, guard, lock, merge_conflict, names, prompts, row, scheduler, write};
 use crate::adapters::AgentCmd;
+use crate::adapters::claude::EXIT_PLAN_MODE;
 use crate::git::{MergeOutcome, name_list};
 use crate::index::{Index, WorktreeView};
 use crate::memory::{self, MemoryView};
@@ -358,8 +360,10 @@ impl Inner {
     }
 
     /// App exit, in about 6 s at most. Each adapter's shutdown ladder (Claude Code: interrupt
-    /// ≤ 5 s → stop the background commands ≤ 2 s → close stdin ≤ 3 s → SIGTERM → SIGKILL
-    /// 3 s later) can take up to ~13 s and Codex's `close()` ~6 s, longer than
+    /// ≤ 5 s for a running turn, or ≤ 1 s for the background helpers with none running → stop
+    /// the background commands ≤ 2 s → close stdin ≤ 3 s → SIGTERM → SIGKILL 3 s later; an idle
+    /// agent's helpers and commands are asked to stop within the first 3 s, inside `RUNS_GRACE`)
+    /// can take up to ~13 s and Codex's `close()` ~6 s, longer than
     /// the app waits for us; what is still running at the deadline is SIGKILLed, so no agent
     /// (or what stayed in its process group) outlives the app. The commands of a Claude Code
     /// agent are in groups of their own (`proc::command`): one that its CLI did not end before
@@ -379,7 +383,10 @@ impl Inner {
         if !codex_stopped {
             tracing::warn!("a Codex app-server did not stop in time");
         }
-        if !codex_stopped || !lock(&self.live).is_empty() {
+        // One read decides both: the runs counted as given up are the ones the kill is for.
+        let given_up = lock(&self.live).len();
+        self.runs_given_up.store(given_up, Ordering::SeqCst);
+        if !codex_stopped || given_up > 0 {
             let groups = child_groups().await;
             for g in &groups {
                 let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(*g), nix::sys::signal::Signal::SIGKILL);
@@ -403,7 +410,31 @@ impl Inner {
 
     // ───────────── approvals ─────────────
 
-    pub(super) fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision, by: &str) -> anyhow::Result<()> {
+    /// Your answer to a request, from the app. A deny with a note, to an agent whose CLI takes
+    /// no note with its answer (every CLI but Claude Code), is followed by the note as your
+    /// message to that agent, the way a chat message reaches it: into its running turn where
+    /// the CLI can take it there, else when that turn ends. It is a refusal, not a request of
+    /// yours: an agent held back after a message from outside Codly stays held (`Said::DenyNote`).
+    /// The note is on record as said once that message went out.
+    pub(super) async fn answer_approval(self: &Arc<Self>, approval_id: &str, decision: ApprovalDecision) -> anyhow::Result<()> {
+        let Some(asked) = self.resolve_approval(approval_id, decision.clone(), "user")? else { return Ok(()) };
+        let note = decision.message.as_deref().map(str::trim).unwrap_or_default();
+        self.chat_agent_from(&asked.agent_id, Said::DenyNote(note))
+            .await
+            .map_err(|e| e.context("the request was denied, but your note did not reach the agent"))?;
+        if let Some(said) = said_with(&asked, &decision, false, true) {
+            let ws = self.store.agent_workspace(&asked.agent_id).ok().flatten();
+            // The agent has the note by now: a row that cannot be stored does not undo that.
+            if let Err(e) = self.emit(ws.as_deref(), row(Some(&asked.agent_id), asked.task_id.as_deref(), Some(&asked.run_id), said)) {
+                tracing::warn!("the note you sent after denying approval {} is not on record: {e}", asked.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Answer a request. Ok(Some(the request)): a deny with a note that the agent's CLI does
+    /// not take with the answer (`said_with`): the note still has to reach the agent.
+    pub(super) fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision, by: &str) -> anyhow::Result<Option<Approval>> {
         // From the read to the event: of two answers at once, the agent gets the one on record.
         let _g = lock(&RESOLVING);
         let a = self.store.approval(approval_id)?.ok_or_else(|| anyhow!("unknown approval {approval_id}"))?;
@@ -414,6 +445,7 @@ impl Inner {
             bail!("the agent did not offer '{}'", store::enum_str(&decision.choice));
         }
         let ws = self.store.agent_workspace(&a.agent_id)?;
+        let claude = self.store.agent(&a.agent_id)?.is_some_and(|agent| agent.provider == Provider::Claude);
         let sent = {
             let live = lock(&self.live);
             // A run that is being stopped (you killed the agent, or Codly ended it) takes no
@@ -422,6 +454,15 @@ impl Inner {
                 .filter(|l| l.run_id == a.run_id && !l.stopping)
                 .is_some_and(|l| l.handle.send(AgentCmd::Approval { approval_id: a.id.clone(), decision: decision.clone() }))
         };
+        // What you said with the answer goes on record just before the answer. Only for an
+        // answer that went to the agent: a request that expired heard nothing.
+        if sent && let Some(said) = said_with(&a, &decision, claude, claude) {
+            // The agent has the answer by now: words that cannot be stored must not keep the
+            // answer itself off the record.
+            if let Err(e) = self.emit(ws.as_deref(), row(Some(&a.agent_id), a.task_id.as_deref(), Some(&a.run_id), said)) {
+                tracing::warn!("what you said with the answer to approval {} is not on record: {e}", a.id);
+            }
+        }
         let status = if !sent {
             ApprovalStatus::Expired
         } else {
@@ -443,7 +484,8 @@ impl Inner {
         if !sent {
             bail!("the agent that asked is no longer running; the request expired");
         }
-        Ok(())
+        let note = decision.message.as_deref().is_some_and(|m| !m.trim().is_empty());
+        Ok((note && !claude && decision.choice == ApprovalChoice::Deny).then_some(a))
     }
 
     // ───────────── diffs & merge ─────────────
@@ -490,8 +532,9 @@ impl Inner {
     ///   Changes requested, and the gate checks the work again when that turn ends. A review
     ///   that is under way stops: it reads the work as it was before.
     /// - The task is stopped (blocked, failed) or waits to start: its next run starts with them.
-    /// New work you asked for gets new fix rounds. A done task takes none: its work is merged,
-    /// so the changes are a new request.
+    /// New work you asked for gets new fix rounds. A done task takes none: its work is merged
+    /// into its plan, so the comments go on the plan (`send_back_plan`), or, once the plan is
+    /// in your branch, into a new request.
     pub(super) async fn send_back_task(&self, task_id: &str, comments: &str) -> anyhow::Result<Task> {
         use TaskStatus::*;
         let comments = comments.trim();
@@ -506,7 +549,16 @@ impl Inner {
         let open = |s: TaskStatus| matches!(s, Running | ChangesRequested | Verifying | Reviewing);
         let worker = t.assignee.clone().filter(|a| lock(&self.live).get(a).is_some_and(|l| l.task_id.as_deref() == Some(task_id) && !l.stopping));
         let (sent, how) = match (t.status, worker) {
-            (Done, _) => bail!("{} is done and its work is merged; ask for the changes in a new request", t.key),
+            (Done, _) => {
+                let plan = t.plan_id.as_deref().map(|p| self.plan(p)).transpose()?.filter(|p| p.merged_sha.is_none() && !p.kept);
+                match plan.map(|p| p.status) {
+                    Some(PlanStatus::Done) => bail!("{} is done; send your comments on the plan and they become one more task of it", t.key),
+                    Some(PlanStatus::Running | PlanStatus::Integrating) => {
+                        bail!("{} is done; send your comments on the plan when it is finished, and they become one more task of it", t.key)
+                    }
+                    _ => bail!("{} is done and its work is merged; ask for the changes in a new request", t.key),
+                }
+            }
             (Cancelled, _) => bail!("{} is cancelled; reopen it first", t.key),
             (Pending, _) => bail!("{} has not started yet", t.key),
             (s, Some(worker)) if open(s) => {
@@ -516,6 +568,9 @@ impl Inner {
                     bail!("a review of {} is starting right now; send your comments again in a moment", t.key);
                 }
                 note(&worker)?;
+                // A new round, as when the gate sends the work back: what the worker leaves
+                // running after your comments has the whole wait again (background.rs).
+                self.background_round(&worker);
                 self.send_prompt(&worker, prompt)?;
                 self.forget_rounds(task_id);
                 // The worker has a turn to come, and its end runs the gate whatever the task
@@ -1179,6 +1234,71 @@ fn expand_home(p: &str) -> PathBuf {
     }
 }
 
+/// What goes on record as said with an answer (`EventKind::ApprovalSaid`). None: the answer
+/// carried no words. `claude`: the agent that asked runs Claude Code. `note_sent`: the note of
+/// a "no" reached the agent.
+/// - The note of a "no" (deny, or stop the turn), once it reached the agent. Claude Code takes
+///   it with the answer (`claude.rs`, `answer`). The answers Codex and the ACP agents take have
+///   no place for a note: after a deny it goes to them as your message (`answer_approval`), and
+///   it is on record once that message went out. The note of a "stop the turn" does not reach
+///   them, so it is not recorded as said.
+/// - Your answers to a question, on one line.
+/// - That a plan was accepted with your text: only Claude Code's plan request takes one.
+fn said_with(asked: &Approval, d: &ApprovalDecision, claude: bool, note_sent: bool) -> Option<EventKind> {
+    const NOTE_MAX: usize = 2000;
+    const ANSWER_MAX: usize = 500;
+    let allow = matches!(d.choice, ApprovalChoice::AllowOnce | ApprovalChoice::AllowSession | ApprovalChoice::AllowAlways);
+    let note = d.message.as_deref().map(str::trim).filter(|m| note_sent && !allow && !m.is_empty()).map(|m| prompts::clip(m, NOTE_MAX));
+    let answer = match (&asked.subject, &d.answers) {
+        (ApprovalSubject::Question { questions }, Some(answers)) if allow => answer_line(questions, answers).map(|a| prompts::clip(&a, ANSWER_MAX)),
+        _ => None,
+    };
+    let plan_changed = match (&asked.subject, &d.answers) {
+        (ApprovalSubject::Tool { name, input }, Some(answers)) if claude && allow && name == EXIT_PLAN_MODE => {
+            answers["plan"].as_str().is_some_and(|plan| input["plan"].as_str() != Some(plan))
+        }
+        _ => false,
+    };
+    (note.is_some() || answer.is_some() || plan_changed).then(|| EventKind::ApprovalSaid { approval_id: asked.id.clone(), note, answer, plan_changed })
+}
+
+/// The answers to a question request on one line, in the order the questions were asked:
+/// "Keep it", "Red; Small, Fast" (a question with several picks lists them). None when
+/// nothing was picked or typed. Claude Code files an answer under its question's text. Codex
+/// files it under the question's id, as `{ answers: [...] }`, and marks a question whose
+/// answer is a secret (`isSecret`): that answer is left out, it must not be stored
+/// (`ToolRequestUserInputQuestion` and `ToolRequestUserInputResponse` of codex-cli 0.166.0).
+fn answer_line(questions: &Value, answers: &Value) -> Option<String> {
+    let answers = answers.as_object()?;
+    let mut keys: Vec<&str> = Vec::new();
+    let mut secret: Vec<&str> = Vec::new();
+    for q in questions.as_array().or_else(|| questions["questions"].as_array()).into_iter().flatten() {
+        for key in [q["question"].as_str(), q["id"].as_str()].into_iter().flatten() {
+            if q["isSecret"] == true {
+                secret.push(key);
+            } else if answers.contains_key(key) && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    // Then what no question names: the free answer to a request that lists no questions.
+    for key in answers.keys().map(String::as_str) {
+        if !secret.contains(&key) && !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    let picks = |v: &Value| v.as_array().map(|list| list.iter().filter_map(Value::as_str).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", "));
+    let said: Vec<String> = keys
+        .into_iter()
+        .map(|key| {
+            let v = &answers[key];
+            v.as_str().map(|s| s.trim().to_string()).or_else(|| picks(v)).or_else(|| picks(&v["answers"])).unwrap_or_default()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    (!said.is_empty()).then(|| said.join("; "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1246,5 +1366,116 @@ mod tests {
         // Codex runs share one server: its group comes once.
         let wanted = [(100, ago(30)), (200, ago(30)), (500, ago(183_845)), (100, ago(30))];
         assert_eq!(orphans(&snapshot, &wanted), [100, 500]);
+    }
+
+    fn asked(subject: ApprovalSubject) -> Approval {
+        Approval {
+            id: "ap".into(),
+            agent_id: "a".into(),
+            run_id: "r".into(),
+            task_id: None,
+            call_id: None,
+            subject,
+            reason: None,
+            choices: vec![],
+            risks: vec![],
+            status: ApprovalStatus::Pending,
+            decided_by: None,
+            created_at: 0,
+        }
+    }
+
+    fn decision(choice: ApprovalChoice, message: Option<&str>, answers: Option<Value>) -> ApprovalDecision {
+        ApprovalDecision { choice, message: message.map(String::from), answers }
+    }
+
+    /// (note, answer, plan changed) of what goes on record with the answer, or None.
+    fn said(a: &Approval, d: &ApprovalDecision, claude: bool) -> Option<(Option<String>, Option<String>, bool)> {
+        said_sent(a, d, claude, claude)
+    }
+
+    /// `said`, with whether the note reached the agent.
+    fn said_sent(a: &Approval, d: &ApprovalDecision, claude: bool, note_sent: bool) -> Option<(Option<String>, Option<String>, bool)> {
+        match said_with(a, d, claude, note_sent)? {
+            EventKind::ApprovalSaid { approval_id, note, answer, plan_changed } => {
+                assert_eq!(approval_id, a.id);
+                Some((note, answer, plan_changed))
+            }
+            other => panic!("not what you said: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_note_of_a_no_is_on_record_only_where_the_agent_reads_it() {
+        let command = asked(ApprovalSubject::Command { command: "npm install".into(), cwd: None });
+        let no = decision(ApprovalChoice::Deny, Some("  use pnpm  "), None);
+        assert_eq!(said(&command, &no, true), Some((Some("use pnpm".into()), None, false)));
+        assert_eq!(said(&command, &decision(ApprovalChoice::Cancel, Some("stop here"), None), true), Some((Some("stop here".into()), None, false)));
+        // Codex and the ACP agents get the "no" without the note: it is on record once it went
+        // to them as your message.
+        assert_eq!(said(&command, &no, false), None);
+        assert_eq!(said_sent(&command, &no, false, true), Some((Some("use pnpm".into()), None, false)));
+        // An answer with no words, a note of blanks, and a note beside a "yes" (no CLI reads it).
+        assert_eq!(said(&command, &decision(ApprovalChoice::Deny, None, None), true), None);
+        assert_eq!(said(&command, &decision(ApprovalChoice::Deny, Some("   "), None), true), None);
+        assert_eq!(said(&command, &decision(ApprovalChoice::AllowOnce, Some("use pnpm"), None), true), None);
+        // A long note is cut, by characters.
+        let long = decision(ApprovalChoice::Deny, Some(&"é".repeat(3000)), None);
+        let (note, ..) = said(&command, &long, true).unwrap();
+        assert_eq!(note.unwrap().chars().count(), 2000);
+    }
+
+    #[test]
+    fn the_answers_to_a_question_are_one_line_in_the_order_asked() {
+        // Claude Code's AskUserQuestion: an answer is filed under its question's text.
+        let claude = asked(ApprovalSubject::Question {
+            questions: json!([{ "question": "Which sizes?", "multiSelect": true }, { "question": "Colour?" }, { "question": "Anything else?" }]),
+        });
+        let answers = json!({ "Colour?": " Red ", "Which sizes?": ["Small", "", "Fast"], "Anything else?": "" });
+        let yes = decision(ApprovalChoice::AllowOnce, None, Some(answers.clone()));
+        assert_eq!(said(&claude, &yes, true), Some((None, Some("Small, Fast; Red".into()), false)));
+        // A skipped question carries no answer; nothing picked says nothing.
+        assert_eq!(said(&claude, &decision(ApprovalChoice::Deny, None, Some(answers)), true), None);
+        assert_eq!(said(&claude, &decision(ApprovalChoice::AllowOnce, None, Some(json!({ "Colour?": "" }))), true), None);
+        assert_eq!(said(&claude, &decision(ApprovalChoice::AllowOnce, None, None), true), None);
+
+        // Codex's requestUserInput, written from the schema types of codex-cli 0.166.0
+        // (`ToolRequestUserInputQuestion`, `ToolRequestUserInputResponse`): the answers are
+        // filed under the question's id, and a secret one is not stored.
+        let codex = asked(ApprovalSubject::Question {
+            questions: json!([
+                { "id": "q2", "header": "DB", "question": "Which database?", "isOther": false, "isSecret": false, "options": null },
+                { "id": "q1", "header": "Token", "question": "The token?", "isOther": true, "isSecret": true, "options": null },
+            ]),
+        });
+        let answers = json!({ "q1": { "answers": ["s3cret"] }, "q2": { "answers": ["sqlite", "in memory"] } });
+        assert_eq!(said(&codex, &decision(ApprovalChoice::AllowOnce, None, Some(answers)), false), Some((None, Some("sqlite, in memory".into()), false)));
+        // The same secret, filed under the question's text.
+        let by_text = json!({ "The token?": "s3cret" });
+        assert_eq!(said(&codex, &decision(ApprovalChoice::AllowOnce, None, Some(by_text)), false), None);
+
+        // A request that lists no questions: the free answer. A long line is cut.
+        let free = asked(ApprovalSubject::Question { questions: json!({ "message": "Your name?" }) });
+        assert_eq!(said(&free, &decision(ApprovalChoice::AllowOnce, None, Some(json!({ "answer": "Ada" }))), false), Some((None, Some("Ada".into()), false)));
+        let (_, answer, _) = said(&free, &decision(ApprovalChoice::AllowOnce, None, Some(json!({ "answer": "x".repeat(600) }))), false).unwrap();
+        assert_eq!(answer.unwrap().chars().count(), 500);
+        // The answers of a request that is no question are not an answer to show.
+        let command = asked(ApprovalSubject::Command { command: "ls".into(), cwd: None });
+        assert_eq!(said(&command, &decision(ApprovalChoice::AllowOnce, None, Some(json!({ "answer": "Ada" }))), true), None);
+    }
+
+    #[test]
+    fn a_plan_accepted_with_your_text_says_so() {
+        let plan = asked(ApprovalSubject::Tool { name: EXIT_PLAN_MODE.into(), input: json!({ "plan": "1. Add the line" }) });
+        let with = |text: &str| decision(ApprovalChoice::AllowOnce, None, Some(json!({ "plan": text })));
+        assert_eq!(said(&plan, &with("1. Add two lines"), true), Some((None, None, true)));
+        // The agent's own text back, a plain accept, and a plan sent back with a note.
+        assert_eq!(said(&plan, &with("1. Add the line"), true), None);
+        assert_eq!(said(&plan, &decision(ApprovalChoice::AllowOnce, None, None), true), None);
+        assert_eq!(said(&plan, &decision(ApprovalChoice::Deny, Some("Say which file."), Some(json!({ "plan": "x" }))), true), Some((Some("Say which file.".into()), None, false)));
+        // That request is Claude Code's own: no other CLI, and no other tool, takes a changed plan.
+        assert_eq!(said(&plan, &with("1. Add two lines"), false), None);
+        let other = asked(ApprovalSubject::Tool { name: "WebFetch".into(), input: json!({ "plan": "1. Add the line" }) });
+        assert_eq!(said(&other, &with("1. Add two lines"), true), None);
     }
 }

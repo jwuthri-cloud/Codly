@@ -27,13 +27,16 @@ pub(super) enum Failure {
     Exit { code: Option<i64>, error: Option<String> },
     /// Its turn failed with this error, which says the session's context is full.
     ContextFull(String),
+    /// Its run reached the cost limit it started with, so it could do no more work
+    /// (`breaker_run.rs`): why, for the task's reason.
+    Limit(String),
 }
 
 impl Failure {
     /// The CLI's own words, if any.
     fn error(&self) -> Option<&str> {
         match self {
-            Failure::Start(e) | Failure::ContextFull(e) => Some(e),
+            Failure::Start(e) | Failure::ContextFull(e) | Failure::Limit(e) => Some(e),
             Failure::Exit { error, .. } => error.as_deref(),
         }
     }
@@ -41,7 +44,7 @@ impl Failure {
     /// The session is full: the next run starts a new one.
     fn context_full(&self) -> bool {
         match self {
-            Failure::Start(_) => false,
+            Failure::Start(_) | Failure::Limit(_) => false,
             Failure::ContextFull(_) => true,
             Failure::Exit { error, .. } => error.as_deref().is_some_and(context_full),
         }
@@ -56,6 +59,7 @@ impl Failure {
     fn what(&self) -> String {
         match self {
             Failure::Start(e) => format!("could not start the worker: {e}"),
+            Failure::Limit(why) => why.clone(),
             Failure::Exit { code, .. } if !self.context_full() => {
                 format!("the worker exited unexpectedly ({})", code.map_or("a signal".to_string(), |c| format!("exit {c}")))
             }
@@ -64,13 +68,27 @@ impl Failure {
     }
 }
 
-/// A start error only you can fix: no wait installs a CLI, signs you in, turns an account on
-/// or trusts a folder's own CLI configuration. (The texts are `runs.rs`'s and `trust.rs`'s.
-/// One this list does not know is retried, then blocks with its own words.)
+/// A start error only you can fix: no wait installs a CLI, signs you in, turns an account on,
+/// trusts a folder's own CLI configuration or turns Claude Code's shell sandbox on. (The
+/// texts are `runs.rs`'s, `trust.rs`'s and the Claude adapter's `SandboxNotOn`. One this list
+/// does not know is retried, then blocks with its own words.) Claude Code that did not answer
+/// the check of its sandbox in time is retried too: it was slow, which a later start can get
+/// past.
 pub(super) fn needs_you(error: &str) -> bool {
-    const CAUSES: [&str; 6] =
-        ["not installed", "not signed in", "turned off", "no longer available", "binary not found", super::trust::NOT_STARTED];
+    use crate::adapters::claude::SandboxNotOn;
+    const CAUSES: [&str; 7] = [
+        "not installed",
+        "not signed in",
+        "turned off",
+        "no longer available",
+        "binary not found",
+        super::trust::NOT_STARTED,
+        SandboxNotOn::NOT_STARTED,
+    ];
     let e = error.to_lowercase();
+    if e.contains(&SandboxNotOn::NO_ANSWER.to_lowercase()) {
+        return false;
+    }
     CAUSES.iter().any(|c| e.contains(c))
 }
 
@@ -353,11 +371,20 @@ mod tests {
             "the Codex account codex:/h/.codex-2 is no longer available",
             "Gemini CLI binary not found",
             "Gemini CLI is not started in this folder: it has its own Gemini CLI configuration that you have not trusted",
+            // (the Claude adapter's refusal of a run whose shell sandbox is not on)
+            "Claude Code did not turn its sandbox on, so Codly did not start this agent. Check Claude Code's sandbox on this computer, or turn off \"Sandbox Claude's shell\" in Settings → Safety",
         ] {
             assert!(needs_you(e), "{e}");
             assert!(Failure::Start(e.into()).needs_you(), "{e}");
         }
-        for e in ["Ada is already running", "Ada did not leave its chat in time", "Claude Code exited during startup", "the agent did not finish the handshake"] {
+        for e in [
+            "Ada is already running",
+            "Ada did not leave its chat in time",
+            "Claude Code exited during startup",
+            "the agent did not finish the handshake",
+            // (the Claude adapter's check of the sandbox that got no answer in time: a later start can get it)
+            "Claude Code did not answer Codly's check of its sandbox within 90 s, so Codly did not start this agent. Try again, or turn off \"Sandbox Claude's shell\" in Settings → Safety",
+        ] {
             assert!(!needs_you(e), "{e}");
         }
         // Only a start can need you: an exit is retried whatever the CLI said last.

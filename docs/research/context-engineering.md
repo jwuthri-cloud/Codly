@@ -721,4 +721,4 @@ Primary (fetched/read 2026-10-25):
 
 Secondary (used only where flagged): eesel.ai / letsdatascience / datacamp on Jev; smartscope.blog, officechai on Claude Code RAG history; jacar.es on Cody embeddings removal; morphllm on Gemini subagents.
 
-Local artifacts: scripts `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/scripts/{fts5_scale.py,commit_bench.py}`; results `/private/tmp/claude-501/-Users-julien-Documents-Repos-Codly/ae7e9f7f-d897-4679-8080-c22a339ba5b7/scratchpad/out/{codex_bench.json,codex_bench_subject.json}` (scratchpad is session-scoped; copy into the repo if they should persist).
+Local artifacts: scripts `/tmp/scratch/scripts/{fts5_scale.py,commit_bench.py}`; results `/tmp/scratch/out/{codex_bench.json,codex_bench_subject.json}` (scratchpad is session-scoped; copy into the repo if they should persist).

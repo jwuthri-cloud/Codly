@@ -7,8 +7,8 @@
 // URL knobs (dev only): ?speed=2 (script speed), ?skip=90 (fast-forward N seconds of script),
 // ?autoplay=1 (auto "Run plan" and auto-approve), ?ws=1 (open acme/web immediately; always on in
 // the public site demo). More parameters start the demo in a state the script does not reach
-// (a merge conflict, a running preview, the intake dialog, a kind of request…): demo/states.ts,
-// docs/DEMO.md.
+// (a merge conflict, a running preview, the intake dialog, a kind of request, work that waits
+// for your Resume…): demo/states.ts, docs/DEMO.md.
 // Also answers `repo_map` (a ~300-file acme/web) and `read_artifact` (the bytes agents produced).
 import { isSiteDemo, type Transport, type UiBatch } from './api';
 import type { ApprovalRuleKind } from './gen/ApprovalRuleKind';
@@ -39,11 +39,13 @@ import type { LastMerge } from './gen/LastMerge';
 import type { PrSource } from './gen/PrSource';
 import type { RepoSync } from './gen/RepoSync';
 import type { Workspace } from './gen/Workspace';
-import { mockAgentGit } from './demo/agentgit';
+import { mockAgentDiff, mockAgentGit } from './demo/agentgit';
 import { setWallHour } from './demo/clock';
 import { BILLING, demoCloseOffice, demoMovedTo, demoPlays } from './demo/office';
 import { MergeConflictDemo } from './demo/mergeConflict';
+import { sendBackPlanDemo } from './demo/reviewTask';
 import { demoStates, opensRepo, type DemoStates } from './demo/states';
+import { seedLongThread } from './demo/longThread';
 import { intakeUi } from './state/intake.svelte';
 import { PullRequestDemo } from './demo/pullrequest';
 import { demoIntake } from './demo/intake';
@@ -68,6 +70,7 @@ import { REPO_LS } from './demo/repo';
 import { MockBreaker } from './demo/breaker';
 import type { MockApprovalRules } from './demo/approvalRules';
 import { repoMap } from './demo/repomap';
+import { searchDemoChats } from './demo/chatSearch';
 import { HOME, REPO, Sim } from './demo/sim';
 import { MockControls } from './demo/controls';
 import { demoCatalog } from './demo/models';
@@ -183,22 +186,34 @@ type Desk = {
   hk: HousekeepingDemo | undefined;
   /** Whether Push was clicked. */
   pushed: boolean;
+  /** The commits on main that are not on origin/main yet: the merges since the last push bring them. */
+  ahead: number;
   /** The requests closed in the demo, newest first, with what was said in each. */
   closed: { thread: string; closed_at: number; messages: ChatMessage[]; authors: Record<string, string> }[];
   /** The last merge into main, until it is undone. */
   merge: Omit<LastMerge, 'blocked' | 'kept'> | null;
+  /** How many commits the last merge brought onto main (an undo takes them away again). */
+  mergeCommits: number;
 };
 
 /** An office around its Sim. `states`: what the URL turned on (docs/DEMO.md), for acme/web; billing-api starts with nothing turned on. */
 function makeDesk(sim: Sim, states: DemoStates, billing = false): Desk {
   const checks = new ChecksDemo(states.checksOn);
-  const story = new Story(sim, { checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing });
+  const story = new Story(sim, {
+    checks, slowHelper: states.slowHelper, planMode: states.planMode, yourRequestFirst: states.intake !== null, ask: states.approval, billing,
+    resumeAsk: states.resumeAsk, background: states.background, failFirstTurn: states.turnFailed, twoRequests: states.twoRequests, threeCards: states.threeCards,
+  });
+  const trouble = states.mergeConflict ? 'conflict' : states.mergeChecks ? 'checks' : null;
+  const workspaceTrust = new WorkspaceTrustDemo(states.trustAsk);
+  // Like the core (runs.rs `without_folder_config`): a Claude run leaves out the repo's own configuration while you have not trusted it, also while you
+  // have not been asked yet (`?trust=ask`: the Lead starts before your answer), unless "Use my own CLI setup" is off.
+  sim.withoutFolderConfig = () => sim.settings.use_my_claude_setup && workspaceTrust.trust(null).state !== 'trusted';
   return {
     sim, story, checks,
     ctl: new MockControls(sim), breaker: new MockBreaker(sim), askMe: new MockAskMe(sim, !billing),
-    conflicts: new MergeConflictDemo(states.mergeConflict, sim, story), previews: new PreviewDemo(states.previewRunning),
-    workspaceTrust: new WorkspaceTrustDemo(states.trustAsk), pullRequests: new PullRequestDemo(), checkpoints: new DemoCheckpoints(),
-    takeovers: new DemoTakeovers(), worktrees: new WorktreeDemo(), hk: undefined, pushed: false, closed: [], merge: null,
+    conflicts: new MergeConflictDemo(trouble, sim, story), previews: new PreviewDemo(states.previewRunning),
+    workspaceTrust, pullRequests: new PullRequestDemo(states.prOpen), checkpoints: new DemoCheckpoints(sim),
+    takeovers: new DemoTakeovers(), worktrees: new WorktreeDemo(), hk: undefined, pushed: false, ahead: 0, closed: [], merge: null, mergeCommits: 0,
   };
 }
 
@@ -232,12 +247,22 @@ export class MockTransport implements Transport {
   private ptySeq = 0;
   /** Free Flow demo state: on with a key saved, so the composer's mic shows. */
   private dictation = { enabled: true, model: 'whisper-large-v3-turbo', models: ['whisper-large-v3-turbo', 'whisper-large-v3'], key_saved: true, secure_storage: true };
-  /** The demo repo: a clean checkout, two merges not pushed yet (the real one runs git). */
+  /** The demo repo: a clean checkout, with the commits of the merges since your last push not on origin yet (the real one runs git). */
   private demoSync(): RepoSync {
-    const { pushed, merge } = this.desk;
+    const { pushed, merge, ahead } = this.desk;
     const last_merge = merge && { ...merge, blocked: pushed ? 'the merge is already on origin/main' : null, kept: 'refs/codly/before-merge' };
-    return { branch: 'main', upstream: 'origin/main', ahead: pushed ? 0 : 2, behind: 0, dirty: [], last_merge };
+    return { branch: 'main', upstream: 'origin/main', ahead, behind: 0, dirty: [], last_merge };
   }
+
+  /** A merge into main: the last one, the commits it brings, and nothing of it is on origin yet. */
+  private merged(merge: Omit<LastMerge, 'blocked' | 'kept'>, commits: number) {
+    this.desk.merge = merge;
+    this.desk.mergeCommits = commits;
+    this.desk.ahead += commits;
+    this.desk.pushed = false;
+  }
+  /** Search fails (`?search=fail`): every code search ends with this reason. */
+  private searchFails = false;
   /** BYOK demo state. Keys are never stored, only whether one was "saved". */
   private byokSaved: Record<Vendor, boolean> = { anthropic: false, openai: false, openrouter: false };
   private triggers: TriggersConfig | null = null;
@@ -246,6 +271,7 @@ export class MockTransport implements Transport {
     const p = params();
     // The states a URL parameter starts the demo in (docs/DEMO.md).
     const states = demoStates(p);
+    this.searchFails = states.searchFails;
     // `?hour=13`: before the first clock is made, so every time of the demo follows.
     if (states.hour !== null) setWallHour(states.hour);
     const theme = (() => {
@@ -257,7 +283,8 @@ export class MockTransport implements Transport {
     })();
     const sim = new Sim(
       { speed: Number(p.get('speed') ?? 1) || 1, skipMs: (Number(p.get('skip') ?? 0) || 0) * 1000, autoplay: p.get('autoplay') === '1' },
-      { ...SETTINGS, theme },
+      // `?intake=…`: "Run plans at once" is on, so the plan of a request from GitHub is one that waits although its request runs plans at once: its card says why.
+      { ...SETTINGS, theme, auto_run_plans: states.intake !== null },
     );
     this.first = this.desk = makeDesk(sim, states);
     const now = this.sim.now();
@@ -270,6 +297,7 @@ export class MockTransport implements Transport {
     // Let the UI's relative times follow the virtual clock (dev only).
     (globalThis as { __codlyNow?: () => number }).__codlyNow = () => this.sim.now();
     if (p.get('ws') === '1' || p.get('skip') || isSiteDemo() || opensRepo(states)) this.story.openWorkspace(REPO);
+    if (states.longThread) seedLongThread(this.story, this.sim, states.longThread);
     // `?intake=issue` / `?intake=pr`: that dialog is open when the demo starts.
     if (states.intake) intakeUi.dialog = states.intake;
   }
@@ -438,10 +466,14 @@ export class MockTransport implements Transport {
         return { messages: c?.messages ?? [], total: c?.messages.length ?? 0, authors: c?.authors ?? {} } satisfies ClosedTranscript;
       }
       case 'merge_plan': {
-        this.conflicts.refuse(String(a.planId));
-        const sha = story.mergePlan(String(a.planId));
-        this.desk.merge = { sha, branch: 'main', plan_id: String(a.planId), agent_id: null };
-        this.desk.pushed = false;
+        const planId = String(a.planId);
+        // Like the core: a plan that cannot be merged is refused before its checks run.
+        story.mergeable(planId);
+        this.conflicts.refuse(planId, a.unchecked === true);
+        const sha = story.mergePlan(planId);
+        // The commit of each finished task, and the merge commit.
+        const done = [...sim.tasks.values()].filter((t) => t.plan_id === planId && t.status === 'done').length;
+        this.merged({ sha, branch: 'main', plan_id: planId, agent_id: null }, done + 1);
         return sha;
       }
       case 'merge_plan_warning':
@@ -454,8 +486,10 @@ export class MockTransport implements Transport {
         throw new Error(`${sim.agents.get(String(a.agentId))?.name ?? 'This agent'} is not resolving a merge`); // only a plan's task resolves one in the demo
       case 'merge_agent': {
         const sha = Math.random().toString(16).slice(2, 12).padEnd(10, '0');
-        this.desk.merge = { sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) };
-        this.desk.pushed = false;
+        // The agent's own commits, and the merge commit (a branch with none brings nothing).
+        const agent = sim.agents.get(String(a.agentId));
+        const own = agent ? mockAgentGit(agent, sim.now()).log.filter((c) => c.author === agent.name).length : 0;
+        this.merged({ sha, branch: 'main', plan_id: null, agent_id: String(a.agentId) }, own ? own + 1 : 0);
         return sha;
       }
       case 'undo_merge': {
@@ -464,6 +498,8 @@ export class MockTransport implements Transport {
         if (this.desk.pushed) throw new Error('The merge cannot be undone: the merge is already on origin/main.');
         if (m.plan_id) story.undoMerge(m.plan_id);
         this.desk.merge = null;
+        this.desk.ahead -= this.desk.mergeCommits;
+        this.desk.mergeCommits = 0;
         return this.demoSync();
       }
       case 'repo_sync':
@@ -472,6 +508,7 @@ export class MockTransport implements Transport {
         return Math.random().toString(16).slice(2, 12).padEnd(10, '0');
       case 'push_checkout':
         this.desk.pushed = true;
+        this.desk.ahead = 0;
         return this.demoSync();
       case 'pull_request':
       case 'draft_pull_request':
@@ -485,8 +522,9 @@ export class MockTransport implements Transport {
       case 'preview':
         return this.previews.handle(a, sim);
       case 'keep_plan':
+        return story.keepPlan(String(a.planId));
       case 'pin_memory':
-        return null; // ponytail: the mock keeps these as UI state only
+        return null; // ponytail: the mock keeps this as UI state only
       case 'resolve_approval': {
         const d = a.decision as { choice: string; message: string | null; answers: unknown };
         story.resolveApproval(String(a.approvalId), d.choice, d.message, d.answers);
@@ -531,12 +569,26 @@ export class MockTransport implements Transport {
         return this.ctl.setMode(String(a.agentId), a.mode as PermissionMode);
       case 'compact_agent':
         return this.ctl.compact(String(a.agentId));
+      case 'new_conversation': {
+        // As the core (orchestrator/new_conversation.rs): a 1:1 agent off a task and between
+        // turns starts again with an empty context, and its thread says so.
+        const ag = sim.agents.get(String(a.agentId));
+        if (!ag) throw new Error(`unknown agent ${String(a.agentId)}`);
+        if (ag.role !== 'solo') throw new Error('only a 1:1 agent can start a new conversation');
+        if (ag.task_id) throw new Error(`${ag.name} is on ${sim.tasks.get(ag.task_id)?.key ?? 'a task'}: start a new conversation when the task is done`);
+        if (sim.actor(ag.id).inTurn) throw new Error(`${ag.name} is still working: stop its turn first`);
+        sim.patchAgent(ag.id, { session_id: null, usage: { ...ag.usage, context_used: null } });
+        sim.chat(`agent:${ag.id}`, 'codly', `New conversation. ${ag.name} starts without what was said above. Files and checkpoints are as they are.`);
+        return null;
+      }
       case 'agent_context_usage':
         return this.ctl.contextUsage(String(a.agentId));
       case 'reconnect_agent_mcp':
         return this.ctl.reconnectMcp(String(a.agentId), String(a.server ?? ''));
+      case 'set_agent_mcp_enabled':
+        return this.ctl.setMcpEnabled(String(a.agentId), String(a.server ?? ''), a.enabled === true);
       case 'stop_agent_task':
-        return this.ctl.stopTask(String(a.agentId));
+        return this.ctl.stopTask(String(a.agentId), String(a.taskId ?? ''));
       case 'agent_takeover':
         return this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO);
       case 'list_takeovers':
@@ -547,7 +599,7 @@ export class MockTransport implements Transport {
         const t = this.takeovers.state(sim.agents.get(String(a.agentId)), [...sim.tasks.values()], sim.workspace?.repo_path ?? REPO).takeover;
         if (!t) throw new Error('this agent is not in your terminal: open it in your terminal first');
         const id = `pty-${++this.ptySeq}`;
-        this.ptys.set(id, new FakeShell(t.cwd, sim, t.command));
+        this.ptys.set(id, new FakeShell(t.cwd, sim, this.aheadOf(), t.command));
         return id;
       }
       case 'give_back_agent':
@@ -629,7 +681,7 @@ export class MockTransport implements Transport {
       case 'close_office':
         return demoCloseOffice(sim, String(a.workspaceId), this.rest());
       case 'set_agent_model':
-        return null;
+        return this.ctl.setModel(String(a.agentId), (a.model as string | null) ?? null);
       case 'create_task':
         return story.createTask(String(a.title), String(a.goal ?? ''));
       case 'move_task':
@@ -650,6 +702,8 @@ export class MockTransport implements Transport {
         return story.planDiff(String(a.planId));
       case 'send_back_task':
         return story.sendBackTask(String(a.taskId), String(a.comments));
+      case 'send_back_plan':
+        return sendBackPlanDemo(sim, String(a.planId), String(a.comments), (a.files as string[]) ?? []);
       case 'get_events': {
         const agentId = a.agentId as string | null;
         const thread = (a.thread as string | null) ?? null;
@@ -663,6 +717,7 @@ export class MockTransport implements Transport {
           .reverse();
       }
       case 'search_code':
+        if (this.searchFails) throw new Error('the code index could not be read');
         return this.search(String(a.query ?? ''));
       case 'list_memories': {
         const q = (a.query as string | null)?.toLowerCase() ?? '';
@@ -683,6 +738,10 @@ export class MockTransport implements Transport {
       }
       case 'exact_search':
         return exactSearch(String(a.query ?? ''), [...sim.tasks.values()], [...sim.memories.values()]);
+      case 'search_chats':
+        if (!sim.workspace) throw new Error('open a repository first');
+        // A closed request's messages are under its archive thread, as in the core.
+        return searchDemoChats([...this.desk.closed.flatMap((c) => c.messages.map((m) => ({ ...m, thread: c.thread }))), ...sim.chats], String(a.query ?? ''));
       case 'message_graph':
         return buildMessageGraph([...sim.agents.values()], sim.chats, [...sim.memories.values()], [...sim.tasks.values()]);
       case 'memory_file':
@@ -702,7 +761,7 @@ export class MockTransport implements Transport {
       }
       case 'pty_open': {
         const id = `pty-${++this.ptySeq}`;
-        this.ptys.set(id, new FakeShell(String(a.cwd ?? sim.workspace?.repo_path ?? REPO), sim));
+        this.ptys.set(id, new FakeShell(String(a.cwd ?? sim.workspace?.repo_path ?? REPO), sim, this.aheadOf()));
         return id;
       }
       case 'pty_write':
@@ -736,7 +795,7 @@ export class MockTransport implements Transport {
         const command = rung === 'npm' || rung === 'native' || rung === 'update' ? hint?.[rung] : undefined;
         if (!command) throw new Error(`there is no ${String(a.rung)} installer for ${String(a.provider)}`);
         const id = `pty-${++this.ptySeq}`;
-        this.ptys.set(id, new FakeShell(HOME, sim));
+        this.ptys.set(id, new FakeShell(HOME, sim, this.aheadOf()));
         // The demo "finishes" the install after a moment, then the sign-in a little later.
         const real = CLIS.find((c) => c.provider === a.provider);
         const idx = sim.clis.findIndex((c) => c.provider === a.provider);
@@ -771,7 +830,13 @@ export class MockTransport implements Transport {
         return this.byokStatus();
       }
       case 'agent_git':
-        return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now());
+        return mockAgentGit(sim.agents.get(String(a.agentId)), sim.now(), sim.log);
+      case 'agent_diff': {
+        // A worker on a task: the files it wrote for the task, with their text as the task's diff has it.
+        const agent = sim.agents.get(String(a.agentId));
+        const task = agent?.task_id ? sim.tasks.get(agent.task_id) : undefined;
+        return mockAgentDiff(agent, sim.log, task ? { key: task.key, files: story.taskFiles(task) } : null);
+      }
       case 'agent_checkpoints':
         return this.checkpoints.list(sim.agents.get(String(a.agentId)), sim.now());
       case 'restore_checkpoint':
@@ -837,9 +902,14 @@ export class MockTransport implements Transport {
       }
       case 'workspace_trust':
         return this.workspaceTrust.trust((a.set as TrustChoice | null) ?? null);
-      case 'resume_work':
-        // The demo starts new each time: no work of an earlier run waits for a Resume.
-        return null;
+      case 'resume_work': {
+        // One hold for every office, as in the core. The demo starts new each time, so no work
+        // of an earlier run waits, unless it starts with `?resume=ask`: then acme/web's does,
+        // whichever office is open.
+        const held = this.first.story;
+        if (a.go) held.resumeWork();
+        return held.resumeOffer();
+      }
       case 'diagnostics':
         // The shape of the app's report (src-tauri/src/diagnostics.rs), about the scripted session.
         return {
@@ -859,6 +929,12 @@ export class MockTransport implements Transport {
       default:
         throw new Error(`Mock backend: unknown command “${cmd}”`);
     }
+  }
+
+  /** How far the open office's main is ahead of origin/main, for its terminals (`git status`). */
+  private aheadOf(): () => number {
+    const desk = this.desk;
+    return () => desk.ahead;
   }
 
   private search(query: string): SearchResult {
@@ -903,8 +979,8 @@ class FakeShell {
   private out: ((b: Uint8Array) => void) | null = null;
   private line = '';
   private pending = '';
-  /** `typed`: a line that is at the prompt when the terminal opens, typed and not run. */
-  constructor(private cwd: string, private sim: Sim, private typed = '') {}
+  /** `ahead`: how many commits main has that origin/main has not. `typed`: a line that is at the prompt when the terminal opens, typed and not run. */
+  constructor(private cwd: string, private sim: Sim, private ahead: () => number, private typed = '') {}
 
   private write(s: string) {
     if (this.out) this.out(enc.encode(s));
@@ -984,7 +1060,13 @@ class FakeShell {
       case 'git': {
         const sub = rest[0];
         const tasks = [...this.sim.tasks.values()];
-        if (sub === 'status') say(`On branch main\nYour branch is up to date with 'origin/main'.\n\nnothing to commit, working tree clean`);
+        if (sub === 'status') {
+          const n = this.ahead();
+          const upstream = n
+            ? `Your branch is ahead of 'origin/main' by ${n} commit${n === 1 ? '' : 's'}.\n  (use "git push" to publish your local commits)`
+            : "Your branch is up to date with 'origin/main'.";
+          say(`On branch main\n${upstream}\n\nnothing to commit, working tree clean`);
+        }
         else if (sub === 'log')
           say(`${C.bold}4e1c9a2${C.reset} chore: bump next to 16.1.2\n${C.bold}b81d07e${C.reset} fix(checkout): retry stripe webhook once\n${C.bold}9a0c3f1${C.reset} feat(settings): weekly digest switch\n${C.bold}61e2d48${C.reset} refactor(auth): requireUser helper`);
         else if (sub === 'branch')

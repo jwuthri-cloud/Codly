@@ -1,6 +1,6 @@
 //! What the agent sheet does to the things that run beside a live Claude agent's own calls:
-//! "Reconnect" on one of its MCP servers and "Stop" on a command it left running in the
-//! background. Thin wrappers over `Core` (orchestrator/live_session.rs).
+//! "Reconnect", "Turn off" and "Turn on" on one of its MCP servers, and "Stop" on what it
+//! left running in the background. Thin wrappers over `Core` (orchestrator/live_session.rs).
 
 use tauri::State;
 
@@ -20,4 +20,9 @@ pub async fn reconnect_agent_mcp(state: State<'_, AppState>, agent_id: String, s
 #[tauri::command]
 pub async fn stop_agent_task(state: State<'_, AppState>, agent_id: String, task_id: String) -> R<()> {
     state.core().await?.stop_agent_task(&agent_id, &task_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_agent_mcp_enabled(state: State<'_, AppState>, agent_id: String, server: String, enabled: bool) -> R<()> {
+    state.core().await?.set_agent_mcp_enabled(&agent_id, &server, enabled).await.map_err(err)
 }

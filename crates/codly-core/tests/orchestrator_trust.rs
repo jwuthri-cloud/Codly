@@ -24,8 +24,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -103,7 +124,7 @@ fn put(store: &Store, ws: &Workspace, a: &Agent) {
 
 async fn start(root: &Path) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: None, env: Some(std::env::vars().collect()), clis: Some(vec![]), index: false };
+    let opts = StartOptions { spawner: None, env: Some(core_env()), clis: Some(vec![]), index: false };
     Core::start_with(cfg, opts).await.unwrap()
 }
 
@@ -186,7 +207,7 @@ async fn you_set_trust_whatever_the_rank_and_every_change_is_a_decision() {
             by_you(&sol, "you trust Sol to work on its own where the approval rules see no risk (they read the command line, not what a script does)", "intern", "senior"),
         ]
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 // ───────────── workspace trust: the repo's own CLI configuration ─────────────
@@ -231,7 +252,7 @@ fn cli(provider: Provider) -> CliInfo {
 async fn recording(root: &Path, clis: Vec<CliInfo>) -> (Arc<Core>, Arc<Mutex<Vec<SpawnSpec>>>) {
     let specs = Arc::new(Mutex::new(vec![]));
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(Recorder(specs.clone()))), env: Some(std::env::vars().collect()), clis: Some(clis), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(Recorder(specs.clone()))), env: Some(core_env()), clis: Some(clis), index: false };
     (Core::start_with(cfg, opts).await.unwrap(), specs)
 }
 
@@ -377,7 +398,7 @@ async fn a_repos_own_cli_configuration_loads_only_once_you_trusted_these_files()
             "you opened here without its own CLI configuration: agents start without it",
         ]
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -425,7 +446,7 @@ async fn a_cli_that_cannot_start_without_the_repos_files_waits_for_your_trust() 
     core.send_chat(&old_thread, "hi").await.unwrap();
     let resumed = specs.lock().unwrap().last().unwrap().session.clone();
     assert!(matches!(&resumed, SessionMode::Resume { session_id } if session_id == "earlier-session"), "{resumed:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The CLI of the last run Codly started, and whether it loads your own setup beside Codly's
@@ -481,7 +502,7 @@ async fn a_codex_agents_own_servers_do_not_wait_for_the_folders_trust() {
     assert_eq!(last_setup(&specs), (Provider::Codex, false));
     restart(&core, &ana.id).await;
     assert_eq!(last_setup(&specs), (Provider::Claude, false));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A file of your own that Codly copies into each new worktree (`.worktreeinclude`) is yours
@@ -527,7 +548,7 @@ async fn your_own_files_copied_into_a_worktree_need_no_second_choice() {
     restart(&core, &ana.id).await;
     assert_eq!(last_start(&specs), (worktree, true, false));
     assert!(core.workspace_trust(None).await.unwrap().worktrees.is_empty());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -550,7 +571,7 @@ async fn a_repo_without_cli_configuration_asks_nothing() {
     core.send_chat("lead", "hello").await.unwrap();
     assert_eq!(last_start(&specs), (repo.clone(), true, true));
     assert!(trust_records(&core).await.is_empty());
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A link among the configuration files can point anywhere, and change without the files
@@ -573,7 +594,7 @@ async fn configuration_codly_cannot_read_whole_is_never_trusted() {
     // Opening without it still works, and stays answered.
     let without = core.workspace_trust(Some(TrustChoice { trust: None })).await.unwrap();
     assert_eq!(without.state, TrustState::Without);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A large file and many files are read like every other: the fingerprint is over every byte.
@@ -611,7 +632,7 @@ async fn large_and_many_configuration_files_can_be_trusted() {
     let again = core.workspace_trust(None).await.unwrap();
     assert_eq!((again.state, again.changed), (TrustState::Ask, true));
     assert_ne!(again.fingerprint, asked.fingerprint);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 // ───────────── a fake team: tasks, reviews and approval requests ─────────────
@@ -754,7 +775,7 @@ async fn team(root: &Path, repo: &Path, clis: Vec<CliInfo>, writes: &'static [(&
     let (specs, answers) = (Specs::default(), Answers::default());
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let spawner = Team { writes, specs: specs.clone(), answers: answers.clone() };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(clis), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(clis), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     core.update_settings(settings).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
@@ -854,7 +875,7 @@ async fn a_cli_that_waits_for_your_trust_takes_no_task_and_the_task_keeps_its_re
     assert!(!all.iter().any(|d| d.1.contains("parked")), "\"parked\" is for a usage limit: {all:?}");
     assert!(of("review").iter().any(|s| s.contains("no other vendor starts in this worktree until you trust its CLI configuration")), "{:?}", of("review"));
     assert!(!of("review").iter().any(|s| s.contains("review skipped")), "{:?}", of("review"));
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker cannot skip its review with a configuration file: when no reviewer can start in
@@ -889,7 +910,7 @@ async fn a_task_is_not_merged_without_its_review_because_of_files_in_its_worktre
     assert!(core.recheck_task(&stopped.id, vec![]).await.unwrap().is_empty());
     wait_task(&core, TaskStatus::Done).await;
     assert_eq!(started(&specs, Role::Reviewer), [Provider::Gemini]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The only worker CLI is one that Codly does not start in the repo until you trust its
@@ -927,7 +948,7 @@ async fn a_task_for_a_cli_that_waits_for_your_trust_says_so_and_starts_when_you_
     core.workspace_trust(Some(TrustChoice { trust: asked.fingerprint })).await.unwrap();
     wait_task(&core, TaskStatus::Done).await;
     assert_eq!(started(&specs, Role::Worker), [Provider::Gemini]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A link named like a CLI's folder is an entry of that CLI, whatever it points at: here
@@ -954,7 +975,7 @@ async fn a_link_named_like_a_clis_folder_makes_the_task_wait_for_your_trust() {
     assert!(status.problem.as_deref().is_some_and(|why| why.contains(".gemini is not a regular file")), "{:?}", status.problem);
     let blocks: Vec<String> = decisions(&core).await.into_iter().filter(|d| d.0 == "retry").map(|d| d.1).collect();
     assert!(blocks.is_empty(), "no start was tried: {blocks:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Your folder is trusted, but the task's worktree holds other files for the worker's CLI
@@ -1000,7 +1021,7 @@ async fn a_start_refused_in_the_tasks_worktree_alone_blocks_the_task_at_once() {
     core.move_task(&stopped.id, TaskStatus::Ready).await.unwrap();
     wait_task(&core, TaskStatus::Done).await;
     assert_eq!(started(&specs, Role::Worker), [Provider::Gemini]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The broker knows your project folder: full access asks an agent hired with Git isolation
@@ -1037,5 +1058,87 @@ async fn full_access_asks_before_work_is_lost_in_your_project_folder() {
     assert_eq!(said, "asking you: discards uncommitted work in your project folder itself (outside the agent's worktree): full access still asks");
     waiting(&core, 2).await;
     assert_eq!(answers.lock().unwrap().len(), 1, "nothing more was answered for you");
-    core.shutdown().await;
+    shut_down(&core).await;
+}
+
+/// What a Claude run says when it started without the folder's own Claude Code configuration.
+const WITHOUT_CLAUDE: &str =
+    "Started without this folder's Claude Code configuration (its settings, hooks and MCP servers): you have not trusted these files. See Settings → Safety.";
+
+/// The notices on record for an agent, oldest first: the run of each, and its text.
+async fn notices(core: &Core, agent_id: &str) -> Vec<(Option<Id>, String)> {
+    let mut events = core.events(Some(agent_id), None, 500).await.unwrap();
+    events.sort_by_key(|e| e.id);
+    events
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Notice { text } => Some((e.run_id, text)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Settings → Safety says where your choice stands, and a choice changes nothing for an agent
+/// that runs already. So each run says, on its own record, when it started without the
+/// folder's configuration for its CLI because you have not trusted the files: once per run. A
+/// run that loads them says nothing, and neither does one in a folder that has none for its
+/// CLI, nor one that leaves them out for another reason ("Use my own CLI setup" is off).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claude_run_says_when_it_started_without_the_folders_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = temp_repo(dir.path(), "here");
+    write(&repo, ".claude/settings.json", HOOKS);
+    write(&repo, ".codex/config.toml", "[mcp_servers.db]\ncommand = \"npx\"\n");
+    commit(&repo, "agent config");
+
+    let (core, specs) = recording(dir.path(), vec![cli(Provider::Claude), cli(Provider::Codex)]).await;
+    core.open_workspace(repo.to_str().unwrap()).await.unwrap();
+    let asked = core.workspace_trust(None).await.unwrap();
+    assert_eq!(asked.state, TrustState::Ask);
+    let last_run = || specs.lock().unwrap().last().expect("an agent was started").run_id.clone();
+    let said = |run: &Id| (Some(run.clone()), WITHOUT_CLAUDE.to_string());
+
+    // Not trusted: each run of a Claude agent says so, once.
+    let ana = core.hire_agent(Provider::Claude, None, None).await.unwrap();
+    core.send_chat(&format!("agent:{}", ana.id), "hi").await.unwrap();
+    let first = last_run();
+    assert_eq!(notices(&core, &ana.id).await, [said(&first)]);
+    restart(&core, &ana.id).await;
+    let second = last_run();
+    assert_ne!(first, second);
+    assert_eq!(notices(&core, &ana.id).await, [said(&first), said(&second)], "one per run");
+
+    // Codex keeps its own gate for a project's files, so Codly does not know what it loads
+    // there and says nothing.
+    let cody = core.hire_agent(Provider::Codex, None, None).await.unwrap();
+    core.send_chat(&format!("agent:{}", cody.id), "hi").await.unwrap();
+    assert_eq!(last_setup(&specs).0, Provider::Codex);
+    assert!(notices(&core, &cody.id).await.is_empty());
+
+    // "Use my own CLI setup" off: no run loads the folder's files, trusted or not. That is
+    // your switch, and trusting the files would change nothing: nothing is said about trust.
+    core.update_settings(Settings { use_my_claude_setup: false, ..core.settings() }).await.unwrap();
+    restart(&core, &ana.id).await;
+    assert_eq!(notices(&core, &ana.id).await.len(), 2);
+    core.update_settings(Settings { use_my_claude_setup: true, ..core.settings() }).await.unwrap();
+
+    // Trusted: the next run loads the files, and says nothing.
+    core.workspace_trust(Some(TrustChoice { trust: asked.fingerprint })).await.unwrap();
+    restart(&core, &ana.id).await;
+    assert_eq!(last_setup(&specs), (Provider::Claude, true));
+    assert_eq!(notices(&core, &ana.id).await.len(), 2);
+
+    // Opened without them: a run says so again.
+    core.workspace_trust(Some(TrustChoice { trust: None })).await.unwrap();
+    restart(&core, &ana.id).await;
+    let third = last_run();
+    assert_eq!(notices(&core, &ana.id).await, [said(&first), said(&second), said(&third)]);
+
+    // The folder has no file for Claude Code any more (Codex's do not count for a Claude run):
+    // nothing was left out, so there is nothing to say.
+    let (worktree, _, _) = last_start(&specs);
+    std::fs::remove_dir_all(worktree.join(".claude")).unwrap();
+    restart(&core, &ana.id).await;
+    assert_eq!(notices(&core, &ana.id).await.len(), 3);
+    shut_down(&core).await;
 }

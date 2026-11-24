@@ -66,6 +66,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::recheck_task,
             commands::accept_task,
             commands::send_back_task,
+            commands::send_back_plan,
             commands::merge_plan,
             commands::merge_plan_warning,
             commands::undo_merge,
@@ -91,6 +92,7 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::recent_workspaces,
             commands::list_repos,
             commands::exact_search,
+            commands::search_chats,
             commands::message_graph,
             commands::memory_file,
             commands::save_memory_file,
@@ -103,10 +105,13 @@ fn commands_round_trip_with_frontend_arg_names() {
             commands::agent_checkpoints,
             commands::restore_checkpoint,
             commands::last_turn_diff,
+            commands::agent_diff,
             crate::agent_controls::set_agent_permission_mode,
             crate::agent_controls::compact_agent,
+            commands::new_conversation,
             crate::agent_controls::agent_context_usage,
             crate::session_commands::reconnect_agent_mcp,
+            crate::session_commands::set_agent_mcp_enabled,
             crate::session_commands::stop_agent_task,
             crate::takeover_commands::agent_takeover,
             crate::takeover_commands::list_takeovers,
@@ -157,6 +162,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     }
     assert!(invoke(&wv, "list_accounts", json!({})).is_err(), "refresh is required");
 
+    // "Said in conversations" needs an open repo, and says so.
+    let e = invoke(&wv, "search_chats", json!({ "query": "login" })).unwrap_err();
+    assert!(e.to_string().contains("open a repository first"), "{e}");
     let ws = invoke(&wv, "open_workspace", json!({ "repoPath": repo.to_str().unwrap() })).unwrap();
     assert_eq!(ws["name"], "repo");
 
@@ -171,6 +179,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     // The diff's Send back: review comments go to a task that can still take them.
     let e = invoke(&wv, "send_back_task", json!({ "taskId": task["id"], "comments": "1. `a.txt:1`\n   Rename it." })).unwrap_err();
     assert!(e.to_string().contains("is cancelled; reopen it first"), "{e}");
+    // On a finished plan's diff, they become one more task of the plan.
+    let e = invoke(&wv, "send_back_plan", json!({ "planId": "nope", "comments": "1. `a.txt`\n   Rename it.", "files": ["a.txt"] })).unwrap_err();
+    assert!(e.to_string().contains("unknown plan"), "{e}");
 
     // Cancel with the tasks that wait for it (a board task has none), and Keep what is merged
     // (only a running plan can finish early).
@@ -239,6 +250,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     // Find / Files / Messages lenses: the memory just made is found by its words; no path escapes.
     let hits = invoke(&wv, "exact_search", json!({ "query": "PNPM" })).unwrap();
     assert!(hits.as_array().unwrap().iter().any(|h| h["kind"] == "memory"), "{hits}");
+    // Nothing was said in this office yet; a query that short searches nothing anyway.
+    assert_eq!(invoke(&wv, "search_chats", json!({ "query": "pnpm" })).unwrap(), json!([]));
+    assert_eq!(invoke(&wv, "search_chats", json!({ "query": "p" })).unwrap(), json!([]));
     let graph = invoke(&wv, "message_graph", json!({})).unwrap();
     assert!(graph["nodes"].is_array() && graph["edges"].is_array(), "{graph}");
     assert!(invoke(&wv, "memory_file", json!({ "agentId": "../../etc/passwd" })).is_err());
@@ -376,6 +390,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "last_turn_diff", json!({ "source": { "kind": "task", "id": "nope" } })).unwrap_err();
     assert!(e.to_string().contains("unknown task nope"), "{e}");
     assert!(invoke(&wv, "last_turn_diff", json!({ "source": { "kind": "plan", "id": "nope" } })).is_err(), "only an agent or a task");
+    // "All changes" of a 1:1 agent, with the key the Changes room sends.
+    let e = invoke(&wv, "agent_diff", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
 
     // A Claude agent's mode, "compact now" and context reading, with the keys the agent panel
     // sends: the core answers (no agent here), not the argument check.
@@ -387,6 +404,9 @@ fn commands_round_trip_with_frontend_arg_names() {
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     let e = invoke(&wv, "agent_context_usage", json!({ "agentId": "nope" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    // `/new` in a 1:1 chat, with the key the composer sends.
+    let e = invoke(&wv, "new_conversation", json!({ "agentId": "nope" })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
     // "Reconnect" on an MCP server and "Stop" on a background command, with the keys the agent
     // sheet sends: the core answers (no agent here), not the argument check.
     let e = invoke(&wv, "reconnect_agent_mcp", json!({ "agentId": "nope", "server": "linear" })).unwrap_err();
@@ -394,6 +414,11 @@ fn commands_round_trip_with_frontend_arg_names() {
     let e = invoke(&wv, "stop_agent_task", json!({ "agentId": "nope", "taskId": "tid-1" })).unwrap_err();
     assert!(e.to_string().contains("unknown agent nope"), "{e}");
     assert!(invoke(&wv, "stop_agent_task", json!({ "agentId": "nope" })).is_err(), "the command to stop is required");
+    // "Turn off" and "Turn on" on an MCP server, with the keys the agent sheet sends.
+    let e = invoke(&wv, "set_agent_mcp_enabled", json!({ "agentId": "nope", "server": "linear", "enabled": false })).unwrap_err();
+    assert!(e.to_string().contains("unknown agent nope"), "{e}");
+    let e = invoke(&wv, "set_agent_mcp_enabled", json!({ "agentId": "nope", "server": "linear" })).unwrap_err();
+    assert!(!e.to_string().contains("unknown agent"), "off or on is required, and is checked before the core is asked: {e}");
     // The model pickers and the agent panel's Compact, with the keys the frontend sends. Claude
     // has no list to ask for, so its catalog is Codly's own and no CLI runs here.
     let catalog = invoke(&wv, "model_catalog", json!({ "provider": "claude" })).unwrap();

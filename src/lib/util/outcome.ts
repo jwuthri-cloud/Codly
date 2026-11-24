@@ -1,13 +1,26 @@
 // How a request reads once it no longer waits: the closed card in the conversation and the
 // lines of an agent's history. A permission is approved or denied. A question is answered or
-// skipped, and says what you answered.
+// skipped, and says what you answered. A "no" says the note you sent with it, and a plan says
+// when it went ahead with your changes: your words, as the core recorded them (state/answers).
+// A request that ended because you stopped its agent's turn says that you stopped it.
 import type { Approval } from '../gen/Approval';
+import type { ApprovalRule } from '../gen/ApprovalRule';
 import type { ApprovalStatus } from '../gen/ApprovalStatus';
 import type { Provider } from '../gen/Provider';
-import { showsPlan } from './planRequest';
+import { permissionsAsked } from './permissionsAsked';
+import { yourWords, type Words } from '../state/answers';
+import { yourStops } from '../state/stops';
+import { store } from '../state/store.svelte';
+import { ruleWords } from './approvalRules';
+import { showsPlan, wantsTo } from './planRequest';
+import { sandboxWants } from './sandbox';
 import { oneLine } from './sanitize';
+import { toolInWords } from './toolWords';
 
 type Asked = Pick<Approval, 'subject'>;
+/** A request as the store holds it: what you said with its answer is on record under its id,
+ *  and who asked it and when tell whether a stop of yours ended it (`endedByYourStop`). */
+type Held = Asked & Partial<Pick<Approval, 'id' | 'agent_id' | 'created_at'>>;
 
 /**
  * "Approved", "Denied", "Stopped", "Closed"; for a question "Answered" and "Skipped". Empty while
@@ -40,21 +53,28 @@ export function outcomeBy(decidedBy: string | null): string {
   }
 }
 
-/** The answers a question card sends, on one line: "Keep it"; "Red · Small, Fast" for several
- *  questions (a question with several picks lists them). Null when nothing was picked or typed. */
+/** The answers a question card sends, on one line: "Keep it"; "Red; Small, Fast" for several
+ *  questions (a question with several picks lists them). Null when nothing was picked or typed.
+ *  The core writes the same line on record (`answer_line` in orchestrator/workspace.rs). */
 export function answerText(answers: unknown): string | null {
   if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return null;
   const said = Object.values(answers)
     .map((v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x).join(', ') : typeof v === 'string' ? v.trim() : ''))
     .filter(Boolean);
-  return said.length ? said.join(' · ') : null;
+  return said.length ? said.join('; ') : null;
 }
 
-/** The first question of a question card, as the agent wrote it; null when the card has none to show. */
+/** The first question of a question card, as the agent wrote it; null when the card has none to show.
+ *  A question that comes in its request's envelope (an MCP server's elicitation through Codex:
+ *  `{ serverName, mode, message, … }`) is its `message`. */
 export function firstQuestion(asked: Asked): string | null {
   if (asked.subject.kind !== 'question') return null;
   const raw = asked.subject.questions as unknown;
   const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? (raw as { questions?: unknown }).questions : null;
+  if (!Array.isArray(list)) {
+    const message = raw && typeof raw === 'object' ? (raw as { message?: unknown }).message : null;
+    return typeof message === 'string' && message.trim() ? message : null;
+  }
   const first = Array.isArray(list) ? (list[0] as { question?: unknown; prompt?: unknown } | null) : null;
   const text = first && typeof first === 'object' ? (first.question ?? first.prompt) : null;
   return typeof text === 'string' && text ? text : null;
@@ -68,15 +88,130 @@ export function askedLine(asked: Asked, provider: Provider | null = null): strin
     return q ? `Asked you: ${oneLine(q, 80)}` : 'Asked you a question';
   }
   if (showsPlan(s, provider)) return 'Asked you to read its plan';
-  return `Asked for approval${s.kind === 'command' ? `: ${oneLine(s.command, 60)}` : ''}`;
+  if (s.kind === 'permissions') {
+    const asks = permissionsAsked(s.detail);
+    return asks.lines.length ? `Asked to ${oneLine(asks.wants, 60)}` : 'Asked for more permissions';
+  }
+  if (s.kind === 'file_change') return `Asked to ${wantsTo(s, provider)}`;
+  if (s.kind === 'tool') return `Asked to ${sandboxWants(s, provider, 60) ?? `use ${oneLine(toolInWords(s.name), 60)}`}`;
+  return `Asked for approval: ${oneLine(s.command, 60)}`;
 }
 
-/** An agent's history: how that request ended ("Approved by you", "Denied by you", "Closed by
- *  Codly"). `asked` is the request when it is still known (the line of a question or of a plan
- *  says so), `answer` what you answered when this window sent it. */
-export function settledLine(status: ApprovalStatus, by: string, asked: Asked | null, answer: string | null, provider: Provider | null = null): string {
-  const plan = !!asked && showsPlan(asked.subject, provider);
-  const word = plan && status === 'approved' ? 'Plan accepted' : plan && status === 'denied' ? 'Plan sent back' : outcomeWord(status, asked);
-  const line = `${word} ${outcomeBy(by)}`.trim();
-  return asked?.subject.kind === 'question' && status === 'approved' && answer ? `${line}: ${oneLine(answer, 80)}` : line;
+/**
+ * What you said with your answer to a request, beside the answer to a question: the note of a
+ * "no", and that you changed a plan before you accepted it. Null when nothing is on record
+ * for it, or when it was not you who settled it (`by`): only a row that reads "by you" shows
+ * your words.
+ */
+export function wordsOf(asked: Held | null, by: string | null): Words | null {
+  return by === 'user' && asked?.id ? (yourWords.get(asked.id) ?? null) : null;
+}
+
+/** `outcomeWord`, and for a Claude agent's plan what you did with it: "Plan accepted", "Plan sent back". */
+export function settledWord(status: ApprovalStatus, asked: Asked | null, provider: Provider | null): string {
+  if (asked && showsPlan(asked.subject, provider)) {
+    if (status === 'approved') return 'Plan accepted';
+    if (status === 'denied') return 'Plan sent back';
+  }
+  return outcomeWord(status, asked);
+}
+
+/**
+ * A rule you saved with your answer, as the end of a sentence: "commands that start with npm
+ * install", "the command npm test", "the tool create_issue of the MCP server linear".
+ */
+export function savedRuleWords(rule: Pick<ApprovalRule, 'kind' | 'command'>): string {
+  const w = ruleWords(rule);
+  if (!w.code) return w.text[0].toLowerCase() + w.text.slice(1);
+  return rule.kind === 'prefix' ? `commands that start with ${oneLine(w.text, 60)}` : `the command ${oneLine(w.text, 60)}`;
+}
+
+/** How the core names a rule you saved when it answers a request in your place
+ *  (orchestrator/approval_rules.rs `with_saved_rules`), before the rule itself. */
+export const YOUR_RULE = 'your rule for this repo: ';
+
+/**
+ * The rule you saved that answered a request in your place, from the core's record of that
+ * answer: the `approval_policy` decision that names the request, whose rule reads "your rule for
+ * this repo: commands that start with `npm install`" (or "… `npm test`" for one command). Null
+ * when Codly's own rules answered it, or nothing is on record.
+ */
+export function yourRuleOf(decisions: readonly { type: string; detail: unknown }[], approvalId: string): Pick<ApprovalRule, 'kind' | 'command'> | null {
+  for (const d of decisions) {
+    if (d.type !== 'approval_policy' || !d.detail || typeof d.detail !== 'object') continue;
+    const { approval_id, rule } = d.detail as { approval_id?: unknown; rule?: unknown };
+    if (approval_id !== approvalId || typeof rule !== 'string' || !rule.startsWith(YOUR_RULE)) continue;
+    const named = rule.slice(YOUR_RULE.length);
+    const prefix = named.startsWith('commands that start with `');
+    const open = named.indexOf('`');
+    const close = named.lastIndexOf('`');
+    if ((!prefix && open !== 0) || close <= open + 1) continue;
+    return { kind: prefix ? 'prefix' : 'exact', command: named.slice(open + 1, close) };
+  }
+  return null;
+}
+
+/** A turn of an agent as the store keeps it: when it started and when it ended (null: it runs). */
+export type TurnSpan = { start: number; end: number | null };
+
+/**
+ * Whether a request ended because you stopped its agent's turn (Stop, Esc Esc, Interrupt, Send
+ * now, or Kill, which stops the turn too): its CLI took it back ("cancelled" by its CLI) or
+ * Codly closed it with the run ("expired" by Codly), and it was asked inside a turn you stopped. The window
+ * is the one of the thread's line "You stopped … while it waited for your answer"
+ * (home/spine.ts): from the turn's start to its end, or to now while the CLI still lets go of it.
+ * `turns`: the agent's turns; `stopped`: the starts of those you stopped (state/stops).
+ */
+export function endedByYourStop(status: ApprovalStatus, by: string, askedAt: number, turns: readonly TurnSpan[], stopped: readonly number[]): boolean {
+  const taken = (status === 'cancelled' && by === 'provider') || (status === 'expired' && by === 'codly');
+  return taken && turns.some((t) => stopped.includes(t.start) && askedAt >= t.start && (t.end == null || askedAt <= t.end));
+}
+
+/** `endedByYourStop` for a request the store holds, with the turns and the stops of its agent. */
+function stoppedByYou(status: ApprovalStatus, by: string, asked: Held | null): boolean {
+  if (!asked?.agent_id || asked.created_at == null) return false;
+  void store.rev;
+  return endedByYourStop(status, by, asked.created_at, store.live[asked.agent_id]?.turns ?? [], yourStops(asked.agent_id));
+}
+
+/** The rule of yours that approved a request the store holds (`yourRuleOf`), null for any other answer. */
+function byYourRule(status: ApprovalStatus, by: string, asked: Held | null): Pick<ApprovalRule, 'kind' | 'command'> | null {
+  if (status !== 'approved' || by !== 'policy' || !asked?.id) return null;
+  void store.rev;
+  return yourRuleOf(store.decisions, asked.id);
+}
+
+/**
+ * How a request ended, in two parts: the verdict ("Approved by you", "Stopped by you", "Plan
+ * accepted by you, with your changes"), and the rule you saved with an approval ("and from now
+ * on: commands that start with npm install"; null: none). A row too narrow for both cuts the
+ * rule, never the verdict. A request your stop ended reads "Stopped by you" (`endedByYourStop`),
+ * not "by its CLI" or "Closed by Codly". One a rule you saved answered names it as yours
+ * ("Approved by your rule: commands that start with npm install"), not as Codly's rules.
+ * `settledLine` puts the two together.
+ */
+export function settledParts(status: ApprovalStatus, by: string, asked: Held | null, provider: Provider | null = null, rule: Pick<ApprovalRule, 'kind' | 'command'> | null = null): { verdict: string; rule: string | null } {
+  const byRule = byYourRule(status, by, asked);
+  if (byRule) return { verdict: `Approved by your rule: ${savedRuleWords(byRule)}`, rule: null };
+  const yours = stoppedByYou(status, by, asked);
+  const st: ApprovalStatus = yours ? 'cancelled' : status;
+  const who = yours ? 'user' : by;
+  const said = wordsOf(asked, who);
+  const changed = !!said?.planChanged && st === 'approved' && !!asked && showsPlan(asked.subject, provider);
+  const verdict = `${settledWord(st, asked, provider)} ${outcomeBy(who)}`.trim() + (changed ? ', with your changes' : '');
+  return { verdict, rule: rule && st === 'approved' ? `and from now on: ${savedRuleWords(rule)}` : null };
+}
+
+/** An agent's history: how that request ended ("Approved by you", "Denied by you: use pnpm",
+ *  "Closed by Codly", "Plan accepted by you, with your changes"). `asked` is the request when it
+ *  is still known (the line of a question or of a plan says so, and your note is found by its
+ *  id), `answer` what you answered to a question, `rule` the rule you saved with an approval
+ *  ("Approved by you, and from now on: commands that start with npm install"). The closed card
+ *  in the conversation says the same (`settledParts`). */
+export function settledLine(status: ApprovalStatus, by: string, asked: Held | null, answer: string | null, provider: Provider | null = null, rule: Pick<ApprovalRule, 'kind' | 'command'> | null = null): string {
+  const { verdict, rule: saved } = settledParts(status, by, asked, provider, rule);
+  const said = wordsOf(asked, by);
+  if (asked?.subject.kind === 'question' && status === 'approved' && answer) return `${verdict}: ${oneLine(answer, 80)}`;
+  if (saved) return `${verdict}, ${saved}`;
+  return said?.note ? `${verdict}: ${oneLine(said.note, 80)}` : verdict;
 }

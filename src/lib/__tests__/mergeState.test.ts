@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import type { MergeState } from '../gen/MergeState';
 import type { PrSource } from '../gen/PrSource';
+import type { Task } from '../gen/Task';
 import { mergeAgent, mergePlan } from '../state/actions';
-import { behindLine, conflictsWith, fileList, loadMergeState, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge } from '../state/mergeState.svelte';
+import { behindLine, conflictsWith, fileList, loadMergeState, mergeBlock, mergeByHand, mergeKey, mergeUi, resolveMergeConflict, stopResolvingMerge, taskOver } from '../state/mergeState.svelte';
 import { store } from '../state/store.svelte';
 import { toasts } from '../state/toasts.svelte';
 
@@ -17,6 +18,7 @@ describe('a merge that cannot go straight in', () => {
     vi.restoreAllMocks();
     for (const t of [...toasts.list]) toasts.dismiss(t.id);
     mergeUi.states = {};
+    mergeUi.merging = [];
     store.planMerges = {};
   });
 
@@ -183,7 +185,8 @@ describe('a merge that cannot go straight in', () => {
     await mergePlan('p1');
     expect(chat).not.toHaveBeenCalled();
     const stop = toasts.list.find((t) => t.title === 'Not merged into main');
-    expect([stop?.body, stop?.action?.label]).toEqual([why, 'Merge anyway']);
+    // The core's words, as a sentence.
+    expect([stop?.body, stop?.action?.label]).toEqual([`T${why.slice(1)}`, 'Merge anyway']);
 
     stop!.action!.run();
     await vi.waitFor(() => expect(merge).toHaveBeenLastCalledWith('p1', null, true));
@@ -226,7 +229,7 @@ describe('a merge that cannot go straight in', () => {
     await mergePlan('p1');
     // The toast keeps Merge anyway, and says where the other way is.
     const stop = toasts.list.find((t) => t.title === 'Not merged into main');
-    expect(stop?.body).toBe('with the plan merged into main, `npm test` failed, so nothing was merged and main is unchanged. An agent can fix it: see the plan’s card.');
+    expect(stop?.body).toBe('With the plan merged into main, `npm test` failed, so nothing was merged and main is unchanged. An agent can fix it: see the plan’s card.');
 
     // From the card: your branch is in the plan's branch, nothing conflicts, and a task is on it.
     const resolve = vi.spyOn(api, 'resolveMergeConflict').mockResolvedValue({ ...clean, resolving: 't12' });
@@ -239,5 +242,63 @@ describe('a merge that cannot go straight in', () => {
       'Open the task',
     ]);
     expect(mergeUi.states[mergeKey(plan)]?.resolving).toBe('t12');
+  });
+
+  it('a refused merge has one main button: the way out, never Merge', () => {
+    expect(mergeBlock(null)).toBeNull();
+    expect(mergeBlock(clean)).toBeNull();
+    const behind: MergeState = { ...clean, behind: 4 };
+    expect(mergeBlock(behind)).toBeNull();
+    expect(mergeBlock(conflict)).toBe('conflict');
+    expect(mergeBlock({ ...clean, failed_checks: ['npm test'] })).toBe('checks-failed');
+    expect(mergeBlock({ ...clean, checks_not_run: '.codly/setup.sh failed (exit 1)' })).toBe('checks-not-run');
+    // A conflict comes first: nothing can be checked before it is resolved.
+    expect(mergeBlock({ ...conflict, failed_checks: ['npm test'] })).toBe('conflict');
+  });
+
+  it('a merge refused again for its checks shows one toast, not one more per press', async () => {
+    vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(null);
+    vi.spyOn(api, 'mergePlan').mockRejectedValue(new Error('with the plan merged into main, `npm test` failed, so nothing was merged and main is unchanged'));
+    vi.spyOn(api, 'mergeState').mockResolvedValue({ ...clean, failed_checks: ['npm test'] });
+    await mergePlan('p1');
+    await mergePlan('p1');
+    await mergePlan('p1');
+    expect(toasts.list.filter((t) => t.title === 'Not merged into main')).toHaveLength(1);
+  });
+
+  it('one merge of a plan at a time: a press while it runs starts no second one', async () => {
+    vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(null);
+    let done!: (sha: string) => void;
+    const core = vi.spyOn(api, 'mergePlan').mockReturnValue(new Promise<string>((r) => (done = r)));
+    const first = mergePlan('p1');
+    await vi.waitFor(() => expect(core).toHaveBeenCalledTimes(1));
+    expect(mergeUi.merging).toEqual(['p1']);
+    await mergePlan('p1'); // the chip at the thread's end, pressed while the card's merge runs
+    expect(core).toHaveBeenCalledTimes(1);
+    done('abc1234def');
+    await first;
+    expect(mergeUi.merging).toEqual([]);
+    // A merge that failed lets you try again.
+    core.mockRejectedValueOnce(new Error('the disk is full'));
+    vi.spyOn(api, 'mergeState').mockResolvedValue(clean);
+    await mergePlan('p1');
+    expect(core).toHaveBeenCalledTimes(2);
+    expect(mergeUi.merging).toEqual([]);
+  });
+
+  it('the toast that says an agent is on it goes once its task is over', async () => {
+    vi.spyOn(api, 'mergePlanWarning').mockResolvedValue(null);
+    vi.spyOn(api, 'resolveMergeConflict').mockResolvedValue({ ...clean, resolving: 't12' });
+    expect(await resolveMergeConflict(plan)).toBe(true);
+    const started = toasts.list.find((t) => t.title === 'An agent is fixing the checks');
+    // Its row has not come yet: the toast stays.
+    expect(started?.action?.gone?.()).toBe(false);
+    store.tasks = [{ id: 't12', status: 'running' } as Task];
+    expect(started?.action?.gone?.()).toBe(false);
+    store.tasks = [{ id: 't12', status: 'done' } as Task];
+    expect(started?.action?.gone?.()).toBe(true);
+    store.tasks = [];
+    expect((['running', 'verifying', 'merging', 'changes_requested', undefined] as const).map(taskOver)).toEqual([false, false, false, false, false]);
+    expect((['done', 'failed', 'cancelled'] as const).map(taskOver)).toEqual([true, true, true]);
   });
 });

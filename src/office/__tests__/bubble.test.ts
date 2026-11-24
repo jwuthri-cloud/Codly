@@ -62,7 +62,7 @@ describe('action chips', () => {
 
   it('a pending approval wins over everything', () => {
     const m = fresh();
-    ada(m).approval = { id: 'x', text: 'rm', command: true, since: T0 };
+    ada(m).approval = { id: 'x', text: 'rm', waits: 'rm', command: true, since: T0 };
     expect(chipFor(ada(m))).toEqual({ text: 'needs you', tone: 'warn' });
   });
 });

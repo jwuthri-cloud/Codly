@@ -22,13 +22,34 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{Notify, mpsc};
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 /// What the diff view sends: for each comment, the file and line, the quoted line, the comment.
 const COMMENTS: &str = "Review comments (1):\n\n1. `hello.txt:1`\n   > +hello\n   Say that it was reviewed.";
 /// Passes only once the worker has answered the comments.
 const VERIFY: &str = "grep -q reviewed hello.txt";
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git").arg("-C").arg(dir).args(args).output().unwrap()
+    Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).output().unwrap()
 }
 
 fn temp_repo(root: &Path) -> PathBuf {
@@ -63,6 +84,8 @@ struct FakeTurn {
     spec: Arc<SpawnSpec>,
     prompt: String,
     events: mpsc::UnboundedSender<AdapterEvent>,
+    /// Told when its run is told to stop.
+    stop: Arc<Notify>,
 }
 
 impl FakeTurn {
@@ -90,6 +113,13 @@ impl FakeTurn {
 
     async fn done(&self) {
         self.tool("codly_submit_report", json!({ "status": "done", "summary": "Did it." })).await;
+    }
+
+    /// A turn that never ends by itself: it lasts until its run is told to stop. A turn that
+    /// waits for nothing instead would keep its run alive through `Core::shutdown` with a
+    /// spawner that does not race it against the stop, as `FakeSpawner` here does.
+    async fn work_until_stopped(&self) {
+        self.stop.notified().await;
     }
 }
 
@@ -155,14 +185,18 @@ impl Spawner for FakeSpawner {
                             turns.lock().unwrap().push((spec2.role, spec2.agent_id.clone(), text.clone()));
                             send(EventKind::TurnStarted { input: Some(text.clone()) });
                             send(EventKind::StatusChanged { status: AgentStatus::Thinking });
-                            let mut turn = behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone() });
+                            let stop = Arc::new(Notify::new());
+                            let mut turn = behavior(FakeTurn { spec: spec2.clone(), prompt: text, events: events.clone(), stop: stop.clone() });
                             // Told to shut down mid-turn, a CLI does not finish the turn: it is
                             // closed as interrupted and the process exits.
                             let stopped = loop {
                                 tokio::select! {
                                     _ = &mut turn => break false,
                                     cmd = rx.recv() => match cmd {
-                                        Some(AgentCmd::Shutdown) | None => break true,
+                                        Some(AgentCmd::Shutdown) | None => {
+                                            stop.notify_one();
+                                            break true;
+                                        }
                                         Some(cmd) => waiting.push_back(cmd),
                                     },
                                 }
@@ -219,7 +253,7 @@ async fn start(root: &Path, worker: Behavior, turns: Turns) -> Arc<Core> {
 async fn start_with(root: &Path, spawner: FakeSpawner, review_gate: bool) -> Arc<Core> {
     let repo = temp_repo(root);
     let cfg = CoreConfig { data_dir: root.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(spawner)), env: Some(core_env()), clis: Some(vec![claude()]), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     core.update_settings(Settings { auto_run_plans: true, lead_followups: false, review_gate, ..Default::default() }).await.unwrap();
     core.open_workspace(repo.to_str().unwrap()).await.unwrap();
@@ -333,7 +367,7 @@ async fn comments_reach_a_worker_that_still_runs_the_task() {
     assert_eq!(yours.0, "you sent t1 back with review comments; its worker reads them now");
     assert_eq!(yours.1["comments"], COMMENTS);
     assert_eq!(asked_in_chat(&core, t.assignee.as_deref().unwrap()).await, [COMMENTS]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -368,11 +402,12 @@ async fn comments_start_a_stopped_task_again_and_a_done_task_takes_none() {
     assert!(yours.contains(&"you sent t1 back with review comments; its next run starts with them".to_string()), "{yours:?}");
     assert_eq!(asked_in_chat(&core, t.assignee.as_deref().unwrap()).await, [COMMENTS]);
 
-    // Its work is merged now: the changes are a new request, and nothing is recorded.
+    // Its work is merged into the finished plan now: the comments go on the plan
+    // (`send_back_plan`), and nothing is recorded.
     let e = core.send_back_task(&t.id, COMMENTS).await.unwrap_err().to_string();
-    assert!(e.contains("t1 is done") && e.contains("new request"), "{e}");
+    assert_eq!(e, "t1 is done; send your comments on the plan and they become one more task of it");
     assert_eq!(asked_in_chat(&core, t.assignee.as_deref().unwrap()).await.len(), 1);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker whose first turn passes the check at once, so its work goes to review, and a
@@ -384,7 +419,7 @@ fn reviewed_work(slow: bool) -> Behavior {
         Box::pin(async move {
             if turn.spec.role == Role::Reviewer {
                 if reviews.fetch_add(1, Ordering::SeqCst) == 0 && slow {
-                    std::future::pending::<()>().await;
+                    return turn.work_until_stopped().await;
                 }
                 let criteria = json!([{ "criterion": "hello.txt is right", "met": true }]);
                 turn.tool("codly_submit_review", json!({ "verdict": "approve", "summary": "Looks good.", "criteria": criteria, "issues": [] })).await;
@@ -450,7 +485,7 @@ async fn comments_sent_during_a_review_stop_it_and_the_new_work_gets_its_own() {
         yours.contains(&"you sent t1 back with review comments; its worker reads them now, and the review that was under way stopped".to_string()),
         "{yours:?}"
     );
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -477,7 +512,7 @@ async fn comments_wait_while_a_review_is_starting() {
     wait_plan_done(&core).await;
     assert_eq!(worker_prompts(&turns).len(), 1, "the worker read nothing of it");
     assert_eq!(verdicts(&events(&core).await), ["approve"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A reviewer that was told to stop can report late: its turn ends when the next review round
@@ -503,7 +538,7 @@ async fn a_verdict_of_an_earlier_round_does_not_count_for_the_next_one() {
                         // Its verdict is on record, and its turn does not end by itself.
                         turn.tool("codly_submit_review", approve).await;
                         said.notify_one();
-                        return std::future::pending::<()>().await;
+                        return turn.work_until_stopped().await;
                     }
                     second.notified().await;
                     turn.tool("codly_submit_review", approve).await;
@@ -550,5 +585,5 @@ async fn a_verdict_of_an_earlier_round_does_not_count_for_the_next_one() {
     assert_eq!(read[0].agent_id.as_deref(), Some(other.as_str()), "the verdict of the round's own reviewer");
     assert_eq!(reviewers(&turns).len(), 2, "no third review");
     assert_eq!(worker_prompts(&turns).len(), 2, "the brief, then your comments");
-    core.shutdown().await;
+    shut_down(&core).await;
 }

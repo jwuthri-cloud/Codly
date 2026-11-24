@@ -90,8 +90,10 @@ pub struct SpawnSpec {
     pub env: HashMap<String, String>,
     pub session: SessionMode,
     /// What the earlier runs on the resumed session cost together, as Codly counted them (0 for
-    /// a new session). For ACP agents: they report a session's cost as a running total, and the
-    /// adapter takes this off, so a run's cost starts from zero as with every other CLI.
+    /// a new session; not given to Codex). ACP agents report a session's cost as a running
+    /// total, and so does Claude Code in a `result` that has no cost of the turn's own (after
+    /// `--resume` its totals carry the earlier runs: 2.1.311 part 6, section 3): the adapter
+    /// takes this off, so a run's cost starts from zero as with every other CLI.
     pub session_cost_usd: f64,
     /// Static role rules, appended to the CLI's own system prompt where supported
     /// (Claude `--append-system-prompt`, Codex `developerInstructions`); for ACP agents
@@ -122,6 +124,20 @@ pub struct SpawnSpec {
     /// (`Settings.claude_sandbox`, `claude::settings_json`). Codex always has its own sandbox,
     /// and the ACP agents have none.
     pub sandbox_shell: bool,
+    /// Claude only: `--max-budget-usd`, what was left of your cost budget when the run started
+    /// (`breaker::rest_usd`). Claude Code counts this process alone and stops a turn right
+    /// after the model request that passes it: the tool call that request asked for does not
+    /// run, and every later turn of the process fails at once (2.1.311 part 4, section 10), so
+    /// Codly ends the run there. Reached during a long tool call (a helper's request passed
+    /// it: part 5, section 10, n=2): the turn ends, not the call, which runs on in no list
+    /// until stdin is closed, as the end of the run does (an interrupt does not end it;
+    /// `stop_task` with its task id does: part 6, section 6, n=2 each). One run's own total can
+    /// pass its limit: the requests on their way when it passed are finished and paid, and a
+    /// helper with requests left made one more (part 6, section 6: the totals ended 19% and
+    /// 45% above the limit, n=2; after the `result` nothing more came in 40 s). Several Claude
+    /// agents at once each hold the whole rest, so together they can pass the budget until
+    /// their turns end (the check between turns stays). None: no limit of its own.
+    pub max_budget_usd: Option<f64>,
 }
 
 /// Commands the orchestrator sends to a running agent.
@@ -153,17 +169,29 @@ pub enum SessionRequest {
     Model(String),
     /// `get_context_usage`: how full the context is.
     ContextUsage,
-    /// `mcp_reconnect`: try again to connect the MCP server of this name. Recorded for
-    /// servers that still could not connect: the answer is an error with the CLI's reason.
+    /// `mcp_reconnect`: try again to connect the MCP server of this name. Recorded: for a
+    /// server that still cannot connect the answer is an error with the CLI's reason; for one
+    /// that connects it is a success with no body (part 3 §10, n=1).
     McpReconnect(String),
-    /// `stop_task`, with the id of a background task (`BackgroundTask::id`): the CLI ends it.
-    /// The answer is empty also when nothing was stopped (recorded, part 2 §6): the CLI's next
-    /// list of its background tasks says whether the task is gone.
+    /// `mcp_toggle`: turn the MCP server of this name off (false) or on (true). Recorded
+    /// (part 3 §10, n=1): a success with no body either way; the server is then `disabled`,
+    /// or started again and `connected`. Where it stands is in `mcp_status`. Not recorded:
+    /// whether the CLI saves the switch (no process was started after an "off"), and what it
+    /// answers for a server that does not start or that it does not know.
+    McpEnabled(String, bool),
+    /// `stop_task`, with the id of a background task (`BackgroundTask::id`), or the call id of
+    /// a helper at work (`EventKind::SubAgent::call_id`, in the background or not): the CLI
+    /// ends it. The answer is empty also when nothing was stopped (recorded, part 2 §6): the
+    /// CLI's next list of its background tasks, and a helper's own row, say what ended. For a
+    /// helper found by its call id the adapter adds its description (`helper`). An id that is
+    /// neither is refused, and nothing reaches the CLI.
     StopTask(String),
     /// `apply_flag_settings` with `effortLevel`: the reasoning effort of the session, one of
-    /// `claude::EFFORT_LEVELS` (the adapter sends no other word). The CLI answers "success"
-    /// also for a level it then drops, so `Settings` is asked after it.
-    Effort(String),
+    /// `claude::EFFORT_LEVELS` (the adapter sends no other word), or None for no level of its
+    /// own (`null`: the CLI's default, recorded as "medium" on a process started with
+    /// `--effort high`, part 4 §4, n=2). The CLI answers "success" also for a level it then
+    /// drops, so `Settings` is asked after it.
+    Effort(Option<String>),
     /// `get_settings`: what the session works with now (`applied.model`, `applied.effort`).
     Settings,
 }

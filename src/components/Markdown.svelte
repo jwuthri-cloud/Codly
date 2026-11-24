@@ -3,6 +3,7 @@
   A finished message is parsed once (its HTML is kept, so a thread opened again parses nothing).
   A message being written keeps the blocks that are finished and parses only the one being
   written: a new word neither parses the whole message again nor replaces what you selected.
+  An unfinished part longer than 4,000 characters renders at most 10 times a second (mdstream.ts).
 -->
 <script lang="ts" module>
   import { textCache } from '../lib/util/textCache';
@@ -30,8 +31,19 @@
   // A parent may hand over the same text again: an unchanged string stops at these two.
   const src = $derived(text);
   const live = $derived(streaming);
-  const stream = streamRenderer((s) => renderMarkdown(s).replace(CARET, '<span class="caret" aria-hidden="true"></span>'), markdownBlocks);
-  const parts = $derived(live ? stream(src, CARET) : null);
+  const stream = streamRenderer((s) => renderMarkdown(s).replace(CARET, '<span class="caret" aria-hidden="true"></span>'), markdownBlocks, () => performance.now());
+  /** Counts the renders asked for by the clock: a long tail that waited renders the text as it is now. */
+  let late = $state(0);
+  const parts = $derived.by(() => {
+    void late;
+    return live ? stream(src, CARET) : null;
+  });
+  $effect(() => {
+    const wait = parts?.wait;
+    if (!wait) return;
+    const t = setTimeout(() => late++, wait);
+    return () => clearTimeout(t);
+  });
   // Copy waits for the whole message: a block still being written is not worth copying.
   const html = $derived(live ? '' : finished(src, (s) => withCopyButtons(renderMarkdown(s))));
 

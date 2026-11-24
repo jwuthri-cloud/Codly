@@ -8,7 +8,7 @@
   for it go on: the core checks them again.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { RequiredChecks } from '../lib/gen/RequiredChecks';
   import { Loader } from '../lib/state/loader.svelte';
@@ -16,9 +16,18 @@
   import { toast } from '../lib/state/toasts.svelte';
   import { checksTurnTrouble, setupChoices } from '../lib/util/worktree';
   import LoadError from '../components/LoadError.svelte';
+  import MoreAbout from './MoreAbout.svelte';
+
+  /** Called with each value the section shows, as it is read or saved: the line under the
+   *  page's name in the list follows it. */
+  let { onvalue }: { onvalue?: (checks: RequiredChecks) => void } = $props();
 
   const checks = new Loader<RequiredChecks>(() => api.requiredChecks());
   const s = $derived(checks.value);
+  $effect(() => {
+    const now = s;
+    if (now) untrack(() => onvalue?.(now));
+  });
   onMount(() => {
     if (store.workspace) void checks.load();
   });
@@ -57,28 +66,41 @@
     <h3 class="eyebrow">Required checks</h3>
     <p class="desc">
       The Lead writes the checks of each task. Required checks are yours: commands that must pass for every task and every finished plan in
-      {store.workspace.name}, whatever the plan says. Write them in a <code>.codly/checks</code> file at the top of the repo, one command on each line
-      (a line that starts with <code>#</code> is a comment), for example <code>pnpm check</code> and <code>pnpm test</code>.
+      {store.workspace.name}, whatever the plan says.
     </p>
+    <MoreAbout id="required-checks">
+      <p class="desc">
+        Write them in a <code>.codly/checks</code> file at the top of the repo, one command on each line (a line that starts with <code>#</code> is a
+        comment), for example <code>pnpm check</code> and <code>pnpm test</code>.
+      </p>
+    </MoreAbout>
     {#if s}
       {@const can = setupChoices(s)}
-      <label class="row toggle">
+      <!-- The name and the first paragraph are the switch's label; "More about this" is not: a press there opens the text. -->
+      <div class="row">
         <div class="r-text">
-          <span class="r-title">Run the repo’s required checks</span>
-          <span class="desc">
-            {#if s.problem}
-              Codly does not read this repo’s checks file: {s.problem}.
-            {:else if s.text === null}
-              This repo has no <code>.codly/checks</code> with a command in it.
-            {:else}
-              Codly reads <code>.codly/checks</code> from your checkout and runs each command in the task’s worktree, after the task’s own checks, and again on
-              the finished plan. A command that fails goes back to the worker like any failed check. For an agent you chat with, its Git tab has Check the work.
-              Each command has the time limit for checks above.
-            {/if}
-          </span>
+          <label class="r-label" for="required-checks-switch">
+            <span class="r-title">Run the repo’s required checks</span>
+            <span class="desc">
+              {#if s.problem}
+                Codly does not read this repo’s checks file: {s.problem}.
+              {:else if s.text === null}
+                This repo has no <code>.codly/checks</code> with a command in it.
+              {:else}
+                Codly reads <code>.codly/checks</code> from your checkout and runs each command in the task’s worktree, after the task’s own checks, and again on
+                the finished plan. A command that fails goes back to the worker like any failed check.
+              {/if}
+            </span>
+          </label>
+          {#if !s.problem && s.text !== null}
+            <MoreAbout id="required-checks-run">
+              <span class="desc">For an agent you chat with, its Git tab has Check the work. Each command has the time limit for checks above.</span>
+            </MoreAbout>
+          {/if}
         </div>
         {#if busy && !can.ask}<span class="busy" role="status">Saving…</span>{/if}
         <input
+          id="required-checks-switch"
           type="checkbox"
           class="switch"
           checked={s.on}
@@ -86,7 +108,7 @@
           aria-label="Run the repo’s required checks"
           onchange={(e) => flip(e.currentTarget, can.on)}
         />
-      </label>
+      </div>
       {#if can.ask}
         <div class="changed" role="status">
           <p>
@@ -112,8 +134,10 @@
         </ul>
         <p class="desc">
           These commands come from the repo, and once they are on they run without asking again, also the ones with a risk shown beside them.
-          You turn on these commands as they are written now: if the file changes, they are off until Codly has asked you again.
         </p>
+        <MoreAbout id="required-checks-text">
+          <p class="desc">You turn on these commands as they are written now: if the file changes, they are off until Codly has asked you again.</p>
+        </MoreAbout>
       {/if}
     {:else if checks.error}
       <LoadError what="the required checks" error={checks.error} loading={checks.loading} onretry={() => checks.load()} />
@@ -129,6 +153,8 @@
   .row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
   .r-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .r-title { font-weight: var(--w-med); }
+  /* The name and the first paragraph of the switch's row: a press there flips the switch. */
+  .r-label { display: flex; flex-direction: column; gap: 2px; }
   .changed { display: flex; flex-direction: column; gap: 8px; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--bad); }
   .choices { display: flex; align-items: center; gap: 8px; }
   .busy { flex: none; font-size: var(--t-sm); color: var(--ink-3); }

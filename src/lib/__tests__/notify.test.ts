@@ -46,6 +46,7 @@ describe('the words of a toast that points at a request', () => {
     expect(asks({ kind: 'tool', name: 'WebFetch', input: {} }, 'claude')).toBe('Wants to use WebFetch');
     expect(asks({ kind: 'file_change', paths: ['README.md'], diff: null }, 'codex')).toBe('Wants to change README.md');
     expect(asks({ kind: 'permissions', detail: {} }, 'codex')).toBe('Wants to get more permissions');
+    expect(asks({ kind: 'permissions' as const, detail: { cwd: '/Users/someone/Code/acme', reason: null, permissions: { network: null, fileSystem: { read: null, write: ['/Users/someone/Code/acme-docs'] } } } }, 'codex')).toBe('Wants to write in ../acme-docs');
     expect(asks({ kind: 'command', command: 'pnpm test', cwd: null }, 'claude')).toBe('pnpm test');
     expect([asksTitle('Eli', { kind: 'question', questions: [] }, 'claude'), asks({ kind: 'question', questions: [] }, 'claude')]).toEqual(['Eli has a question', 'Answer it in the conversation']);
   });

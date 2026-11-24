@@ -125,6 +125,15 @@ struct CheckChoice {
     skip: bool,
 }
 
+/// What the record says about a pass of the gate that you or Codly started from a task's
+/// card, in the words of who started it.
+struct Asked {
+    /// The pass begins: what was done.
+    begun: String,
+    /// The pass cannot begin now (`Begun::Busy`): what was wanted. No check ran.
+    waits: String,
+}
+
 /// How your own pass began.
 enum Begun {
     /// The task is Verifying: the pass runs now.
@@ -135,6 +144,24 @@ enum Begun {
 
 fn checks_key(task_id: &str) -> String {
     format!("checks:{task_id}")
+}
+
+/// How long the reason of a task that waits for you can be (`park`).
+const MAX_REASON: usize = 300;
+
+/// The reason of a task that waits because your required checks are on and did not run
+/// (`why`). Turning them on or off re-runs the task's checks with no click
+/// (`required_checks.rs`), and the reason says so. What you can do comes last and is always
+/// whole: a `why` that does not fit is the part that is cut.
+fn stale_reason(why: &str) -> String {
+    let said = |why: &str| {
+        format!(
+            "blocked: {} Codly then checks this task again by itself; Re-run checks does it now. Or merge anyway.",
+            required_checks::not_run(why)
+        )
+    };
+    let room = MAX_REASON.saturating_sub(said("").chars().count());
+    said(&prompts::clip(why, room))
 }
 
 fn feedback_key(task_id: &str) -> String {
@@ -322,10 +349,14 @@ impl Inner {
             }
         }
         let message = format!("codly({}): {}", task.key, prompts::clip(&task.title, 60));
+        // A task on its plan's own branch: what was in the plan's worktree before it started
+        // is on no branch and is not its work. The commit leaves it out, on record.
+        let there_before = self.there_before(&task)?;
         let snap = {
             let _g = self.repo_lock.lock().await;
-            self.git_step(&task, ws, || self.git.commit_work(&wt, &message)).await?
+            self.git_step(&task, ws, || self.git.commit_work_without(&wt, &message, &there_before)).await?
         };
+        self.note_there_before(ws, &task, &wt, &there_before, &snap.left_out).await?;
         let said = self.note_left_out(ws, None, Some(&task), &task.key, &wt, &snap.left_out)?;
         if let Some(c) = snap.commit {
             self.store.set_task_commits(task_id, None, Some(&c.sha))?;
@@ -378,13 +409,7 @@ impl Inner {
                     if self.steered(pass, &worker, turns) {
                         return self.wait_for_turn(task_id);
                     }
-                    // Turning them on or off re-runs this task's checks with no click
-                    // (`required_checks.rs`), and the reason says so.
-                    let reason = format!(
-                        "blocked: {} Codly then checks this task again by itself; Re-run checks does it now. Or merge anyway.",
-                        required_checks::not_run(&why)
-                    );
-                    return self.park(&task, &worker, reason, json!({ "plan_id": task.plan_id, "required": why })).await;
+                    return self.park(&task, &worker, stale_reason(&why), json!({ "plan_id": task.plan_id, "required": why })).await;
                 }
             };
             for cmd in task.verify.iter().chain(required.iter().filter(|c| !task.verify.contains(c))) {
@@ -668,6 +693,8 @@ impl Inner {
         // Only a run of this task takes its feedback: after your own pass the agent may be in
         // a chat or on other work by now.
         if self.works_on(worker, &task.id) {
+            // A new round: the worker's background work has the whole wait again (background.rs).
+            self.background_round(worker);
             self.send_prompt(worker, prompt)?;
         } else {
             // The worker exited; the next run of this task resumes its session with the feedback.
@@ -716,7 +743,7 @@ impl Inner {
     /// The gate cannot go on and the worker cannot help: the task waits for you, Blocked,
     /// with its worker released. Retry, Re-run checks or Merge anyway moves it on.
     async fn park(self: &Arc<Self>, task: &Task, worker: &str, reason: String, detail: Value) -> Result<()> {
-        let reason = prompts::clip(&reason, 300);
+        let reason = prompts::clip(&reason, MAX_REASON);
         self.update_task(&task.id, |t| {
             t.status = TaskStatus::Blocked;
             t.status_reason = Some(reason.clone());
@@ -807,13 +834,16 @@ impl Inner {
         }
         // Re-run checks after Merge anyway means: run them after all.
         let choice = (choice.skip || !allowed.is_empty()).then(|| CheckChoice { allowed: ok, skip: false });
-        let mut what = match by {
-            Rerun::You => format!("you re-ran the checks of {}", task.key),
-            Rerun::Codly => format!("Codly re-ran the checks of {} (you changed the required checks)", task.key),
+        // "re-ran" is said when the pass begins. One that cannot begin says who wanted it.
+        let (ran, wanted, why) = match by {
+            Rerun::You => ("you re-ran", "you asked to re-run", ""),
+            Rerun::Codly => ("Codly re-ran", "Codly wanted to re-run", " (you changed the required checks)"),
         };
+        let mut checks = format!("the checks of {}{why}", task.key);
         if !allowed.is_empty() {
-            what.push_str(&format!(" and allowed {}", allowed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")));
+            checks.push_str(&format!(" and allowed {}", allowed.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")));
         }
+        let what = Asked { begun: format!("{ran} {checks}"), waits: format!("{wanted} {checks}") };
         self.user_pass(&task, choice, by, what, json!({ "allowed": allowed })).await?;
         Ok(vec![])
     }
@@ -840,6 +870,8 @@ impl Inner {
             ),
             None => (format!("you chose to merge {} anyway, without its checks", task.key), json!({ "not_run": task.verify })),
         };
+        // Your choice stands whether the pass begins now or waits.
+        let what = Asked { waits: what.clone(), begun: what };
         self.user_pass(&task, Some(choice), Rerun::You, what, detail).await
     }
 
@@ -849,7 +881,7 @@ impl Inner {
     /// member's worktree with its other tasks: while the member is on other work there, the
     /// pass cannot have it, so the task goes back in line for the member (Ready) and the gate
     /// after its next turn uses your choice.
-    async fn user_pass(self: &Arc<Self>, task: &Task, choice: Option<CheckChoice>, by: Rerun, what: String, detail: Value) -> Result<Task> {
+    async fn user_pass(self: &Arc<Self>, task: &Task, choice: Option<CheckChoice>, by: Rerun, what: Asked, detail: Value) -> Result<Task> {
         // One gate per task at a time: take it before anything changes.
         {
             let mut g = lock(&self.gating);
@@ -858,7 +890,7 @@ impl Inner {
             }
             g.insert(task.id.clone(), false);
         }
-        let begun = self.begin_user_pass(task, choice.as_ref(), by, &what, &detail).await;
+        let begun = self.begin_user_pass(task, choice.as_ref(), by, &what.begun, &detail).await;
         if let Ok(Begun::Now(_)) = &begun {
             tokio::spawn(self.clone().gate_passes(task.id.clone(), Pass::User));
         } else {
@@ -867,7 +899,7 @@ impl Inner {
         }
         match begun? {
             Begun::Now(t) => Ok(t),
-            Begun::Busy(who) => self.requeue_for_member(task, &who, choice.as_ref(), by, &what, detail),
+            Begun::Busy(who) => self.requeue_for_member(task, &who, choice.as_ref(), by, &what.waits, detail),
         }
     }
 
@@ -950,7 +982,7 @@ impl Inner {
         let ws = self.store.task_workspace(&task.id)?;
         detail["plan_id"] = json!(task.plan_id);
         detail["waits_for"] = json!(who);
-        let summary = format!("{what}; {who} is on other work in the same worktree, so {} goes back to {who} first", task.key);
+        let summary = format!("{what}: {who} is on other work in the same worktree, so {} goes back to {who} first", task.key);
         self.decide_by(ws.as_deref(), Some(&task.id), "gate", by.method(), summary, detail)?;
         self.kick();
         Ok(t)
@@ -1016,7 +1048,7 @@ impl Inner {
         // by hand, not your own commits that the merge brought in. Nothing by hand: no review.
         let resolution = self.resolution_diff(task, Path::new(&ws.repo_path), base_ref).await?;
         if resolution.as_deref().is_some_and(|diff| diff.trim().is_empty()) {
-            let summary = format!("{}: no review, nothing was changed by hand in the merge with your branch", task.key);
+            let summary = merge_conflict::nothing_to_review(task);
             self.decide(Some(ws_id), Some(&task.id), "review", summary, json!({ "plan_id": task.plan_id }))?;
             return self.merge_task(&task.id, 0).await;
         }
@@ -1819,6 +1851,24 @@ mod tests {
         assert!(!v.ok && v.code == Some(3) && !v.timed_out);
         assert_eq!(span(Duration::from_secs(600)), "10 min");
         assert_eq!(span(Duration::from_secs(90)), "90 s");
+    }
+
+    /// A long reason why the required checks did not run does not push what you can do out of
+    /// the task's reason: the why is cut, the rest is whole.
+    #[test]
+    fn the_reason_for_stale_required_checks_always_ends_with_what_you_can_do() {
+        let ways = " Codly then checks this task again by itself; Re-run checks does it now. Or merge anyway.";
+        let short = stale_reason(".codly/checks changed since you turned them on");
+        assert!(short.starts_with("blocked: Codly did not run your required checks: .codly/checks changed since you turned them on. Read them in "), "{short}");
+        assert!(short.ends_with(ways) && short.chars().count() <= MAX_REASON, "{short}");
+
+        let why = "cannot read .codly/checks: ".to_string() + &"x".repeat(173);
+        assert_eq!(why.chars().count(), 200);
+        let long = stale_reason(&why);
+        assert_eq!(long.chars().count(), MAX_REASON, "{long}");
+        assert_eq!(prompts::clip(&long, MAX_REASON), long, "the task's reason keeps all of it");
+        assert!(long.starts_with("blocked: Codly did not run your required checks: cannot read .codly/checks: xxx") && long.contains("x…. Read them in "), "{long}");
+        assert!(long.ends_with(ways), "{long}");
     }
 
     #[test]

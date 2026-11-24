@@ -33,8 +33,30 @@ export function noteStop(agentId: string, byKey = false): () => void {
  */
 export const stoppedByYou = (agentId: string, turnStart: number): boolean => !!asked.get(agentId)?.some((s) => s.start === turnStart && !s.byKey);
 
+/** The starts of the agent's turns you stopped with a button (Stop, Send now, Interrupt), oldest first. */
+export const stoppedTurns = (agentId: string): number[] => (asked.get(agentId) ?? []).filter((s) => !s.byKey).map((s) => s.start);
+
+/** The starts of every turn of the agent you stopped, with a button or with Esc, oldest first:
+ *  a request such a stop ended reads "Stopped by you" (util/outcome.ts). */
+export const yourStops = (agentId: string): number[] => (asked.get(agentId) ?? []).map((s) => s.start);
+
 /** Whether the agent's running turn is one you asked to stop (it ends when the CLI lets go). */
 export function stopping(agentId: string): boolean {
   const start = openTurn(agentId);
   return start != null && !!asked.get(agentId)?.some((s) => s.start === start);
 }
+
+/** agent → when you killed it (Kill in its sheet), this session: its conversation says so. */
+const kills = new SvelteMap<string, number[]>();
+
+/** Remember that you killed the agent now (`at`: the wall clock). Call the result if the core refused. */
+export function noteKill(agentId: string, at: number): () => void {
+  kills.set(agentId, [...(kills.get(agentId) ?? []), at].slice(-KEPT));
+  return () => kills.set(agentId, (kills.get(agentId) ?? []).filter((t) => t !== at));
+}
+
+/** When you killed the agent, oldest first. */
+export const killedAt = (agentId: string): number[] => kills.get(agentId) ?? [];
+
+/** The conversation's line for a kill of yours. */
+export const killLine = (name: string): string => `You killed ${name}`;

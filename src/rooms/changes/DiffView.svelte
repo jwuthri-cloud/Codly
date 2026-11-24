@@ -8,7 +8,7 @@
 <script lang="ts">
   import type { DiffFile } from '../../lib/util/diff';
   import { ui } from '../../lib/state/ui.svelte';
-  import { fileAnchor, FILE_PLACE, firstLines, lineAnchor, lineCount, linePlace, linesToDraw, LINE_STEP, placeComments, placeId, type Anchor, type ReviewComment } from '../../lib/util/review';
+  import { commentKeys, fileAnchor, FILE_PLACE, firstLines, lineAnchor, lineCount, linePlace, linesToDraw, LINE_STEP, placeComments, placeId, type Anchor, type ReviewComment } from '../../lib/util/review';
   import Icon from '../../components/Icon.svelte';
 
   interface Props {
@@ -52,6 +52,8 @@
   const notes = $derived(sorted.placed);
   /** The comments whose line left the diff or reads differently by now: listed under the name. */
   const lost = $derived(sorted.lost);
+  /** Each of them has a "Remove" button: a row is its comment's own, and goes when the comment does. */
+  const lostKeys = $derived(commentKeys(lost));
   let limit = $state(LINE_STEP);
   const total = $derived(lineCount(file));
   const drawn = $derived(linesToDraw(file, limit, notes));
@@ -118,7 +120,7 @@
     {#if onviewed}<label class="viewed" data-tip="Tick the files you have read. A file that changes later is unticked."><input type="checkbox" checked={viewed} onchange={(e) => onviewed?.(e.currentTarget.checked)} />Viewed</label>{/if}
   </header>
   {#if editingId === FILE_PLACE || notes.has(FILE_PLACE)}{@render note(onFile)}{/if}
-  {#each lost as c, i (i)}
+  {#each lost as c, i (lostKeys[i])}
     <div class="note of-file">
       <p class="note-w">Line {c.line} changed or left the diff after you wrote this. Send back still sends your comment, with the line as it was:</p>
       <p class="note-q">{c.quote}</p>

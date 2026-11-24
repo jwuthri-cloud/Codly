@@ -132,7 +132,7 @@
         <span class="r-title">Clean up after finished plans</span>
         <span class="desc">A day after a plan is merged, cancelled or failed, Codly removes its worktrees and <code>codly/…</code> branches that are clean and merged. Uncommitted or unmerged work always stays.</span>
       </div>
-      <input type="checkbox" class="switch" checked={p.clean_merged} onchange={(e) => save({ ...p, clean_merged: e.currentTarget.checked })} />
+      <input type="checkbox" class="switch" aria-label="Clean up after finished plans" checked={p.clean_merged} onchange={(e) => save({ ...p, clean_merged: e.currentTarget.checked })} />
     </label>
   {:else if policy.error}
     <LoadError what="the storage rules" error={policy.error} loading={policy.loading} onretry={() => policy.load()} />

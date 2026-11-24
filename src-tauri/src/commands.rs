@@ -173,6 +173,11 @@ pub async fn stop_agent(state: State<'_, AppState>, agent_id: String) -> R<()> {
 }
 
 #[tauri::command]
+pub async fn new_conversation(state: State<'_, AppState>, agent_id: String) -> R<()> {
+    state.core().await?.new_conversation(&agent_id).await.map_err(err)
+}
+
+#[tauri::command]
 pub async fn set_request_prefs(state: State<'_, AppState>, thread: String, prefs: RequestPrefs) -> R<RequestPrefs> {
     state.core().await?.set_request_prefs(&thread, prefs).await.map_err(err)
 }
@@ -252,6 +257,13 @@ pub async fn plan_diff(state: State<'_, AppState>, plan_id: String) -> R<String>
 #[tauri::command]
 pub async fn send_back_task(state: State<'_, AppState>, task_id: String, comments: String) -> R<Task> {
     state.core().await?.send_back_task(&task_id, &comments).await.map_err(err)
+}
+
+/// Send back, from a finished plan's diff: the review comments (on `files`) become one more
+/// task of the plan, for the agent that wrote those files.
+#[tauri::command]
+pub async fn send_back_plan(state: State<'_, AppState>, plan_id: String, comments: String, files: Vec<String>) -> R<Task> {
+    state.core().await?.send_back_plan(&plan_id, &comments, &files).await.map_err(err)
 }
 
 /// `into`: the branch the user confirmed after `merge_plan_warning`. `unchecked`: the user
@@ -433,6 +445,14 @@ pub async fn agent_git(state: State<'_, AppState>, agent_id: String) -> R<codly_
     state.core().await?.agent_git(&agent_id).await.map_err(err)
 }
 
+/// The Changes room's "All changes" of a 1:1 agent: its commits, its uncommitted edits and its
+/// new files as one diff from where its branch left yours. No file and no index changes (its
+/// own worktree is read as a checkpoint reads it; your project folder is only read).
+#[tauri::command]
+pub async fn agent_diff(state: State<'_, AppState>, agent_id: String) -> R<String> {
+    state.core().await?.agent_diff(&agent_id).await.map_err(err)
+}
+
 /// The Git tab's checkpoints: an agent's files as they were before each of its turns.
 #[tauri::command]
 pub async fn agent_checkpoints(state: State<'_, AppState>, agent_id: String) -> R<codly_core::orchestrator::checkpoints::AgentCheckpoints> {
@@ -516,6 +536,13 @@ pub async fn open_skill_folder(path: String, project: Option<String>) -> R<()> {
 #[tauri::command]
 pub async fn exact_search(state: State<'_, AppState>, query: String) -> R<Vec<codly_core::memory::panel::ExactHit>> {
     state.core().await?.exact_search(&query).await.map_err(err)
+}
+
+/// The messages of the open repo whose text holds `query`, newest first (the palette's "Said
+/// in conversations").
+#[tauri::command]
+pub async fn search_chats(state: State<'_, AppState>, query: String) -> R<Vec<ChatMessage>> {
+    state.core().await?.search_chats(&query).await.map_err(err)
 }
 
 /// Agents, and the messages between them by act (the Messages lens).

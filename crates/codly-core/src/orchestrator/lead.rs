@@ -16,6 +16,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
+use super::outside::Whose;
 use super::runs::{RunReq, new_session};
 use super::{Core, Inner, guard, lock, names, prompts};
 use crate::adapters::SessionMode;
@@ -38,6 +39,16 @@ pub(super) fn thread_of(lead: &Agent) -> &str {
 pub(super) enum Said<'a> {
     User(&'a str),
     Outside(&'a InboundMessage),
+    /// The note you wrote with a deny, sent for you to an agent whose CLI takes no note with
+    /// its answer (workspace.rs `answer_approval`): your words, but a refusal of what the agent
+    /// asked, not a request. It ends no hold of an agent that read a message from outside Codly
+    /// (outside.rs), and no wait of a Lead's plan (`deny_note_to_lead`).
+    DenyNote(&'a str),
+}
+
+/// What an agent reads for the note of a deny (`Said::DenyNote`).
+fn deny_note(note: &str) -> String {
+    format!("About the request I just denied: {note}")
 }
 
 impl Core {
@@ -504,6 +515,14 @@ impl Inner {
         self.send_to_lead(ws, thread, format!("\n{}", prompts::inbound_message(&msg.source, &msg.text, msg.auto_run)), None).await
     }
 
+    /// The note of a deny for the Lead of `thread` (`Said::DenyNote`). On record as Codly's
+    /// line, not as your message: a plan made after it is not taken for an answer to your own
+    /// words, so after a message from outside Codly it still waits for Run plan (`since_user`).
+    async fn deny_note_to_lead(self: &Arc<Self>, ws: &Workspace, thread: &str, note: &str) -> Result<()> {
+        self.chat(Some(&ws.id), thread, "codly", &format!("Your note with the deny: {note}"), None)?;
+        self.send_to_lead(ws, thread, format!("\n{}", deny_note(note)), None).await
+    }
+
     /// Close a request: stop and archive its Lead, cancel its unfinished plans, and move its
     /// messages and plans to an archive thread ("closed:<thread>:<ms>") so it leaves the tabs.
     /// Nothing is deleted: history, branches and worktrees stay. The same thread id can be
@@ -643,7 +662,8 @@ impl Inner {
         self.chat_agent_from(agent_id, Said::User(text)).await
     }
 
-    /// `chat_agent` for a turn that is yours or came from outside Codly (`Said`).
+    /// `chat_agent` for a turn that is yours, came from outside Codly, or carries the note of
+    /// your deny (`Said`).
     pub(super) async fn chat_agent_from(self: &Arc<Self>, agent_id: &str, said: Said<'_>) -> Result<()> {
         let agent = self.agent(agent_id)?;
         let ws_id = self.store.agent_workspace(agent_id)?;
@@ -656,15 +676,25 @@ impl Inner {
             return match said {
                 Said::User(text) => self.chat_lead_in(&ws, thread_of(&agent), text).await,
                 Said::Outside(msg) => self.inbound_to_lead(&ws, thread_of(&agent), msg).await,
+                Said::DenyNote(note) => self.deny_note_to_lead(&ws, thread_of(&agent), note).await,
             };
         }
         // In your terminal (takeover.rs): refused here, before the message is recorded.
         self.not_in_terminal(&agent)?;
         let thread = format!("agent:{agent_id}");
-        let outside = matches!(said, Said::Outside(_));
+        let whose = match said {
+            Said::User(_) => Whose::Yours,
+            Said::Outside(_) => Whose::Outside,
+            Said::DenyNote(_) => Whose::DenyNote,
+        };
         let prompt = match said {
             Said::User(text) => {
                 self.chat(ws_id.as_deref(), &thread, "user", text, None)?;
+                format!("[User] {text}")
+            }
+            Said::DenyNote(note) => {
+                let text = deny_note(note);
+                self.chat(ws_id.as_deref(), &thread, "user", &text, None)?;
                 format!("[User] {text}")
             }
             // Not your message: recorded under its source's name, read as quoted data. One
@@ -679,7 +709,7 @@ impl Inner {
         };
         let stopping = lock(&self.live).get(agent_id).map(|l| l.stopping);
         match stopping {
-            Some(false) => return self.send_chat_prompt(agent_id, outside, prompt),
+            Some(false) => return self.send_chat_prompt(agent_id, whose, prompt),
             // A run that is shutting down takes no more turns: this one starts (resumes) the next.
             Some(true) if !self.stop_and_wait(agent_id).await => {
                 bail!("{} is still shutting down; send your message again in a moment", agent.name)
@@ -697,7 +727,7 @@ impl Inner {
         if agent.member.is_some() {
             let started = self.spawn_member_chat(&ws, &agent).await;
             self.spawned_or_live(agent_id, started)?;
-            return self.send_chat_prompt(agent_id, outside, prompt);
+            return self.send_chat_prompt(agent_id, whose, prompt);
         }
         let (role, cwd, read_only, system_prompt) = match agent.role {
             Role::Solo => {
@@ -736,7 +766,7 @@ impl Inner {
             None => self.spawn_run(req(new_session(agent.provider))).await,
         };
         self.spawned_or_live(agent_id, started)?;
-        self.send_chat_prompt(agent_id, outside, prompt)
+        self.send_chat_prompt(agent_id, whose, prompt)
     }
 
     /// The outcome of starting an agent's run, for a caller that only wants it running: a

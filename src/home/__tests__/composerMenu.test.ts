@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fileMention, filterSlash, rankFiles, triggerAt } from '../composerMenu';
+import { fileMention, filesLine, filterSlash, MenuPointer, pointerMoved, rankFiles, triggerAt, unknownSlash, unknownSlashLine } from '../composerMenu';
 
 /** The menu at the end of `text` (the caret is where typing left it). */
 const at = (text: string) => triggerAt(text, text.length);
@@ -136,5 +136,167 @@ describe('filterSlash', () => {
       expect(found('')).toEqual(['new', 'settings', 'stop (Nothing is running)', 'diff (This request has no changes yet)']);
       expect(found('s')).toEqual(['settings', 'new', 'stop (Nothing is running)', 'diff (This request has no changes yet)']); // "changes" holds an s
     });
+  });
+
+  describe('an action that waits for the core’s answer', () => {
+    // `/` just opened the menu: the core has not said yet what it kept of Ada's turns, or if she can go to your terminal.
+    const asked = [
+      { name: 'new', label: 'New request' },
+      { name: 'stop', label: 'Stop Ada', off: 'Nothing is running' },
+      { name: 'compact', label: 'Compact Ada’s context' },
+      { name: 'undo', label: 'Undo Ada’s last turn…', off: 'Reading what Codly kept of its turns…', wait: true },
+      { name: 'terminal', label: 'Continue in your terminal…', off: 'Asking Codly if it can go…', wait: true },
+    ];
+    const found = (rows: typeof asked, q: string) => filterSlash(rows, q).map((c) => (c.off ? `${c.name} (off)` : c.name));
+
+    it('keeps its place: ↵ on its name runs nothing, and not the action that holds the same letters', () => {
+      expect(found(asked, 'u')).toEqual(['undo (off)', 'new', 'terminal (off)']); // "New request" and "your" hold a u
+      expect(found(asked, 'te')).toEqual(['terminal (off)', 'compact']); // "context" holds "te"
+      expect(found(asked, '')).toEqual(['new', 'compact', 'undo (off)', 'terminal (off)', 'stop (off)']);
+    });
+
+    it('goes last when the core’s answer is no, as any action that cannot run', () => {
+      const answered = asked.map((c) => (c.name === 'undo' ? { name: c.name, label: c.label, off: 'Codly kept no turn of Ada yet' } : c));
+      expect(found(answered, 'u')).toEqual(['new', 'terminal (off)', 'undo (off)']);
+    });
+  });
+});
+
+describe('a slash command Codly does not have', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'context', 'clear', 'closed', 'undo', 'terminal', 'mcp'];
+
+  it('is held back with the action you most likely meant', () => {
+    expect(unknownSlash('/comapct', names)).toEqual({ word: 'comapct', closest: 'compact' });
+    expect(unknownSlash('/modle please', names)).toEqual({ word: 'modle', closest: 'model' });
+    expect(unknownSlash('  /termnal', names)).toEqual({ word: 'termnal', closest: 'terminal' });
+    // Nothing near: no guess.
+    expect(unknownSlash('/review this', names)).toEqual({ word: 'review', closest: null });
+    expect(unknownSlashLine({ word: 'comapct', closest: 'compact' })).toBe('No such command: /comapct. Did you mean /compact? ↵ sends nothing until you change it.');
+    expect(unknownSlashLine({ word: 'review', closest: null })).toBe('No such command: /review. Type / alone to see the actions. ↵ sends nothing until you change it.');
+  });
+
+  it('a known action, a path or a slash later in the text is not one', () => {
+    expect(unknownSlash('/compact', names)).toBeNull();
+    expect(unknownSlash('/Model', names)).toBeNull();
+    expect(unknownSlash('/usr/bin/env is missing', names)).toBeNull();
+    expect(unknownSlash('look at /etc/hosts', names)).toBeNull();
+    expect(unknownSlash('/ is the root', names)).toBeNull();
+    expect(unknownSlash('', names)).toBeNull();
+  });
+});
+
+describe('a first word with a second slash', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'clear', 'undo', 'terminal', 'mcp'];
+
+  it('that starts with an action’s name is a mistyped command: it is not sent', () => {
+    expect(unknownSlash('/mcp/terminal', names)).toEqual({ word: 'mcp/terminal', closest: 'mcp' });
+    expect(unknownSlash('/mcp/terminal turn it on', names)).toEqual({ word: 'mcp/terminal', closest: 'mcp' });
+    expect(unknownSlashLine({ word: 'mcp/terminal', closest: 'mcp' })).toBe('No such command: /mcp/terminal. Did you mean /mcp? ↵ sends nothing until you change it.');
+  });
+
+  it('that starts with no action’s name is a path: a message, sent as written, alone or not', () => {
+    expect(unknownSlash('/usr/bin/env', names)).toBeNull();
+    expect(unknownSlash('/etc/hosts', names)).toBeNull();
+    expect(unknownSlash('/usr/bin/env is missing', names)).toBeNull();
+    expect(unknownSlash('/etc/hosts\nhas a typo', names)).toBeNull();
+  });
+});
+
+describe('an action’s name after a slash and spaces', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'clear', 'undo', 'terminal', 'mcp'];
+
+  it('is that action typed with a space too much: it is not sent, and the menu offers the action', () => {
+    expect(unknownSlash('/ model', names)).toEqual({ word: ' model', closest: 'model' });
+    expect(unknownSlash('/   Compact ', names)).toEqual({ word: '   Compact', closest: 'compact' });
+    expect(unknownSlashLine({ word: ' model', closest: 'model' })).toBe('No such command: / model. Did you mean /model? ↵ sends nothing until you change it.');
+    expect(at('/ model')).toEqual({ trigger: '/', start: 0, query: 'model', atStart: true, exact: true });
+  });
+
+  it('another word, or more words, after the spaces stay a message', () => {
+    expect(unknownSlash('/ is the root', names)).toBeNull();
+    expect(unknownSlash('/ review', names)).toBeNull();
+    expect(unknownSlash('/ model please', names)).toBeNull();
+    expect(at('/ model please')).toBeNull();
+  });
+});
+
+describe('the file menu with no file to show', () => {
+  it('says the list is still being read while it comes, or while the code index has none yet', () => {
+    expect(filesLine({ query: 'api', failed: false, reading: true, count: 0 })).toBe('The file list is still being read');
+    expect(filesLine({ query: 'api', failed: false, reading: false, count: 0 })).toBe('The file list is still being read');
+  });
+
+  it('says a failed read, and nothing once the list is there or nothing is typed', () => {
+    expect(filesLine({ query: 'api', failed: true, reading: false, count: 0 })).toBe('Couldn’t list the repo’s files');
+    expect(filesLine({ query: 'api', failed: false, reading: false, count: 12 })).toBeNull();
+    expect(filesLine({ query: '', failed: false, reading: true, count: 0 })).toBeNull();
+  });
+});
+
+describe('a first word with another sign after the name', () => {
+  const names = ['new', 'stop', 'model', 'compact', 'clear', 'undo', 'terminal', 'mcp'];
+
+  it('is a mistyped command: it is not sent', () => {
+    expect(unknownSlash('/help?', names)).toEqual({ word: 'help?', closest: null });
+    expect(unknownSlash('/undo.', names)).toEqual({ word: 'undo.', closest: 'undo' });
+    expect(unknownSlash('/model:opus', names)).toEqual({ word: 'model:opus', closest: 'model' });
+    expect(unknownSlash('/compact, then go on', names)).toEqual({ word: 'compact,', closest: 'compact' });
+    expect(unknownSlash('/clear!', names)).toEqual({ word: 'clear!', closest: 'clear' });
+  });
+
+  it('a sign alone after the slash is held when nothing follows it; a path stays prose', () => {
+    expect(unknownSlash('/?', names)).toEqual({ word: '?', closest: null });
+    expect(unknownSlash('/... what now', names)).toBeNull();
+    expect(unknownSlash('/src/app.ts: is it used?', names)).toBeNull();
+    expect(unknownSlash('/app.ts/main is broken', names)).toBeNull();
+  });
+});
+
+describe('the closest action of a typo', () => {
+  const names = ['new', 'issue', 'pr', 'stop', 'ask', 'plan', 'auto', 'direct', 'edits', 'model', 'compact', 'context', 'diff', 'undo', 'terminal', 'mcp', 'clear', 'closed', 'settings', 'shortcuts'];
+  const closest = (word: string) => unknownSlash(`/${word} please`, names)?.closest;
+
+  it('allows one typo up to four letters, two in a longer word, never more than half the word', () => {
+    expect(closest('x')).toBeNull();
+    expect(closest('exit')).toBeNull();
+    expect(closest('stpo')).toBe('stop');
+    expect(closest('modle')).toBe('model');
+    expect(closest('compat')).toBe('compact');
+    expect(closest('cmpat')).toBe('compact');
+  });
+});
+
+describe('the pointer over a menu that opens', () => {
+  it('a menu that opens under a resting pointer keeps its first row', () => {
+    const p = new MenuPointer();
+    p.opened();
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+  });
+
+  it('a list that scrolls under a resting pointer keeps the row of the keys', () => {
+    const p = new MenuPointer();
+    p.opened();
+    p.picks({ x: 10, y: 20 });
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+    // Opened again where the pointer was seen last time, after it moved meanwhile: still no pick.
+    p.picks({ x: 40, y: 90 });
+    p.opened();
+    expect(p.picks({ x: 10, y: 20 })).toBe(false);
+  });
+
+  it('a real move picks the row under it', () => {
+    const p = new MenuPointer();
+    p.opened();
+    p.picks({ x: 10, y: 20 });
+    expect(p.picks({ x: 10, y: 24 })).toBe(true);
+  });
+});
+
+describe('the row under the pointer', () => {
+  it('becomes the active one only when the pointer moved', () => {
+    expect(pointerMoved(null, { x: 10, y: 20 })).toBe(false);
+    expect(pointerMoved({ x: 10, y: 20 }, { x: 10, y: 20 })).toBe(false); // the list scrolled under it
+    expect(pointerMoved({ x: 10, y: 20 }, { x: 10, y: 24 })).toBe(true);
   });
 });

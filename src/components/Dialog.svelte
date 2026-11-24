@@ -4,7 +4,7 @@
   was (`modal`). `onkeydown` sees a key before the dialog does: stopPropagation() there keeps it.
 -->
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { onMount, type Snippet } from 'svelte';
   import { fade } from 'svelte/transition';
   import { ui } from '../lib/state/ui.svelte';
   import { modal } from '../lib/util/modal';
@@ -25,10 +25,17 @@
     children: Snippet;
   }
   let { label, onclose, width = 620, style, divider = true, onkeydown, actions, children }: Props = $props();
+
+  // The toast stack looks for its place again when a dialog comes and when it goes.
+  onMount(() => {
+    ui.layoutRev++;
+    return () => void ui.layoutRev++;
+  });
 </script>
 
 <!-- The exit runs through the Web Animations API, which the CSS reduced-motion override does not
-     reach, so it is told here. `global`: App mounts two of these inside a nested {#if}. -->
+     reach, so it is told here. `global`: App mounts two of these inside a nested {#if}. While it
+     goes Svelte makes it inert: then it is closing and no key is its own any more (lib/util/modal.ts `CLOSING`). -->
 <div class="scrim" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && onclose()} out:fade|global={{ duration: ui.reducedMotion ? 0 : 120 }}>
   <div class="sheet" role="dialog" aria-modal="true" aria-label={label} tabindex="-1" {style} style:width="min({width}px, calc(100vw - 32px))" use:modal={() => onclose()} onkeydowncapture={onkeydown}>
     <header class:divider>

@@ -23,6 +23,7 @@
   import Toasts from './components/Toasts.svelte';
   import TooltipHost from './components/TooltipHost.svelte';
   import ResumeWork from './components/ResumeWork.svelte';
+  import ConnectionBar from './shell/ConnectionBar.svelte';
   import DragGhost from './components/DragGhost.svelte';
   import { store, installVisibility } from './lib/state/store.svelte';
   import { ui } from './lib/state/ui.svelte';
@@ -31,6 +32,7 @@
   import { installNoticeOpener } from './lib/state/openNotice';
   import { installTooltips } from './lib/state/tooltip.svelte';
   import { resumeWork } from './lib/state/resumeWork.svelte';
+  import { reopenLastRequest } from './lib/state/actions';
 
   // Dev-only handle for debugging and browser tests (stripped from production builds).
   if (import.meta.env.DEV) (window as unknown as { __codly: unknown }).__codly = { store, ui };
@@ -50,10 +52,21 @@
   });
 
   // Work that was under way when Codly last closed waits for your answer (the core holds it):
-  // asked once the core is up, and again after a start that had failed.
+  // asked once the core is up, again after a start that had failed, and again when a browser
+  // reaches `codly serve` after it had lost it (a restart of the server holds the work again).
   const coreUp = $derived(store.ready && !store.error);
+  const coreSession = $derived(store.coreSession);
   $effect(() => {
-    if (coreUp) untrack(() => void resumeWork.check());
+    if (coreSession >= 0) untrack(() => void resumeWork.check());
+  });
+
+  // The office the core has open at the start shows the request you last had open in it. Once:
+  // from then on you choose the request.
+  let landed = false;
+  $effect(() => {
+    if (!coreUp || landed) return;
+    landed = true;
+    untrack(reopenLastRequest);
   });
 
   // Theme: always resolved onto [data-theme] ("system" follows the OS live).
@@ -109,6 +122,8 @@
 {#if workspaceTrust.asking}<TrustDialog />{/if}
 {#if intakeUi.dialog}<IntakeDialog />{/if}
 <ResumeWork />
+<!-- A browser on `codly serve` that lost it, or a core that failed while an office is open. -->
+<ConnectionBar />
 <IdeOverlay />
 <Toasts />
 <TooltipHost />

@@ -14,7 +14,7 @@
   }
 </script>
 
-<Dialog label="Keyboard shortcuts" width={800} onclose={close} onkeydown={key}>
+<Dialog label="Keyboard shortcuts" width={800} style="max-height: calc(100vh - 32px)" onclose={close} onkeydown={key}>
   <div class="grid">
     {#each SHORTCUTS as g (g.group)}
       <section>
@@ -30,7 +30,8 @@
 </Dialog>
 
 <style>
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; padding: 22px 26px 26px; }
+  /* In a small window the sheet stops at the window's edge and its rows scroll. */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; padding: 22px 26px 26px; min-height: 0; overflow-y: auto; }
   h3 { margin-bottom: 10px; }
   ul { display: flex; flex-direction: column; gap: 2px; }
   /* a label of two lines makes its row taller; the keys keep their size */

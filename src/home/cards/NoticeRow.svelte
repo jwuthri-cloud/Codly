@@ -1,7 +1,8 @@
 <!--
   What the agent's CLI told about the run (a hook's word, a goal, an MCP server that did not
   start), as one quiet line. One notice: a click opens the agent's history there. Several (all
-  of one turn, or the same words told again): the newest one, with how many there are; a click
+  of one turn, or the same words told again): the newest one, or the newest that says something
+  went wrong (an MCP server that did not start), with how many there are; a click
   lists them all with their times, and each opens the history at its event.
 -->
 <script lang="ts">
@@ -9,7 +10,7 @@
   import { clock } from '../../lib/util/format';
   import { clean } from '../../lib/util/sanitize';
   import Icon from '../../components/Icon.svelte';
-  import { moreOf, type Note } from '../notices';
+  import { headline, moreOf, type Note } from '../notices';
 
   interface Props {
     agentId: string;
@@ -20,13 +21,14 @@
   let open = $state(false);
   const newest = $derived(notes[notes.length - 1]);
   const more = $derived(moreOf(notes));
+  const shown = $derived(headline(notes));
 </script>
 
 {#if more == null}
   <button class="line" onclick={() => ui.selectAgent(agentId, newest.eventId)}><span class="text">{clean(newest.text)}</span><time class="num">{clock(newest.ts)}</time></button>
 {:else}
   <button class="line" onclick={() => (open = !open)} aria-expanded={open}>
-    <span class="text">{clean(newest.text)}</span><span class="more num">{more}</span><time class="num">{clock(newest.ts)}</time>
+    <span class="text">{clean(shown.text)}</span><span class="more num">{more}</span><time class="num">{clock(shown.ts)}</time>
     <span class="tri" class:open><Icon name="chevron-right" size={11} stroke={2} /></span>
   </button>
   {#if open}

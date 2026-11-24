@@ -1,0 +1,225 @@
+// The approval keys through the app's key map (installKeys): ⌘↵, ⌘⌫ and a digit answer only a
+// card that is in view and still. For a card out of view they answer nothing and bring the card
+// into view (`ui.revealApproval`). The page is a stand-in: a key pressed outside every text field.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Agent } from '../gen/Agent';
+import type { Approval } from '../gen/Approval';
+import type { Plan } from '../gen/Plan';
+import type { CardKey, KeyAct } from '../util/approvalCard';
+import { resolveApprovals, runPlan } from '../state/actions';
+import { installKeys, lastAnswerAt, noteAnswer, registerCardView, registerPlanKey, registerQuestionKeys } from '../state/keys';
+import { store } from '../state/store.svelte';
+import { ui } from '../state/ui.svelte';
+
+vi.mock('../state/actions', async (actual) => ({ ...(await actual<typeof import('../state/actions')>()), resolveApprovals: vi.fn(async () => true), runPlan: vi.fn(async () => true) }));
+
+let onKey: ((e: KeyboardEvent) => void) | null = null;
+let off: () => void = () => {};
+/** The clock of `performance.now`: each test starts long after the answer of the one before. */
+let clock = 0;
+
+/** A key pressed on the page's body. */
+function press(key: string, mod = false) {
+  const target = { tagName: 'BODY', isContentEditable: false, closest: () => null };
+  onKey!({ key, repeat: false, metaKey: mod, ctrlKey: false, altKey: false, shiftKey: false, defaultPrevented: false, target, preventDefault() {} } as unknown as KeyboardEvent);
+}
+
+const ada = { id: 'ada', name: 'Ada', role: 'solo', status: 'working', provider: 'claude', task_id: null, worktree: '/wt/ada' } as Agent;
+const waiting = (id: string, subject: Approval['subject']) =>
+  ({ id, agent_id: 'ada', run_id: 'r', task_id: null, call_id: null, subject, reason: null, choices: ['allow_once', 'deny'], risks: [], status: 'pending', decided_by: null, created_at: 1 }) as Approval;
+const command = waiting('ap1', { kind: 'command', command: 'npm test', cwd: null });
+const question = waiting('q1', { kind: 'question', questions: [{ question: 'Keep the fallback?' }] });
+
+/** The card of `id` shows, and says what a key does to it now. */
+let unregister: (() => void)[] = [];
+const card = (id: string, act: KeyAct) => unregister.push(registerCardView([id], () => act));
+
+beforeEach(() => {
+  clock += 100_000;
+  vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  vi.stubGlobal('window', { addEventListener: (_: string, fn: (e: KeyboardEvent) => void) => (onKey = fn), removeEventListener: () => (onKey = null) });
+  vi.stubGlobal('document', { querySelectorAll: () => [] });
+  off = installKeys();
+  ui.go('home');
+  ui.mode = 'blend';
+  store.agents = [ada];
+  ui.thread = 'agent:ada';
+  ui.revealApproval = null;
+});
+
+afterEach(() => {
+  off();
+  for (const u of unregister) u();
+  unregister = [];
+  store.approvals = [];
+  store.agents = [];
+  store.plans = [];
+  ui.thread = 'lead';
+  ui.revealApproval = null;
+  vi.mocked(resolveApprovals).mockClear();
+  vi.mocked(runPlan).mockClear();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe('a card that is not in view', () => {
+  it('⌘↵ answers nothing and brings the card into view', () => {
+    store.approvals = [command];
+    card('ap1', 'reveal');
+    press('Enter', true);
+    expect(resolveApprovals).not.toHaveBeenCalled();
+    expect(ui.revealApproval).toBe('ap1');
+  });
+
+  it('⌘⌫ answers nothing and brings the card into view', () => {
+    store.approvals = [command];
+    press('Backspace', true); // no card shows it at all: out of view too
+    expect(resolveApprovals).not.toHaveBeenCalled();
+    expect(ui.revealApproval).toBe('ap1');
+  });
+
+  it('a digit picks nothing and brings the question into view', () => {
+    store.approvals = [question];
+    const pick = vi.fn();
+    unregister.push(registerQuestionKeys('q1', { options: () => 2, pick, send: vi.fn(), act: () => 'reveal' }));
+    card('q1', 'reveal');
+    press('1');
+    expect(pick).not.toHaveBeenCalled();
+    expect(ui.revealApproval).toBe('q1');
+  });
+});
+
+describe('the same card in view', () => {
+  it('⌘↵ allows it once', () => {
+    store.approvals = [command];
+    card('ap1', 'answer');
+    press('Enter', true);
+    expect(resolveApprovals).toHaveBeenCalledWith(['ap1'], 'allow_once');
+    expect(ui.revealApproval).toBeNull();
+  });
+
+  it('⌘⌫ says no', () => {
+    store.approvals = [command];
+    card('ap1', 'answer');
+    press('Backspace', true);
+    expect(resolveApprovals).toHaveBeenCalledWith(['ap1'], 'deny');
+  });
+
+  it('a digit picks its option', () => {
+    store.approvals = [question];
+    const pick = vi.fn();
+    unregister.push(registerQuestionKeys('q1', { options: () => 2, pick, send: vi.fn(), act: () => 'answer' }));
+    card('q1', 'answer');
+    press('2');
+    expect(pick).toHaveBeenCalledWith(1);
+  });
+
+  it('while the card settles a key does nothing, and brings nothing into view', () => {
+    store.approvals = [command];
+    card('ap1', 'wait');
+    press('Enter', true);
+    expect(resolveApprovals).not.toHaveBeenCalled();
+    expect(ui.revealApproval).toBeNull();
+  });
+});
+
+describe('a question card: a digit and the send key ask the card whose keys they use', () => {
+  it('a digit on an option out of view picks nothing, though the card’s three parts are in view', () => {
+    store.approvals = [question];
+    const pick = vi.fn();
+    const asked: CardKey[] = [];
+    unregister.push(registerQuestionKeys('q1', { options: () => 6, pick, send: vi.fn(), act: (key) => (asked.push(key), typeof key === 'object' && key.digit === 4 ? 'reveal' : 'answer') }));
+    card('q1', 'answer');
+    press('5');
+    expect(pick).not.toHaveBeenCalled();
+    expect(asked).toEqual([{ digit: 4 }]);
+    expect(ui.revealApproval).toBe('q1');
+    press('1');
+    expect(pick).toHaveBeenCalledWith(0);
+  });
+
+  it('⌘↵ sends only when the card says its answers are in view', () => {
+    store.approvals = [question];
+    const send = vi.fn();
+    let act: KeyAct = 'reveal';
+    unregister.push(registerQuestionKeys('q1', { options: () => 2, pick: vi.fn(), send, act: (key) => (key === 'send' ? act : 'answer') }));
+    card('q1', 'answer');
+    press('Enter', true);
+    expect(send).not.toHaveBeenCalled();
+    act = 'answer';
+    press('Enter', true);
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('⌘↵ with nothing to send rests nothing: the card notes an answer only when one goes', () => {
+    store.approvals = [question];
+    // The card's send does nothing: no option picked, no words typed.
+    const send = vi.fn();
+    unregister.push(registerQuestionKeys('q1', { options: () => 2, pick: vi.fn(), send, act: () => 'answer' }));
+    card('q1', 'answer');
+    const before = lastAnswerAt();
+    press('Enter', true);
+    expect(send).toHaveBeenCalledOnce();
+    expect(lastAnswerAt()).toBe(before);
+  });
+});
+
+describe('the plan key (⌘↵ with no request waiting)', () => {
+  const awaiting = { id: 'p1', thread: 'lead', status: 'awaiting_approval', created_at: 1 } as Plan;
+  beforeEach(() => {
+    ui.thread = 'lead';
+    ui.request = 'lead';
+    store.plans = [awaiting];
+  });
+  afterEach(() => {
+    ui.selection = null;
+  });
+
+  it('runs the plan only while its "Run plan" button is in view and still; before, the press brings the button into view', () => {
+    const reveal = vi.fn();
+    let act: KeyAct = 'reveal';
+    unregister.push(registerPlanKey('p1', { act: () => act, reveal }));
+    press('Enter', true);
+    expect(runPlan).not.toHaveBeenCalled();
+    expect(reveal).toHaveBeenCalledOnce();
+    act = 'wait';
+    press('Enter', true);
+    expect(runPlan).not.toHaveBeenCalled();
+    act = 'answer';
+    press('Enter', true);
+    expect(runPlan).toHaveBeenCalledWith('p1');
+  });
+
+  it('with no "Run plan" button on screen it never runs', () => {
+    press('Enter', true);
+    expect(runPlan).not.toHaveBeenCalled();
+  });
+
+  it('the review’s B2: a second ⌘↵ 305 ms after a key approved the last request runs no plan; at 600 ms it does', () => {
+    // Ada's request waits in her sheet, next to the request's plan.
+    ui.selection = { kind: 'agent', id: 'ada' };
+    store.approvals = [command];
+    card('ap1', 'answer');
+    unregister.push(registerPlanKey('p1', { act: () => 'answer', reveal: vi.fn() }));
+    press('Enter', true);
+    expect(resolveApprovals).toHaveBeenCalledWith(['ap1'], 'allow_once');
+    store.approvals = [];
+    clock += 305;
+    press('Enter', true);
+    expect(runPlan).not.toHaveBeenCalled();
+    clock += 295;
+    press('Enter', true);
+    expect(runPlan).toHaveBeenCalledWith('p1');
+  });
+
+  it('an answer by a click rests the keys too', () => {
+    unregister.push(registerPlanKey('p1', { act: () => 'answer', reveal: vi.fn() }));
+    noteAnswer();
+    clock += 590;
+    press('Enter', true);
+    expect(runPlan).not.toHaveBeenCalled();
+    clock += 10;
+    press('Enter', true);
+    expect(runPlan).toHaveBeenCalledOnce();
+  });
+});

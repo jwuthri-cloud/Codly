@@ -119,6 +119,8 @@ impl Inner {
         {
             approval.task_id = ctx.task_id.clone(); // adapters do not know Codly's tasks
         }
+        // A turn that reached its run's own cost limit says what is next (breaker_run.rs).
+        self.run_limit_words(&ctx.run_id, ctx.role, ctx.task_id.is_some(), &mut r.kind);
         if r.kind.is_ephemeral() {
             r.workspace_id = ctx.ws.clone();
             let _ = self.bus.send(r);
@@ -142,6 +144,7 @@ impl Inner {
         }
         self.track_live(&ctx, &r.kind);
         self.breaker_observe(&ctx.agent_id, &r.kind);
+        self.run_limit_turn_end(&ctx.agent_id, &ctx.run_id, ctx.role, ctx.task_id.as_deref(), &r.kind);
         match &r.kind {
             EventKind::TurnCompleted { .. } => self.control_turn_done(&ctx.agent_id),
             EventKind::ToolStarted { name, .. } => self.control_tool_started(&ctx.agent_id, name),
@@ -199,7 +202,7 @@ impl Inner {
                 continue;
             }
             let key = format!("{}:{}", abs.display(), meta.len());
-            if !lock(&self.artifacts_seen).insert(key) {
+            if !lock(&self.artifacts_seen).entry(r.agent_id.clone()).or_default().insert(key) {
                 continue;
             }
             let display = cwd
@@ -978,19 +981,35 @@ impl Inner {
 
     /// Agent name / task key for readable entities, cached (neither changes in practice).
     /// Task keys repeat across plans ("t1"), so plan tasks get a plan suffix: `t1@b835`.
+    /// The cache holds only rows still at work: a let-go agent, a done or cancelled task and a
+    /// task of a closed plan are read each time, so a run's last events after the end do not
+    /// put back what the end took out of memory.
     fn label(&self, id: &str, agent: bool) -> Option<String> {
         if let Some(l) = lock(&self.labels).get(id) {
             return Some(l.clone());
         }
-        let l = if agent {
-            self.store.agent(id).ok().flatten().map(|a| a.name)
+        let (l, at_work) = if agent {
+            self.store.agent(id).ok().flatten().map(|a| (a.name, !a.archived))
         } else {
-            self.store.task(id).ok().flatten().map(|t| match t.plan_id {
-                Some(p) => format!("{}@{}", t.key, &p[p.len().saturating_sub(4)..]),
-                None => t.key,
+            self.store.task(id).ok().flatten().map(|t| {
+                let over = matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled);
+                match t.plan_id {
+                    Some(p) => {
+                        let plan_closed = self
+                            .store
+                            .plan(&p)
+                            .ok()
+                            .flatten()
+                            .is_none_or(|plan| matches!(plan.status, PlanStatus::Done | PlanStatus::Failed | PlanStatus::Cancelled));
+                        (format!("{}@{}", t.key, &p[p.len().saturating_sub(4)..]), !over && !plan_closed)
+                    }
+                    None => (t.key, !over),
+                }
             })
         }?;
-        lock(&self.labels).insert(id.to_string(), l.clone());
+        if at_work {
+            lock(&self.labels).insert(id.to_string(), l.clone());
+        }
         Some(l)
     }
 }

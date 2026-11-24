@@ -17,6 +17,7 @@
   import Orbit from '../components/Orbit.svelte';
   import Portrait from '../components/Portrait.svelte';
   import Say from '../components/Say.svelte';
+  import RetryButton from '../components/RetryButton.svelte';
   import { agentTitle } from '../lib/util/team';
 
   interface Props {
@@ -62,7 +63,11 @@
       ui.openRequest(agent.thread ?? 'lead');
       ui.sheetFollows(agent.id);
     } else if (e.altKey) ui.selectAgent(selected ? null : agent.id);
-    else ui.openThread(store.threadOf(agent.id));
+    else {
+      // You open a 1:1 to write to the agent: the caret is in its composer.
+      ui.openThread(store.threadOf(agent.id));
+      ui.composerFocus++;
+    }
   }
   function openSub(e: MouseEvent) {
     e.stopPropagation();
@@ -89,7 +94,7 @@
     {#if subs.length}
       <span class="subs">
         {#each subs.slice(0, 3) as s (s.callId)}
-          <button class="sub" aria-label="Subagent: {s.description}" data-tip="Subagent · {s.description}" onclick={openSub}></button>
+          <button class="sub" aria-label="Helper: {s.description}" data-tip="Helper · {s.description}" onclick={openSub}></button>
         {/each}
       </span>
     {/if}
@@ -101,6 +106,7 @@
       <span class="who"><span class="name">{agent.name}</span>{#if agentTitle(agent)}<span class="prov truncate">{agentTitle(agent)}</span>{/if}</span>
       <span class="say truncate">{#if n}<Say parts={n.parts} />{/if}</span>
     </span>
+    <RetryButton task={agent.task_id ? store.taskMap.get(agent.task_id) : null} />
   {/if}
 </div>
 
@@ -112,6 +118,8 @@
   .pill.lead.selected .ln { color: var(--ink-1); }
   .pill.amber { background: color-mix(in srgb, var(--amber) 16%, var(--glass)); box-shadow: var(--glass-edge), inset 0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent); }
   .pill.amber .ln { color: var(--amber-ink); }
+  /* Above the pill's own hit area: it retries, it does not open the agent. */
+  .pill > :global(.retry) { position: relative; z-index: 1; }
   .hit { position: absolute; inset: 0; border-radius: inherit; z-index: 0; }
   .hit:focus-visible { outline-offset: 1px; border-radius: var(--r-full); }
   .face { position: relative; z-index: 1; pointer-events: none; }

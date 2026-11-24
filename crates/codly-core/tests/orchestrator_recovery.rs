@@ -25,8 +25,29 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -154,7 +175,16 @@ impl Spawner for Fake {
                 tools: vec![],
             });
             tokio::spawn(async move {
-                while let Some(cmd) = rx.recv().await {
+                // What came while a turn waited for the test: read when the turn is over, in order.
+                let mut waiting = std::collections::VecDeque::new();
+                loop {
+                    let cmd = match waiting.pop_front() {
+                        Some(cmd) => cmd,
+                        None => match rx.recv().await {
+                            Some(cmd) => cmd,
+                            None => break,
+                        },
+                    };
                     let text = match cmd {
                         AgentCmd::Prompt(text) => text,
                         AgentCmd::Shutdown => return send(EventKind::Exited { code: Some(0) }),
@@ -197,7 +227,17 @@ impl Spawner for Fake {
                             done(TurnStatus::Completed, None);
                         }
                         End::Hold(go) => {
-                            go.notified().await;
+                            loop {
+                                tokio::select! {
+                                    _ = go.notified() => break,
+                                    cmd = rx.recv() => match cmd {
+                                        // Told to stop while the turn waits for the test: it exits at once.
+                                        Some(AgentCmd::Shutdown) => return send(EventKind::Exited { code: Some(0) }),
+                                        Some(cmd) => waiting.push_back(cmd),
+                                        None => return,
+                                    },
+                                }
+                            }
                             work();
                             done(TurnStatus::Completed, None);
                         }
@@ -271,7 +311,7 @@ async fn start(dir: &Path, starts: Starts, script: Script, plan: Value) -> (Arc<
 
 async fn start_core(dir: &Path, fake: Fake) -> Arc<Core> {
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
-    let opts = StartOptions { spawner: Some(Arc::new(fake)), env: Some(std::env::vars().collect()), clis: Some(vec![claude()]), index: false };
+    let opts = StartOptions { spawner: Some(Arc::new(fake)), env: Some(core_env()), clis: Some(vec![claude()]), index: false };
     let core = Core::start_with(cfg, opts).await.unwrap();
     core.set_worker_retry_waits(vec![SHORT; 2]);
     core
@@ -396,7 +436,7 @@ async fn a_start_that_fails_is_tried_again_after_a_wait_and_the_task_finishes() 
     );
     assert!(!statuses(&core, &task.id).await.contains(&TaskStatus::Blocked), "a start that fails for a moment never blocks the task");
     assert_eq!(seen.lock().unwrap().runs.len(), 1, "one worker run did the work");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -424,7 +464,7 @@ async fn the_third_failure_in_a_row_blocks_the_task_and_your_retry_starts_it_at_
     core.move_task(&task.id, TaskStatus::Ready).await.unwrap();
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -437,7 +477,7 @@ async fn a_start_that_only_you_can_fix_blocks_at_once() {
     assert_eq!(blocked.status, TaskStatus::Blocked);
     assert_eq!(blocked.status_reason.as_deref(), Some("blocked: could not start the worker: Claude Code is not signed in"));
     assert_eq!(seen.lock().unwrap().tries, 1, "waiting does not sign you in: nothing was tried again");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Three crashes in a row block the task. After your Retry the count starts again: the next
@@ -468,7 +508,7 @@ async fn crashes_are_counted_in_a_row_not_over_the_life_of_the_task() {
         assert!(matches!(&seen.runs[1].1, SessionMode::Resume { .. }), "{:?}", seen.runs);
         assert!(seen.prompts[1].contains("the worker exited unexpectedly (exit 1)"), "{}", seen.prompts[1]);
     }
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Two crashes, a turn that completes with no report (Codly asks for it, and the worker has
@@ -501,7 +541,7 @@ async fn a_turn_the_worker_completes_ends_the_row_of_crashes() {
     let back = seen.lock().unwrap().prompts[5].clone();
     assert!(back.contains("What Codly sees in your worktree now:\n- Branch: codly/"), "{back}");
     assert!(back.contains("\n- Codly's last check: t1: fix round 1/2: `test -f t1.txt` failed (exit 1)\n"), "{back}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -523,7 +563,7 @@ async fn a_session_out_of_context_starts_again_as_a_new_session() {
         // The new session gets the whole brief, and is told that the work so far is in the worktree.
         assert!(seen.prompts[1].contains("Write the greeting") && seen.prompts[1].contains("ran out of context"), "{}", seen.prompts[1]);
     }
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -565,7 +605,7 @@ async fn a_stuck_plan_says_so_once_and_finishes_with_what_is_merged() {
     // Only a running plan can finish early.
     let e = core.finish_plan(&plan.id).await.unwrap_err().to_string();
     assert!(e.contains("only a running plan"), "{e}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -584,7 +624,7 @@ async fn a_task_is_cancelled_together_with_the_tasks_that_wait_for_it() {
     assert_eq!(cancelled.iter().map(|t| (t.key.as_str(), t.status)).collect::<Vec<_>>(), [("t2", TaskStatus::Cancelled), ("t3", TaskStatus::Cancelled)]);
     // Nothing is left to wait for: the plan finishes with the task that was merged.
     wait_for("the plan to finish", async || (core.snapshot().await.unwrap().plans[0].status == PlanStatus::Done).then_some(())).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// What a quit leaves behind for one ad-hoc task that was in its checks: its worker (session
@@ -735,7 +775,7 @@ async fn after_a_restart_a_task_in_its_checks_is_checked_again_without_a_worker_
                      - Codly has not checked your work yet.\n";
         assert!(seen.prompts[0].contains(state), "{}", seen.prompts[0]);
     }
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Another git process holds the index lock of the worktree for a moment when the worker's
@@ -755,7 +795,7 @@ async fn a_lock_file_held_for_a_moment_does_not_block_the_task() {
     let again: Vec<&String> = gate.iter().filter(|d| d.contains("Codly tries it once more")).collect();
     assert_eq!(again.len(), 1, "{gate:?}");
     assert!(again[0].contains("index.lock': File exists"), "{}", again[0]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// What the shell asks before it lets the Mac sleep or Codly quit: an agent in a turn is work
@@ -777,7 +817,7 @@ async fn the_work_under_way_is_counted_while_an_agent_is_in_a_turn() {
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     wait_for("the work to end", async || (!core.activity().unwrap().busy()).then_some(())).await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker that asks before it runs a command stands still until you answer: its turn, its
@@ -796,7 +836,7 @@ async fn a_worker_that_waits_for_your_answer_is_not_work_under_way() {
     // Your answer: the turn goes on, and the task is finished.
     core.resolve_approval(&ask.id, ApprovalDecision { choice: ApprovalChoice::AllowOnce, message: None, answers: None }).await.unwrap();
     plan_task_done(&core, "t1").await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A worker you paused waits for your Resume. The step it finishes first is still work; after
@@ -823,7 +863,7 @@ async fn a_worker_you_paused_is_not_work_under_way() {
 
     core.resume_agent(&worker).await.unwrap();
     plan_task_done(&core, "t1").await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Past a budget no task starts until you raise it or reset the counters: a plan whose next
@@ -849,7 +889,7 @@ async fn a_plan_that_waits_for_the_budget_is_not_work_under_way() {
     // Reset: the count starts over, and the plan goes on.
     core.reset_breaker().await.unwrap();
     plan_task_done(&core, "t2").await;
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -872,5 +912,5 @@ async fn a_plan_you_merged_with_git_is_noticed_when_your_branch_moves() {
     let merged = wait_for("the merge to be noticed", async || core.snapshot().await.unwrap().plans[0].merged_sha.clone()).await;
     assert_eq!(merged, head);
     assert!(decisions(&core, "merge").await.iter().any(|d| d.contains("merged outside Codly")));
-    core.shutdown().await;
+    shut_down(&core).await;
 }

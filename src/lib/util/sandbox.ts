@@ -13,10 +13,24 @@ import { clean, truncate } from './sanitize';
 const SANDBOX_NETWORK = 'SandboxNetworkAccess';
 
 /**
- * How long an allow lasts, as far as it is sure, on the request's card and in Settings → Safety.
- * That the host stays allowed for the session is read from the CLI, not recorded: "can", not "does".
+ * How long an allow lasts, on the request's card and in Settings → Safety. As recorded on
+ * Claude Code 2.1.311 (docs/research/cli-claude-stream-json-2.1.311-part3.md, section 6), each
+ * case once (n=1):
+ * - after a plain allow the same process did not ask again for the host 2 s later
+ *   (`r5-sandbox-network-once`) and 304 s later (`r5-sandbox-network-once-later`);
+ * - a new process that resumed the session asked again (`r5-sandbox-network-once-restart-a`, `-b`).
+ * A wait of more than 5 minutes inside one process is not recorded.
  */
-export const HOST_ALLOW_LASTS = 'Approve once lets this command connect. Claude Code can keep the host allowed until this agent’s session ends, so it may not ask again for it.';
+export const HOST_ALLOW_LASTS = 'Approve once lets this command connect. Claude Code then does not ask again for this host while this agent keeps running. When the agent starts again (Codly restarts, or a change that restarts the agent) it asks again.';
+
+/**
+ * What a deny does, on the request's card. As recorded on Claude Code 2.1.311
+ * (docs/research/cli-claude-stream-json-2.1.311-part4.md, section 6): a deny is for that one
+ * command, and the next command to the same host asks again, 4 times of 4 in two recordings
+ * (`r6-sandbox-network-deny-1`, `r6-sandbox-network-deny-2`). Only an allow is remembered, and no
+ * rule is written.
+ */
+export const HOST_DENY_LASTS = 'If you deny, this command gets a network error. Claude Code asks again the next time a command wants this host.';
 
 /**
  * The host that a sandboxed command wants to reach, when `s` is the sandbox's own request

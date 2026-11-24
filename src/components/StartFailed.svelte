@@ -3,14 +3,16 @@
   a bug report. When the database is the reason (`start_problem` in src-tauri/src/boot.rs) it
   also offers to start from the last backup the app offers (its message says why when it offers
   none), to show the data folder, and to start with no data. The app moves the database aside
-  for these; it is never deleted.
+  for these; it is never deleted. A browser on `codly serve` that cannot reach it says so
+  instead, and tries again by itself (lib/state/connection.ts): "Try again" opens the stream
+  again at once.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { revealInFinder } from '../lib/state/actions';
   import { startRecovery as recovery } from '../lib/state/startRecovery.svelte';
   import { store } from '../lib/state/store.svelte';
-  import { fullDate } from '../lib/util/format';
+  import { clockSec, fullDate } from '../lib/util/format';
   import { bytes } from '../lib/util/storage';
   import DiagnosticsReport from './DiagnosticsReport.svelte';
   import EmptyState from './EmptyState.svelte';
@@ -18,11 +20,13 @@
   onMount(() => void recovery.load());
 
   const problem = $derived(recovery.problem);
+  const link = $derived(store.link);
+  const title = $derived(link.kind === 'down' ? 'Codly is not reachable.' : link.kind === 'signedOut' ? 'Signed out of Codly.' : 'Codly couldn’t start.');
   /** "Start with no data" asks once more before it runs. */
   let confirmEmpty = $state(false);
 </script>
 
-<EmptyState title="Codly couldn’t start." body={problem?.message ?? store.error ?? undefined}>
+<EmptyState {title} body={problem?.message ?? store.error ?? undefined}>
   {#if problem}
     {@const p = problem}
     {@const last = p.backups[0]}
@@ -49,7 +53,10 @@
       {/if}
     {/if}
   {:else}
-    <button class="btn primary" onclick={() => store.retry()}>Try again</button>
+    {#if link.kind === 'down'}
+      <div class="notes"><p>Trying again by itself. Last try {clockSec(link.lastTry)}.</p></div>
+    {/if}
+    <button class="btn primary" disabled={link.kind === 'down' && link.trying} onclick={() => store.retry()}>Try again</button>
   {/if}
   <!-- Something to attach to a bug report: it is built without the core that just failed. -->
   <DiagnosticsReport />

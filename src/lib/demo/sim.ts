@@ -42,6 +42,13 @@ export class Cancelled extends Error {
   }
 }
 
+/** Thrown in a turn's body: the turn ends failed, with `reason` as the CLI's adapter says it (`Actor.turn`). */
+export class TurnFailed extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
+
 export const HOME = '/Users/demo';
 export const REPO = `${HOME}/Code/acme-web`;
 export const WORKTREES = `${HOME}/.codly/worktrees/acme-web`;
@@ -53,6 +60,10 @@ export function uid(prefix = ''): string {
   const r = Math.random().toString(16).slice(2, 10) + (++uidSeq).toString(16).padStart(4, '0');
   return `${prefix}${t.slice(0, 8)}-${t.slice(8, 12)}-7${r.slice(0, 3)}-${r.slice(3, 7)}-${r.slice(7)}${Math.random().toString(16).slice(2, 6)}`;
 }
+
+/** The core's notice for a Claude run that started without the folder's own configuration (orchestrator/runs.rs, with `provider.label()`). */
+export const WITHOUT_FOLDER_CONFIG =
+  "Started without this folder's Claude Code configuration (its settings, hooks and MCP servers): you have not trusted these files. See Settings → Safety.";
 
 export const sha = () => Array.from({ length: 40 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 
@@ -78,8 +89,8 @@ export class Sim {
   private nextId = 1;
   log: EventRow[] = [];
   private queue: EventRow[] = [];
-  /** The last `mcp_server` event of each agent's server: the log is cut, and a snapshot still says where a server stands. */
-  private servers = new Map<string, EventRow>();
+  /** The last `mcp_server` event of each agent's server, and each agent's last list of background work: the log is cut, and a snapshot still says where they stand. */
+  private session = new Map<string, EventRow>();
   sink: ((b: UiBatch) => void) | null = null;
 
   clis: CliInfo[] = [];
@@ -104,8 +115,18 @@ export class Sim {
   cancelled = new Set<string>();
   /** task key → paths written so far (diffs grow as agents edit). */
   touched = new Map<string, Set<string>>();
+  /** The agents that changed a file so far (an agent that changed nothing has no checkpoint). */
+  edited = new Set<string>();
   /** Runs after each tool call of an agent's turn, while the turn goes on (the story sets it). */
   afterStep: ((act: Actor) => Promise<void>) | null = null;
+  /** Runs when an agent's turn was stopped, after its `turn_completed` (the story sets it). */
+  turnStopped: ((act: Actor) => void) | null = null;
+  /** Runs when an agent's process starts again, for a turn (the story sets it: the CLI's session line). */
+  runStarts: ((act: Actor) => void) | null = null;
+  /** Whether a Claude run that starts now leaves out the folder's own CLI configuration: you opened the repo without it (mock.ts sets it). */
+  withoutFolderConfig: () => boolean = () => false;
+  /** The offices of this machine that the demo plays, this one included (`sameMachineAs`). */
+  machine: Sim[] = [this];
   private waiters = new Set<Waiter>();
 
   constructor(opts: SimOptions, settings: Settings) {
@@ -127,6 +148,8 @@ export class Sim {
     share('clis');
     share('recent');
     share('signIns');
+    first.machine.push(this);
+    this.machine = first.machine;
   }
 
   now() {
@@ -148,7 +171,8 @@ export class Sim {
     if (!ephemeral) {
       this.log.push(row);
       if (this.log.length > 8000) this.log = this.log.slice(-6000);
-      if (kind.type === 'mcp_server') this.servers.set(`${row.agent_id}:${kind.name}`, row);
+      if (kind.type === 'mcp_server') this.session.set(`${row.agent_id}:mcp:${kind.name}`, row);
+      if (kind.type === 'background_tasks') this.session.set(`${row.agent_id}:background`, row);
     }
     this.queue.push(row);
     this.check();
@@ -166,9 +190,20 @@ export class Sim {
     return this.nextId - 1;
   }
 
+  /**
+   * The agent's process starts: a run of its own, as in the core. Like Claude Code at the start
+   * of a session, it says which session it is, then where each of its MCP servers stands (here:
+   * as it last stood).
+   */
+  startRun(agentId: string) {
+    const a = this.patchAgent(agentId, { run_id: uid('r-') });
+    this.runStarts?.(this.actor(agentId));
+    for (const [key, row] of [...this.session]) if (key.startsWith(`${agentId}:mcp:`)) this.emit(row.kind, { agent: a.id, task: a.task_id, run: a.run_id });
+  }
+
   /** Where an agent's MCP server stands, as it last reported (null: it reported none by that name). */
   mcpStatus(agentId: string, name: string): McpServerStatus | null {
-    const k = this.servers.get(`${agentId}:${name}`)?.kind;
+    const k = this.session.get(`${agentId}:mcp:${name}`)?.kind;
     return k?.type === 'mcp_server' ? k.status : null;
   }
 
@@ -193,8 +228,8 @@ export class Sim {
       triples: this.triples,
       artifacts: [...this.artifacts.values()],
       events,
-      // Like the core: where each MCP server stands, when that is older than `events`. (The demo's agents leave no command running.)
-      session_events: [...this.servers.values()].filter((e) => e.id < from).sort((a, b) => a.id - b.id),
+      // Like the core: where each MCP server stands and each agent's last list of background work, when that is older than `events`.
+      session_events: [...this.session.values()].filter((e) => e.id < from).sort((a, b) => a.id - b.id),
     };
   }
 
@@ -220,8 +255,13 @@ export class Sim {
   // ───────────── entities ─────────────
 
   putAgent(a: Agent) {
+    const before = this.agents.get(a.id)?.run_id ?? null;
     this.agents.set(a.id, a);
     this.emit({ type: 'agent_changed', agent: a }, { agent: a.id, task: a.task_id, run: a.run_id });
+    // Like the core (orchestrator/runs.rs), once per run: a Claude run that leaves out the folder's own configuration says so.
+    if (a.run_id && a.run_id !== before && a.provider === 'claude' && this.withoutFolderConfig()) {
+      this.emit({ type: 'notice', text: WITHOUT_FOLDER_CONFIG }, { agent: a.id, task: a.task_id, run: a.run_id });
+    }
     return a;
   }
 
@@ -349,10 +389,31 @@ export class Sim {
     return null;
   }
 
+  /** By name: how many agents of that name this office made so far (`agentId`). */
+  private named = new Map<string, number>();
+
+  /**
+   * A new agent's id: the same on every page load for the same office, name and count of that
+   * name, as a real office keeps its agents. What the office keeps of an agent by its id (its
+   * look, in the browser's storage) is then its own again after a reload.
+   */
+  private agentId(name: string): string {
+    const n = (this.named.get(name) ?? 0) + 1;
+    this.named.set(name, n);
+    const key = `${this.workspace?.id ?? ''}\u0000${name}\u0000${n}`;
+    // Two FNV-1a hashes of the key (the second of it read backwards): 64 bits, as 16 hex letters.
+    const fnv = (s: string) => {
+      let h = 2166136261;
+      for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+      return (h >>> 0).toString(16).padStart(8, '0');
+    };
+    return `a-${fnv(key)}${fnv([...key].reverse().join(''))}`;
+  }
+
   newAgent(o: { name: string; provider: Provider; model: string | null; role: Role; color: number; billing: Billing; taskId?: string | null; worktree?: string | null; status?: AgentStatus; thread?: string }): Agent {
     const now = this.now();
     return {
-      id: uid('a-'),
+      id: this.agentId(o.name),
       thread: o.role === 'lead' ? (o.thread ?? 'lead') : null,
       account: this.signIns.pick(o.provider, o.role, this.settings, this.clis, [...this.agents.values()], now),
       name: o.name,
@@ -439,6 +500,8 @@ export class Actor {
   inTurn = false;
 
   async turn(input: string | null, body: () => Promise<void>) {
+    // A turn needs a process: an agent that has none (you stopped it, or it never started) starts one.
+    if (!this.a.run_id) this.sim.startRun(this.id);
     const started = this.sim.now();
     this.inTurn = true;
     this.emit({ type: 'turn_started', input });
@@ -450,8 +513,15 @@ export class Actor {
       this.emit({ type: 'turn_completed', status: 'completed', result_text: null, duration_ms: this.sim.now() - started });
     } catch (e) {
       this.inTurn = false;
+      if (e instanceof TurnFailed) {
+        // As the adapters say a failed turn: why, then the end with the same reason. The agent waits for you again.
+        this.emit({ type: 'error', message: e.reason, fatal: false });
+        this.emit({ type: 'turn_completed', status: 'failed', result_text: e.reason, duration_ms: this.sim.now() - started });
+        return;
+      }
       if (e instanceof Cancelled) {
         this.emit({ type: 'turn_completed', status: 'interrupted', result_text: null, duration_ms: this.sim.now() - started });
+        this.sim.turnStopped?.(this);
       }
       throw e;
     }
@@ -525,6 +595,7 @@ export class Actor {
     } else await this.sleep(s.ms * (0.8 + Math.random() * 0.4));
     if (s.files?.length) {
       this.emit({ type: 'files_changed', call_id: callId, paths: s.files, source: 'tool_input' });
+      this.sim.edited.add(this.id);
       if (s.taskKey) {
         const set = this.sim.touched.get(s.taskKey) ?? new Set<string>();
         for (const f of s.files) set.add(f);
@@ -572,4 +643,38 @@ export class Actor {
     for (const w of this.sim.signIns.bump(a.account ?? a.provider, this.sim.now()))
       this.emit({ type: 'rate_limit', window: w.window, used_fraction: w.used_fraction, resets_at: w.resets_at, status: w.status });
   }
+}
+
+/** One turn of an agent that changed files (`editedTurns`). */
+export type EditedTurn = {
+  /** The id of its `turn_started` row: a later turn has a higher one. */
+  id: number;
+  /** The task the agent was on (its id), null: its own work. */
+  task: string | null;
+  ts: number;
+  /** As the core names a turn's checkpoint (orchestrator/checkpoints.rs `turn_label`): the prompt on one line, without its tag, cut at 120. */
+  label: string;
+  /** The files it changed, in the order it first changed them. */
+  files: string[];
+};
+
+/**
+ * The turns of agent `agentId` that changed files, oldest first, as the log tells them: the
+ * demo's checkpoints follow them (demo/checkpoints.ts). The log is cut: its oldest turns go.
+ */
+export function editedTurns(sim: Pick<Sim, 'log'>, agentId: string): EditedTurn[] {
+  const turns: EditedTurn[] = [];
+  let at: EditedTurn | undefined;
+  for (const row of sim.log) {
+    if (row.agent_id !== agentId) continue;
+    const k = row.kind;
+    if (k.type === 'turn_started') {
+      const line = (k.input ?? '').trim().replace(/^\[(User|Codly|Lead)\]/, '').split(/\s+/).filter(Boolean).join(' ');
+      at = { id: row.id, task: row.task_id, ts: row.ts, label: !line ? 'a turn' : line.length > 120 ? `${line.slice(0, 119)}…` : line, files: [] };
+      turns.push(at);
+    } else if (k.type === 'files_changed' && at) {
+      for (const p of k.paths) if (!at.files.includes(p)) at.files.push(p);
+    }
+  }
+  return turns.filter((t) => t.files.length);
 }

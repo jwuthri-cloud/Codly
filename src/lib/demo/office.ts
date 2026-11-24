@@ -2,7 +2,7 @@
 // wallet and Build/Buy, the developer panel's cheats (same rules as
 // crates/codly-core/src/orchestrator/careers.rs and wallet.rs), and its neighbourhood (same
 // rules as orchestrator/lots.rs, priced by office/price.ts): the demo office is the Studio, on a
-// large plot, next to its two other offices and plots for sale. Its export is snapshot.rs's.
+// large plot, next to its other office and plots for sale. Its export is snapshot.rs's.
 
 import type { Agent } from '../gen/Agent';
 import type { ModelOffer } from '../gen/ModelOffer';
@@ -31,10 +31,10 @@ let spent = 0;
 let cheated = false;
 
 // The neighbourhood: 4 × 3 plots, row by row (orchestrator/lots.rs's seed). `HERE` stands for
-// the demo's first repo (acme/web), whatever its id. The demo's other offices are on their
-// plots under their own ids, also while one of them is the open one.
+// the demo's first repo (acme/web), whatever its id. The demo's other office is on its plot
+// under its own id, also while it is the open one.
 const HERE = '@here';
-/** Which of the demo's other offices a Sim plays, once you opened that office (`demoPlays`). */
+/** The other office a Sim plays, once you opened that office (`demoPlays`). */
 const plays = new WeakMap<Sim, string>();
 /** The plot key of the office a Sim plays. */
 const keyOf = (sim: Sim) => plays.get(sim) ?? HERE;
@@ -42,7 +42,7 @@ const keyOf = (sim: Sim) => plays.get(sim) ?? HERE;
 const playing = (key: string, sims: Sim[]) => sims.find((s) => keyOf(s) === key) ?? null;
 const crewOf = (sim: Sim) => [...sim.agents.values()].filter((a) => a.role !== 'lead' && !a.archived);
 
-/** `sim` plays one of the demo's other offices from now on: its plot, its counts and its crew are that Sim's. */
+/** `sim` plays the demo's other office from now on: its plot, its counts and its crew are that Sim's. */
 export function demoPlays(sim: Sim, office: string) {
   plays.set(sim, office);
 }
@@ -62,8 +62,7 @@ function hood(): Row[] {
     lots.set(rows![i].id, allGift(fit(lot, w, d)!));
   };
   home(3, HERE, TEMPLATES.studio);
-  home(0, OFFICES[0].id, TEMPLATES.garage);
-  home(2, OFFICES[1].id, TEMPLATES.garage);
+  home(2, BILLING.id, TEMPLATES.garage);
   return rows;
 }
 
@@ -113,7 +112,7 @@ export const demoSaveLot = (sim: Sim, next: Lot): LotSaved =>
     Object.assign(lot, structuredClone(next));
   });
 
-/** `sim` is the open office; `rest` are the demo's other offices that you opened (each has a Sim of its own). */
+/** `sim` is the open office; `rest` is the demo's other office once you opened it (it has a Sim of its own). */
 export function demoLots(sim: Sim, rest: Sim[] = []): LotSlot[] {
   return hood().map((r) => {
     const lot = r.owned ? lotOn(r) : null;
@@ -241,12 +240,12 @@ export function demoCloseOffice(sim: Sim, workspaceId: string, rest: Sim[] = [])
     if (open) throw new Error(`${name} still has unfinished work (${open.key} "${open.title}"): finish or cancel it first`);
     const busy = [...office.agents.values()].find((a) => office.actor(a.id).inTurn);
     if (busy) throw new Error(`${busy.name} is in the middle of a turn in ${name}: wait for it, or stop it first`);
-    // Its agents stop, and the repo is no longer in the recent list.
-    for (const a of [...office.agents.values()]) if (a.status !== 'offline') office.patchAgent(a.id, { status: 'offline', activity: null, activity_label: null });
+    // Its agents stop, their runs end with their processes, and the repo is no longer in the recent list.
+    for (const a of [...office.agents.values()]) if (a.status !== 'offline' || a.run_id) office.patchAgent(a.id, { status: 'offline', activity: null, activity_label: null, run_id: null });
     office.recent = office.recent.filter((r) => r.repo_path !== office.workspace?.repo_path);
     office.workspace = null;
-  } else if (other?.working) {
-    // The demo's other offices, not opened yet: one has agents at work, the other is quiet.
+  } else if (other) {
+    // The demo's other office, not opened yet: its agents are at work.
     throw new Error(`${other.crew[0]} is in the middle of a turn in ${other.name}: wait for it, or stop it first`);
   }
   if (other) OFFICES.splice(OFFICES.indexOf(other), 1);
@@ -317,8 +316,8 @@ export function demoLetGo(sim: Sim, id: string): Agent {
  */
 export const BILLING = { id: 'demo-office-billing', name: 'billing-api', repo_path: '~/code/billing-api', crew: ['Otto', 'Pia', 'Rex'], working: 2, needs_you: 1 };
 
-// The demo's other offices, with who works there. docs-site is never opened: it stays numbers.
-const OFFICES = [{ id: 'demo-office-docs', name: 'docs-site', repo_path: '~/code/docs-site', crew: ['Mira', 'Juno'], working: 0, needs_you: 0 }, BILLING];
+// The demo's other offices, with who works there, until you close one: billing-api is the only one.
+const OFFICES = [BILLING];
 
 /** Agents moved to another office, and where to: still yours, so their XP stays in the wallet. */
 const transferred: { agent: Agent; to: string }[] = [];
@@ -326,14 +325,11 @@ const transferred: { agent: Agent; to: string }[] = [];
 /** The agents you moved to an office before you opened it: they are in its crew when it opens. */
 export const demoMovedTo = (office: string): Agent[] => transferred.filter((t) => t.to === office).map((t) => t.agent);
 
-/** Who is at home in those offices, so the map has someone walking down the street: Juno goes
- *  home for 4 of every 9 minutes (walking out as the demo opens), Pia for 10 of every 14 (home
- *  already, back in 7 min). Counted from when the demo first lists them, on the wall clock (as
- *  the core's `away_until`). */
-const STAYS = [
-  { office: 'demo-office-docs', id: 'demo-juno', name: 'Juno', color: 5, every: 9, away: 4, offset: 0 },
-  { office: 'demo-office-billing', id: 'demo-pia', name: 'Pia', color: 1, every: 14, away: 10, offset: 3 },
-];
+/** Who is at home in an office you did not open yet, so the map has someone walking down the
+ *  street: Pia goes home for 10 of every 14 minutes (home already as the demo opens, back in
+ *  7 min). Counted from when the demo first lists her, on the wall clock (as the core's
+ *  `away_until`). */
+const STAYS = [{ office: BILLING.id, id: 'demo-pia', name: 'Pia', color: 1, every: 14, away: 10, offset: 3 }];
 let opened = 0;
 
 function demoAway(office: string, now: number): AwayAgent[] {
@@ -365,7 +361,7 @@ function counted(office: Sim): Office[] {
 
 /**
  * Your other offices (the open one, `sim`, is left out). One you opened in the demo (`rest`)
- * is counted as it stands now; the others are the numbers the demo gives them.
+ * is counted as it stands now; one you did not open yet is the numbers the demo gives it.
  */
 export function demoOffices(sim: Sim, rest: Sim[] = []): Office[] {
   const numbers = OFFICES.filter((o) => o.id !== sim.workspace?.id && !rest.some((s) => s.workspace?.id === o.id));
@@ -519,11 +515,14 @@ export function demoDigest(sim: Sim, since: number): Digest {
 }
 
 /** The wallet (crates/codly-core/src/orchestrator/wallet.rs): the demo's agents' XP (and those
- *  it let go or moved), plus grants, less what was paid for plots, building and furniture. */
+ *  it let go or moved), plus grants, less what was paid for plots, building and furniture. One
+ *  wallet for every office, as in the core: the agents of each office the demo plays count,
+ *  whichever of them is open. */
 export function demoWallet(sim: Sim): Wallet {
-  // One you moved to an office that is open now is in its crew: counted once.
-  const moved = transferred.map((t) => t.agent).filter((a) => !sim.agents.has(a.id));
-  const earned = [...sim.agents.values(), ...seeded(sim), ...moved].reduce((n, a) => n + a.career.xp, 0);
+  const crews = sim.machine.flatMap((office) => [...office.agents.values()]);
+  // One you moved to an office that the demo plays now is in its crew: counted once.
+  const moved = transferred.map((t) => t.agent).filter((a) => !crews.some((x) => x.id === a.id));
+  const earned = [...crews, ...seeded(sim), ...moved].reduce((n, a) => n + a.career.xp, 0);
   return { earned, granted, spent, balance: earned + granted - spent, cheated };
 }
 

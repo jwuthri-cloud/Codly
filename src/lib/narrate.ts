@@ -15,6 +15,8 @@ import type { AgentLive, RateWindow, Seg } from './state/store.svelte';
 import type { DiffStat } from './state/diffstats.svelte';
 import { timer } from './util/format';
 import { isPlanCall, PLAN_ASK, planStep, showsPlan } from './util/planRequest';
+import { firstQuestion } from './util/outcome';
+import { permissionsAsked } from './util/permissionsAsked';
 import { sandboxHost } from './util/sandbox';
 import { basename, oneLine, truncate } from './util/sanitize';
 
@@ -60,7 +62,7 @@ const fileOf = (s: Seg) => {
 };
 const cmdOf = (s: Seg) => oneLine(s.target.command ?? s.label ?? s.name, 44);
 
-const CODLY_TOOL: Record<string, string> = {
+export const CODLY_TOOL: Record<string, string> = {
   codly_memory_write: 'Saving a memory for the team',
   codly_memory_search: 'Searching the team’s memory',
   codly_post_note: 'Posting a note for the team',
@@ -147,11 +149,11 @@ function approvalParts(ap: Approval, provider: Provider): Part[] {
       const raw = s.questions as unknown;
       const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? ((raw as { questions?: unknown[] }).questions ?? []) : [];
       const q = list[0] as { question?: string; header?: string } | undefined;
-      const text = q?.question ?? q?.header ?? 'a question';
+      const text = q?.question ?? q?.header ?? firstQuestion(ap) ?? 'a question';
       return [txt(`Asking you: ${oneLine(text, 64)}`)];
     }
-    default:
-      return [txt('Waiting for you: permissions')];
+    case 'permissions':
+      return [txt(`Waiting for you: ${oneLine(permissionsAsked(s.detail).wants, 56)}`)];
   }
 }
 
@@ -164,6 +166,43 @@ function testCounts(s: Seg): string | null {
 }
 
 const plainOf = (parts: Part[]) => parts.map((p) => (p.code ? `\`${p.t}\`` : p.t)).join('');
+
+/**
+ * Whether a turn of the agent runs: by the store's record of its turn when it has one (as
+ * queue.ts `busy` reads it), else by the core's word for its state. The state alone is not
+ * enough: a helper's tool calls set its agent "working" and "thinking" between turns too (the
+ * Claude adapter sets the state for every tool call, a helper's too). The store's `now` reads it
+ * the same way. Between turns the agent rests, whatever its helpers still do.
+ */
+export const turnRuns = (a: Pick<Agent, 'status'>, live: Pick<AgentLive, 'turn'> | null | undefined): boolean =>
+  live?.turn
+    ? live.turn.endedAt == null
+    : a.status === 'working' || a.status === 'thinking' || a.status === 'starting' || a.status === 'waiting_approval';
+
+/** The newest open tool call of `live` that `mine` accepts. */
+function newestOpen(live: AgentLive | null | undefined, mine: (s: Seg) => boolean): Seg | null {
+  let open: Seg | null = null;
+  if (live) for (const idx of Object.values(live.open)) {
+    const s = live.segments[idx];
+    if (s && s.end == null && mine(s) && (!open || s.start >= open.start)) open = s;
+  }
+  return open;
+}
+
+/**
+ * What the agent left at work in the background while it rests: " · 1 helper at work in the
+ * background", " · 2 helpers and 1 command at work in the background"; '' when nothing is.
+ * Between turns every helper that runs is in the background. A command counts while the list
+ * of the agent's live run names it running.
+ */
+export function backgroundAtWork(agent: Pick<Agent, 'run_id'>, live: AgentLive | null | undefined): string {
+  if (!live) return '';
+  const helpers = live.subagents.filter((s) => s.status === 'running').length;
+  const commands = live.background.filter((w) => agent.run_id != null && w.runId === agent.run_id && w.status === 'running' && w.kind === 'command').length;
+  const count = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+  const what = [helpers && count(helpers, 'helper'), commands && count(commands, 'command')].filter(Boolean).join(' and ');
+  return what ? ` · ${what} at work in the background` : '';
+}
 
 export function narrateFrom(i: NarrationInput): Narration {
   const { agent: a, now, live } = i;
@@ -201,12 +240,9 @@ export function narrateFrom(i: NarrationInput): Narration {
     return out([txt(why ? `Blocked: ${oneLine(why, 64)}` : 'Blocked')], why?.startsWith('waiting for you:') ? 'wait' : 'blocked');
   }
 
-  // 3 · An open tool call (the most recent one wins).
-  let open: Seg | null = null;
-  if (live) for (const idx of Object.values(live.open)) {
-    const s = live.segments[idx];
-    if (s && s.end == null && (!open || s.start >= open.start)) open = s;
-  }
+  // 3 · An open tool call of its own (the most recent one wins). A call of one of its helpers
+  // (`parent`) is the helper's work, never the agent's own: after its turn ended the agent rests.
+  const open = newestOpen(live, (s) => s.parent == null);
   if (open) {
     const slow = open.activity === 'execute' || open.activity === 'test';
     return out(activityParts(open, a.provider), 'live', open.start, slow);
@@ -216,27 +252,45 @@ export function narrateFrom(i: NarrationInput): Narration {
   if (i.streaming === 'text') return out([txt('Writing a reply')], 'live');
   if (i.streaming === 'reasoning') return out([txt('Thinking')], 'live');
 
-  const busy = a.status === 'working' || a.status === 'thinking' || a.status === 'starting';
-  if (busy) {
-    if (a.status === 'starting') return out([txt('Starting up')], 'live');
+  // 4b · Its turn runs and only its helpers' calls are open: it waits for its helper.
+  const runs = turnRuns(a, live);
+  const helping = runs ? newestOpen(live, (s) => s.parent != null) : null;
+  if (helping) {
+    const h = live?.subagents.find((s) => s.callId === helping.parent);
+    return out(h?.description ? [txt('Waiting for its helper '), txt(`“${oneLine(h.description, 48)}”`)] : [txt('Waiting for its helper')], 'live', helping.start);
+  }
+
+  if (a.status === 'starting') return out([txt('Starting up')], 'live');
+  if (runs && (a.status === 'working' || a.status === 'thinking')) {
     const last = live?.segments[live.segments.length - 1];
     const counts = last && last.activity === 'test' && last.end != null ? testCounts(last) : null;
     return out([txt(counts ? `Thinking · last run: ${counts}` : 'Thinking')], 'live');
   }
 
+  // From here it rests: what its helpers and commands still do in the background ends the line.
+  const away = backgroundAtWork(a, live);
+  const rest = (said: string, tone: Tone) => out([txt(`${said}${away}`)], tone);
+
   // 5 · Its turn ended; Codly carries the task through the gate.
   const t = i.task;
   if (t && (t.status === 'verifying' || t.status === 'merging' || t.status === 'reviewing' || t.status === 'changes_requested')) {
     const step = t.status === 'verifying' ? 'Codly is verifying' : t.status === 'merging' ? 'in the merge queue' : t.status === 'reviewing' ? 'in review' : 'changes requested';
-    return out([txt(`Handed off · ${step}`)], t.status === 'changes_requested' ? 'wait' : 'done');
+    return rest(`Handed off · ${step}`, t.status === 'changes_requested' ? 'wait' : 'done');
+  }
+
+  // 5b · Its last turn failed: it waits for you, and is not ready as if nothing happened.
+  const turn = live?.turn;
+  if (turn?.status === 'failed' && turn.endedAt != null) {
+    const err = [...(live?.errors ?? [])].reverse().find((e) => e.ts >= turn.startedAt);
+    return rest(err ? `Its last turn failed: ${oneLine(err.message, 60)}` : 'Its last turn failed', 'blocked');
   }
 
   // 6 · Done (with the diff it produced).
   if (i.lastDone) {
     const d = i.lastDone;
-    if (d.stat) return out([txt(`Done — +${d.stat.added} −${d.stat.removed} in ${d.stat.files} ${d.stat.files === 1 ? 'file' : 'files'}`)], 'done');
-    return out([txt(d.files ? `Done — ${d.files} ${d.files === 1 ? 'file' : 'files'} changed` : `Done — ${d.task.key} finished`)], 'done');
+    if (d.stat) return rest(`Done — +${d.stat.added} −${d.stat.removed} in ${d.stat.files} ${d.stat.files === 1 ? 'file' : 'files'}`, 'done');
+    return rest(d.files ? `Done — ${d.files} ${d.files === 1 ? 'file' : 'files'} changed` : `Done — ${d.task.key} finished`, 'done');
   }
 
-  return out([txt(a.role === 'solo' ? 'Ready to chat' : a.role === 'lead' ? 'Listening' : 'Idle')], 'idle');
+  return rest(a.role === 'solo' ? 'Ready to chat' : a.role === 'lead' ? 'Listening' : 'Idle', 'idle');
 }

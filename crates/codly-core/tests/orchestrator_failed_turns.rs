@@ -28,8 +28,29 @@ use codly_core::orchestrator::watchdog::WatchdogSettings;
 use codly_core::orchestrator::{Core, CoreConfig, SpawnFuture, Spawner, StartOptions};
 use tokio::sync::{Notify, mpsc};
 
+/// `Core::shutdown`, and every run exited when it was told to stop. A fake agent that ignores
+/// the stop fails here, in its own test: else the shutdown's last resort kills every process
+/// group this test process started, the check commands of the tests beside it too.
+async fn shut_down(core: &Core) {
+    core.shutdown().await;
+    assert_eq!(core.runs_given_up(), 0, "a run outlived the shutdown: its fake did not exit when told to stop");
+}
+
+/// Your own git settings (`~/.gitconfig`, the system file) reach no git of this test: neither
+/// the core's (`core_env`) nor the test's own, which commits as a fixed author.
+const NO_GIT_CONFIG: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
+/// Who the test's own commits are by, whatever the repository says.
+const TEST_AUTHOR: [(&str, &str); 4] =
+    [("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "test@example.com"), ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "test@example.com")];
+
+/// The environment the core runs with: this process's, without your git settings.
+fn core_env() -> std::collections::HashMap<String, String> {
+    std::env::vars().chain(NO_GIT_CONFIG.map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
+    let out = Command::new("git").envs(NO_GIT_CONFIG).envs(TEST_AUTHOR).arg("-C").arg(dir).args(args).env("LC_ALL", "C").output().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -158,10 +179,18 @@ impl Spawner for Fake {
                             };
                             match end {
                                 End::Turn(status, result) => done(status, result),
-                                End::Held(go, status, result) => {
-                                    go.notified().await;
-                                    done(status, result)
-                                }
+                                End::Held(go, status, result) => loop {
+                                    tokio::select! {
+                                        _ = go.notified() => break done(status, result),
+                                        cmd = rx.recv() => match cmd {
+                                            Some(AgentCmd::Prompt(prompt)) => waiting.push_back(prompt),
+                                            // Told to stop while the turn waits for the test: it exits at once.
+                                            Some(AgentCmd::Shutdown) => return exit(0),
+                                            Some(AgentCmd::Interrupt | AgentCmd::Approval { .. } | AgentCmd::Session { .. }) => {}
+                                            None => return,
+                                        },
+                                    }
+                                },
                                 End::Crash => {
                                     done(TurnStatus::Failed, Some("the CLI exited before the turn finished"));
                                     send(EventKind::Error { message: "the CLI exited unexpectedly".into(), fatal: true });
@@ -221,7 +250,7 @@ async fn office(dir: &Path, breaker: Option<BreakerConfig>, script: Script) -> (
     let cfg = CoreConfig { data_dir: dir.join("data"), app_exe: PathBuf::from("/usr/bin/true") };
     let opts = StartOptions {
         spawner: Some(Arc::new(Fake { seen: seen.clone(), script })),
-        env: Some(std::env::vars().collect()),
+        env: Some(core_env()),
         clis: Some(vec![claude()]),
         index: false,
     };
@@ -313,7 +342,7 @@ async fn a_turn_that_ends_short_is_continued(status: TurnStatus, result: Option<
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the half-done work was never committed or checked");
     let retries = decisions(&core, "retry").await;
     assert!(retries.iter().any(|s| s.contains(said) && s.contains("Codly asks it to continue (try 1 of 2)")), "{retries:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -353,7 +382,7 @@ async fn a_turn_that_keeps_failing_blocks_the_task_until_you_retry() {
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(committed(&core, &task).await, vec!["hello\n"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -381,7 +410,7 @@ async fn a_crash_mid_turn_restarts_the_worker_and_is_not_gated() {
         assert!(seen.prompts[1].contains("exited unexpectedly") && !seen.prompts[1].contains("Your last turn on task"), "{}", seen.prompts[1]);
         assert!(seen.prompts[2].contains(NO_REPORT), "{}", seen.prompts[2]);
     }
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// What agents said themselves in their own threads, oldest first.
@@ -420,7 +449,7 @@ async fn a_failed_turn_does_not_repeat_the_error_it_reported_as_the_agents_words
     assert_eq!(blocked.status, TaskStatus::Blocked, "{:?}", blocked.status_reason);
     assert_eq!(seen.lock().unwrap().prompts.len(), 3, "the brief and two retries");
     assert_eq!(agents_said(&core).await, ["the CLI exited before the turn finished", "API Error: 529 Overloaded"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// A retry wait no test reaches: only something else can ask the worker to continue.
@@ -469,7 +498,7 @@ async fn your_resume_after_a_failed_turn_continues_the_work_and_does_not_check_i
         assert!(seen.prompts[2].contains(NO_REPORT), "{}", seen.prompts[2]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the resume did not check the half-done work");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -494,7 +523,7 @@ async fn a_turn_that_answers_you_after_a_failed_turn_is_not_checked_as_the_work(
         assert!(seen.prompts[3].contains(NO_REPORT), "{}", seen.prompts[3]);
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the answer to the note did not send the half-done work to the gate");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Two errors in a row trip the breaker; nothing else does.
@@ -568,7 +597,7 @@ async fn a_worker_the_breaker_constrains_waits_for_your_resume() {
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(committed(&core, &task).await, vec!["hello\n"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -613,7 +642,7 @@ async fn a_worker_you_hold_that_the_breaker_constrains_gets_no_note_to_answer() 
         assert!(back.contains("The user resumed you. The breaker stopped your work: it hit 2 errors in a row"), "{back}");
     }
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the half-done work was never committed or checked");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -635,7 +664,7 @@ async fn a_breaker_stop_is_not_reported_as_yours() {
     assert!(!core.snapshot().await.unwrap().agents.iter().any(|a| a.id == worker && a.task_id.is_some()), "the worker is free");
     let said = chats(&core).await;
     assert!(said.iter().any(|t| t.starts_with("The circuit breaker stopped") && t.contains("blocked until you retry it")), "{said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 // ───────────── the watchdog: a turn that gives no output, a worker that sits idle ─────────────
@@ -699,7 +728,7 @@ async fn a_silent_turn_is_flagged_then_interrupted_and_continued() {
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turn was not checked before it was finished");
     let said = decisions(&core, "watchdog").await;
     assert!(said.iter().any(|s| s.contains("Codly interrupted its turn and asks it to continue")), "{said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -733,7 +762,7 @@ async fn a_turn_that_stays_silent_is_stopped_and_its_task_goes_back_in_line() {
     assert_eq!(committed(&core, &task).await, vec!["hello\n"], "the work of the silent turns was never committed or checked");
     let said = decisions(&core, "watchdog").await;
     assert!(said.iter().any(|s| s.contains("did not recover. Codly stopped it and restarts its task")), "{said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The agent row of `id`.
@@ -773,7 +802,7 @@ async fn a_silent_turn_that_does_not_stop_loses_its_process_and_its_task_goes_ba
     assert!(said.iter().any(|s| s.contains("did not recover. Codly stopped it and restarts its task")), "{said:?}");
     let retries = decisions(&core, "retry").await;
     assert!(!retries.iter().any(|s| s.contains("exited unexpectedly")), "Codly ended the process itself: {retries:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -796,7 +825,7 @@ async fn a_worker_that_hangs_on_every_start_blocks_its_task_at_the_third() {
     assert!(!retries.iter().any(|s| s.contains("exited unexpectedly")), "{retries:?}");
     let worker = task.assignee.clone().expect("the task keeps its worker");
     assert!(agent_now(&core, &worker).await.task_id.is_none(), "the worker is free");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// Your interrupt holds when the CLI does not stop: the adapter ends the process, and nothing
@@ -838,7 +867,7 @@ async fn a_turn_you_interrupt_that_does_not_stop_blocks_its_task_and_is_not_rest
     let task = task_ended(&core, &task.id).await;
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(committed(&core, &task).await, vec!["hello\n"]);
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The breaker's pause holds too: a worker that does not stop is not restarted to go on.
@@ -869,7 +898,7 @@ async fn a_worker_the_breaker_pauses_that_does_not_stop_is_not_restarted() {
     assert_eq!(seen.lock().unwrap().runs, 1, "the worker was not started again");
     let said = chats(&core).await;
     assert!(said.iter().any(|t| t.contains("was interrupted by the circuit breaker") && t.contains("blocked until you retry it")), "{said:?}");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 /// The Lead's turns answer you or a worker: its silent turn is interrupted, the thread says
@@ -903,7 +932,7 @@ async fn a_silent_lead_is_interrupted_and_not_asked_to_continue() {
         let seen = seen.lock().unwrap();
         assert_eq!((seen.runs, seen.prompts.len()), (1, 1), "Codly writes no prompt for the Lead: {:?}", seen.prompts);
     }
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -947,7 +976,7 @@ async fn a_turn_that_waits_for_your_answer_is_not_silent() {
     assert_eq!(waiting.status, TaskStatus::Running);
     assert!(!waiting.status_reason.as_deref().is_some_and(|r| r.starts_with("stalled")), "{:?}", waiting.status_reason);
     assert_eq!(seen.lock().unwrap().prompts.len(), 1, "it was not interrupted and asked to continue");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -979,5 +1008,5 @@ async fn a_worker_you_interrupt_is_flagged_as_idle_until_you_say_what_is_next() 
     assert_eq!(task.status, TaskStatus::Done, "{:?}", task.status_reason);
     assert_eq!(committed(&core, &task).await, vec!["hello\n"]);
     assert_eq!(decisions(&core, "watchdog").await.len(), 1, "flagged once");
-    core.shutdown().await;
+    shut_down(&core).await;
 }
