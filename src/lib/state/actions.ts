@@ -189,6 +189,16 @@ export function resendChat(id: string) {
   sendChat(o.thread, o.text);
 }
 
+/** The message "Continue" sends after a turn you stopped. */
+export const CONTINUE = 'Continue from where you stopped.';
+
+/** Continue: a turn you stopped goes on, as your next message in the agent's own conversation
+ *  (a Lead's request, or its 1:1 chat). */
+export function continueAgent(agentId: string): boolean {
+  const a = store.agentMap.get(agentId);
+  return !!a && sendChat(a.role === 'lead' ? (a.thread ?? 'lead') : `agent:${a.id}`, CONTINUE);
+}
+
 /** Send now: stop the agent's current turn, so that it reads your oldest queued message at once. */
 export async function sendQueuedNow(agentId: string) {
   const undo = noteStop(agentId);
@@ -242,6 +252,12 @@ export async function closeRequest(thread: string): Promise<boolean> {
   return true;
 }
 
+/** By plan: the toast that says why its last merge was refused for its checks. */
+const refusedToast = new Map<string, number>();
+
+/** The core's words as a sentence of a toast: its first letter a capital. */
+const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 /** Merge a done plan into your checked-out branch. When that is not the branch the plan started
  *  from, nothing is merged yet: a toast says what the merge would bring and offers to go on
  *  (`into` is then the branch you confirmed). A merge that stops says why and how to go on: a
@@ -279,7 +295,12 @@ export async function mergePlan(planId: string, into: string | null = null, unch
     if (state?.failed_checks.length || state?.checks_not_run) {
       const goOn = { label: 'Merge anyway', run: () => void mergePlan(planId, into, true), gone: offerGone('checks') };
       // Checks that failed can go to an agent, like a conflict: the button is on the plan's card.
-      const body = state.failed_checks.length ? `${msg(e)}. An agent can fix it: see the plan’s card.` : msg(e);
+      const why = sentence(msg(e));
+      const body = state.failed_checks.length ? `${why}. An agent can fix it: see the plan’s card.` : why;
+      // One refusal on screen per plan: a press again puts its answer in the place of the last one.
+      const last = refusedToast.get(planId);
+      if (last !== undefined && last !== id) toasts.dismiss(last);
+      refusedToast.set(planId, id);
       toastsUpdate(id, { kind: 'error', title: `Not merged into ${state.target}`, body, action: goOn, duration: 0 });
       return;
     }
@@ -379,13 +400,14 @@ export async function resolveApprovals(approvalIds: string[], choice: ApprovalCh
 const RULES = 'approval-rules';
 
 /** "Always allow in this repo": save the rule a card offers. The core answers the requests it covers.
- *  Its toast opens Settings where you remove the rule. */
+ *  Its toast opens Settings where you remove the rule: two sentences and a link, so it stays as
+ *  long as an 'attention' toast does. */
 export async function saveApprovalRule(approvalId: string, kind: ApprovalRuleKind) {
   const rule = await attempt('save the rule', () => api.addApprovalRule(approvalId, kind));
   if (!rule) return;
   const what = rule.kind === 'prefix' ? `commands that start with ${rule.command}` : rule.command;
   toast({
-    kind: 'success',
+    kind: 'attention',
     title: 'Codly will not ask about this again',
     body: `In this repo: ${what}. Remove the rule in ${safetyPlace(RULES)}.`,
     action: { label: 'Open Settings', run: () => openSettings(safetyLink(RULES)) },

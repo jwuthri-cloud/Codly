@@ -53,6 +53,7 @@
   import WorkRow from './cards/WorkRow.svelte';
   import AwayRow from './AwayRow.svelte';
   import { Presence, awayKeys, awaySummary, withAway, type AwayNames, type Spot } from './away';
+  import { planEnd } from './planEnd';
   import { loadSeen, seenAt, stampSeen } from './lastSeen';
   import Composer from './Composer.svelte';
   import LoadEarlier from './LoadEarlier.svelte';
@@ -93,7 +94,7 @@
       const t = store.taskMap.get(id);
       return t ? { key: t.key, assignee: t.assignee } : null;
     }),
-    planMerged: (id) => untrack(() => !!store.mergeOf(id)),
+    plan: (id) => untrack(() => planEnd(id)),
   };
   const away = $derived.by(() => {
     const w = awayOf.get(awayKey(office, thread));

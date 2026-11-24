@@ -1,9 +1,10 @@
 // The browser demo puts what you said with an answer on record the way the core does: an
 // `approval_said` row just before the answer, and only when the answer carried words.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { saidWith } from '../demo/said';
+import { denyNoteMessage, saidWith } from '../demo/said';
 import { REPO, Sim } from '../demo/sim';
 import { Story, type StoryOptions } from '../demo/story';
+import leadRs from '../../../crates/codly-core/src/orchestrator/lead.rs?raw';
 import type { Approval } from '../gen/Approval';
 import type { EventKind } from '../gen/EventKind';
 import { DEFAULT_SETTINGS } from '../state/store.svelte';
@@ -77,12 +78,30 @@ describe('what you said with an answer, in the demo', () => {
     expect(saidWith(question, 'claude', 'allow_once', null, { 'Which sizes?': ['Small', 'Fast'], 'Colour?': 'Red' })).toEqual({ note: null, answer: 'Small, Fast; Red', plan_changed: false });
     expect(saidWith(question, 'claude', 'deny', null, null)).toBeNull();
     expect(saidWith(command, 'claude', 'deny', 'use pnpm', null)).toEqual({ note: 'use pnpm', answer: null, plan_changed: false });
-    expect(saidWith(command, 'codex', 'deny', 'use pnpm', null)).toBeNull();
+    // Another CLI gets the note of a deny as a message: on record too. The note of a stop never reaches it.
+    expect(saidWith(command, 'codex', 'deny', 'use pnpm', null)).toEqual({ note: 'use pnpm', answer: null, plan_changed: false });
+    expect(saidWith(command, 'codex', 'cancel', 'use pnpm', null)).toBeNull();
+    expect(saidWith(command, 'claude', 'cancel', 'use pnpm', null)).toEqual({ note: 'use pnpm', answer: null, plan_changed: false });
     expect(saidWith(command, 'claude', 'allow_once', null, null)).toBeNull();
     expect(saidWith(command, 'claude', 'deny', '   ', null)).toBeNull();
     // The agent's own text back is no change, and only Claude Code's plan request takes one.
     expect(saidWith(plan, 'claude', 'allow_once', null, { plan: '1. Add the line' })).toBeNull();
     expect(saidWith(plan, 'codex', 'allow_once', null, { plan: '1. Add two lines' })).toBeNull();
     expect(saidWith(command, 'claude', 'deny', 'x'.repeat(3000), null)?.note).toHaveLength(2000);
+  });
+
+  it('the note of a deny to an agent of another CLI becomes a message, as the core sends it', () => {
+    const noa = { id: 'noa', provider: 'codex', role: 'worker', thread: null } as const;
+    expect(denyNoteMessage(noa, 'deny', '  Keep the old heading  ')).toEqual({ thread: 'agent:noa', author: 'user', text: 'About the request I just denied: Keep the old heading' });
+    expect(denyNoteMessage({ ...noa, role: 'lead', thread: 'lead:x' }, 'deny', 'Not now')).toEqual({ thread: 'lead:x', author: 'codly', text: 'Your note with the deny: Not now' });
+    // Claude Code takes the note with its answer; a stop, or no note, sends nothing.
+    expect(denyNoteMessage({ ...noa, provider: 'claude' }, 'deny', 'Not now')).toBeNull();
+    expect(denyNoteMessage(noa, 'cancel', 'Not now')).toBeNull();
+    expect(denyNoteMessage(noa, 'deny', '  ')).toBeNull();
+  });
+
+  it('pins the words of the core', () => {
+    expect(leadRs).toContain('format!("About the request I just denied: {note}")');
+    expect(leadRs).toContain('&format!("Your note with the deny: {note}")');
   });
 });

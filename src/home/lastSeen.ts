@@ -1,8 +1,11 @@
 // When you last had each thread on screen (`ui.lastSeen`, by office), kept across a restart: one
 // localStorage key per office, with the 50 threads you left most recently. When a thread is
 // stamped is the rule of `Presence` (away.ts): when it leaves the screen, when you look at it
-// again, and once a minute while you look at it. A request you close leaves the map.
-import { ui } from '../lib/state/ui.svelte';
+// again, and once a minute while you look at it. A request you close leaves the map, and is not
+// stamped again once it left the tabs.
+import { requests } from '../lib/state/requests.svelte';
+import { store } from '../lib/state/store.svelte';
+import { isRequestThread, ui } from '../lib/state/ui.svelte';
 
 /** How many threads an office keeps. */
 export const SEEN_CAP = 50;
@@ -51,9 +54,18 @@ function put(office: string, seen: Record<string, number>) {
   }
 }
 
-/** You had `thread` on screen until `at`. */
-export function stampSeen(office: string | null | undefined, thread: string, at: number) {
-  if (office) put(office, capSeen({ ...ui.lastSeen[office], [thread]: at }));
+/**
+ * Whether `thread` of `office` can be stamped: a request must be one of the open office's tabs.
+ * A request you just closed has left them (its stamp on the way out would put it back in the
+ * map); a thread of another office, or one that is no request (a 1:1 chat), is not asked.
+ */
+export function stampable(office: string, thread: string): boolean {
+  return !isRequestThread(thread) || office !== store.workspace?.id || requests.list.some((r) => r.thread === thread);
+}
+
+/** You had `thread` on screen until `at`. Refused for a thread that is not open (`open`). */
+export function stampSeen(office: string | null | undefined, thread: string, at: number, open: (office: string, thread: string) => boolean = stampable) {
+  if (office && open(office, thread)) put(office, capSeen({ ...ui.lastSeen[office], [thread]: at }));
 }
 
 /** Threads that were closed leave the map. */

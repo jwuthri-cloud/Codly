@@ -3,11 +3,13 @@
   came after you left: "While you were away (47 min): Bo waits for your answer · Ada’s turn
   failed: … · Ada finished t1 and t2 · 14 more rows". Each fact takes you to its row (the oldest
   one of a group) and marks it for a moment. × puts the row away; the next time you are away a
-  new one takes its place (see away.ts for the rule).
+  new one takes its place (see away.ts for the rule). While the row is out of view, the row
+  above the composer offers a chip that brings it back (awayShown.svelte.ts).
 -->
 <script lang="ts">
   import Icon from '../components/Icon.svelte';
   import { awayFor, type Away } from './away';
+  import { awayShown } from './awayShown.svelte';
 
   interface Props {
     summary: Away;
@@ -15,9 +17,21 @@
     ondismiss: () => void;
   }
   let { summary, onjump, ondismiss }: Props = $props();
+  let el: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    if (!el) return;
+    const node = el;
+    const gone = awayShown.show(node, summary.minutes);
+    const io = new IntersectionObserver(([e]) => awayShown.seen(node, e.isIntersecting));
+    io.observe(node);
+    return () => {
+      io.disconnect();
+      gone();
+    };
+  });
 </script>
 
-<div class="away" role="note" aria-label="While you were away">
+<div class="away" role="note" aria-label="While you were away" bind:this={el}>
   <p>
     <span class="lead">While you were away <span class="num">({awayFor(summary.minutes)})</span>:</span>
     {#each summary.facts as f, i (f.key + f.text)}{#if i}<span class="sep" aria-hidden="true">·</span>{/if}<button class="fact" onclick={() => onjump(f.key)}>{f.text}</button>{/each}

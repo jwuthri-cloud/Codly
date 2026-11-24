@@ -36,6 +36,10 @@ export const stoppedByYou = (agentId: string, turnStart: number): boolean => !!a
 /** The starts of the agent's turns you stopped with a button (Stop, Send now, Interrupt), oldest first. */
 export const stoppedTurns = (agentId: string): number[] => (asked.get(agentId) ?? []).filter((s) => !s.byKey).map((s) => s.start);
 
+/** The starts of every turn of the agent you stopped, with a button or with Esc, oldest first:
+ *  a request such a stop ended reads "Stopped by you" (util/outcome.ts). */
+export const yourStops = (agentId: string): number[] => (asked.get(agentId) ?? []).map((s) => s.start);
+
 /** Whether the agent's running turn is one you asked to stop (it ends when the CLI lets go). */
 export function stopping(agentId: string): boolean {
   const start = openTurn(agentId);

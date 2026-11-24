@@ -127,7 +127,8 @@ export class MockApprovalRules {
       rule = { id: uid('rule-'), workspace_id: sim.workspace?.id ?? '', kind, command, created_at: sim.now() };
       this.rules = [...this.rules, rule];
     }
-    sim.decision('approval_policy', 'human', `you saved a rule: always allow ${describeRule(rule)} in this repo`, { rule: rule.id, approval_id: approvalId });
+    // Like the core: the rule itself is on record with the request it was saved from.
+    sim.decision('approval_policy', 'human', `you saved a rule: always allow ${describeRule(rule)} in this repo`, { rule, approval_id: approvalId });
     // The request on the card, and the same one from other agents: answered together.
     for (const ap of [...sim.approvals.values()]) if (this.offer(ap.id)[kind] === command) this.story.resolveApproval(ap.id, 'allow_once', null);
     return rule;
@@ -141,6 +142,6 @@ export class MockApprovalRules {
     const rule = this.rules.find((r) => r.id === ruleId);
     if (!rule) throw new Error('That rule was already removed.');
     this.rules = this.rules.filter((r) => r !== rule);
-    this.sim.decision('approval_policy', 'human', `you removed a rule: Codly asks again about ${describeRule(rule)}`, { rule: rule.id });
+    this.sim.decision('approval_policy', 'human', `you removed a rule: Codly asks again about ${describeRule(rule)}`, { rule });
   }
 }

@@ -9,7 +9,7 @@ import type { ApprovalStatus } from '../gen/ApprovalStatus';
 import type { Provider } from '../gen/Provider';
 import { permissionsAsked } from './permissionsAsked';
 import { yourWords, type Words } from '../state/answers';
-import { stoppedTurns } from '../state/stops';
+import { yourStops } from '../state/stops';
 import { store } from '../state/store.svelte';
 import { ruleWords } from './approvalRules';
 import { showsPlan, wantsTo } from './planRequest';
@@ -107,13 +107,10 @@ export function wordsOf(asked: Held | null, by: string | null): Words | null {
   return by === 'user' && asked?.id ? (yourWords.get(asked.id) ?? null) : null;
 }
 
-/**
- * `outcomeWord`, and for a Claude agent's plan what you did with it: "Plan accepted", "Plan
- * accepted with your changes" (`planChanged`: your text went back as the plan), "Plan sent back".
- */
-export function settledWord(status: ApprovalStatus, asked: Asked | null, provider: Provider | null, planChanged: boolean): string {
+/** `outcomeWord`, and for a Claude agent's plan what you did with it: "Plan accepted", "Plan sent back". */
+export function settledWord(status: ApprovalStatus, asked: Asked | null, provider: Provider | null): string {
   if (asked && showsPlan(asked.subject, provider)) {
-    if (status === 'approved') return planChanged ? 'Plan accepted with your changes' : 'Plan accepted';
+    if (status === 'approved') return 'Plan accepted';
     if (status === 'denied') return 'Plan sent back';
   }
   return outcomeWord(status, asked);
@@ -129,13 +126,38 @@ export function savedRuleWords(rule: Pick<ApprovalRule, 'kind' | 'command'>): st
   return rule.kind === 'prefix' ? `commands that start with ${oneLine(w.text, 60)}` : `the command ${oneLine(w.text, 60)}`;
 }
 
+/** How the core names a rule you saved when it answers a request in your place
+ *  (orchestrator/approval_rules.rs `with_saved_rules`), before the rule itself. */
+export const YOUR_RULE = 'your rule for this repo: ';
+
+/**
+ * The rule you saved that answered a request in your place, from the core's record of that
+ * answer: the `approval_policy` decision that names the request, whose rule reads "your rule for
+ * this repo: commands that start with `npm install`" (or "… `npm test`" for one command). Null
+ * when Codly's own rules answered it, or nothing is on record.
+ */
+export function yourRuleOf(decisions: readonly { type: string; detail: unknown }[], approvalId: string): Pick<ApprovalRule, 'kind' | 'command'> | null {
+  for (const d of decisions) {
+    if (d.type !== 'approval_policy' || !d.detail || typeof d.detail !== 'object') continue;
+    const { approval_id, rule } = d.detail as { approval_id?: unknown; rule?: unknown };
+    if (approval_id !== approvalId || typeof rule !== 'string' || !rule.startsWith(YOUR_RULE)) continue;
+    const named = rule.slice(YOUR_RULE.length);
+    const prefix = named.startsWith('commands that start with `');
+    const open = named.indexOf('`');
+    const close = named.lastIndexOf('`');
+    if ((!prefix && open !== 0) || close <= open + 1) continue;
+    return { kind: prefix ? 'prefix' : 'exact', command: named.slice(open + 1, close) };
+  }
+  return null;
+}
+
 /** A turn of an agent as the store keeps it: when it started and when it ended (null: it runs). */
 export type TurnSpan = { start: number; end: number | null };
 
 /**
- * Whether a request ended because you stopped its agent's turn (Stop, Interrupt, Send now, or
- * Kill, which stops the turn too): its CLI took it back ("cancelled" by its CLI) or Codly closed
- * it with the run ("expired" by Codly), and it was asked inside a turn you stopped. The window
+ * Whether a request ended because you stopped its agent's turn (Stop, Esc Esc, Interrupt, Send
+ * now, or Kill, which stops the turn too): its CLI took it back ("cancelled" by its CLI) or
+ * Codly closed it with the run ("expired" by Codly), and it was asked inside a turn you stopped. The window
  * is the one of the thread's line "You stopped … while it waited for your answer"
  * (home/spine.ts): from the turn's start to its end, or to now while the CLI still lets go of it.
  * `turns`: the agent's turns; `stopped`: the starts of those you stopped (state/stops).
@@ -149,7 +171,14 @@ export function endedByYourStop(status: ApprovalStatus, by: string, askedAt: num
 function stoppedByYou(status: ApprovalStatus, by: string, asked: Held | null): boolean {
   if (!asked?.agent_id || asked.created_at == null) return false;
   void store.rev;
-  return endedByYourStop(status, by, asked.created_at, store.live[asked.agent_id]?.turns ?? [], stoppedTurns(asked.agent_id));
+  return endedByYourStop(status, by, asked.created_at, store.live[asked.agent_id]?.turns ?? [], yourStops(asked.agent_id));
+}
+
+/** The rule of yours that approved a request the store holds (`yourRuleOf`), null for any other answer. */
+function byYourRule(status: ApprovalStatus, by: string, asked: Held | null): Pick<ApprovalRule, 'kind' | 'command'> | null {
+  if (status !== 'approved' || by !== 'policy' || !asked?.id) return null;
+  void store.rev;
+  return yourRuleOf(store.decisions, asked.id);
 }
 
 /**
@@ -157,15 +186,19 @@ function stoppedByYou(status: ApprovalStatus, by: string, asked: Held | null): b
  * accepted by you, with your changes"), and the rule you saved with an approval ("and from now
  * on: commands that start with npm install"; null: none). A row too narrow for both cuts the
  * rule, never the verdict. A request your stop ended reads "Stopped by you" (`endedByYourStop`),
- * not "by its CLI" or "Closed by Codly". `settledLine` puts the two together.
+ * not "by its CLI" or "Closed by Codly". One a rule you saved answered names it as yours
+ * ("Approved by your rule: commands that start with npm install"), not as Codly's rules.
+ * `settledLine` puts the two together.
  */
 export function settledParts(status: ApprovalStatus, by: string, asked: Held | null, provider: Provider | null = null, rule: Pick<ApprovalRule, 'kind' | 'command'> | null = null): { verdict: string; rule: string | null } {
+  const byRule = byYourRule(status, by, asked);
+  if (byRule) return { verdict: `Approved by your rule: ${savedRuleWords(byRule)}`, rule: null };
   const yours = stoppedByYou(status, by, asked);
   const st: ApprovalStatus = yours ? 'cancelled' : status;
   const who = yours ? 'user' : by;
   const said = wordsOf(asked, who);
   const changed = !!said?.planChanged && st === 'approved' && !!asked && showsPlan(asked.subject, provider);
-  const verdict = `${settledWord(st, asked, provider, false)} ${outcomeBy(who)}`.trim() + (changed ? ', with your changes' : '');
+  const verdict = `${settledWord(st, asked, provider)} ${outcomeBy(who)}`.trim() + (changed ? ', with your changes' : '');
   return { verdict, rule: rule && st === 'approved' ? `and from now on: ${savedRuleWords(rule)}` : null };
 }
 

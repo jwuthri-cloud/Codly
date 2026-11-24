@@ -63,6 +63,8 @@
     untrack(load);
   });
 
+  /** A request of this office you closed a moment ago: the core closes it when the time for Undo is up. */
+  const closing = $derived(ui.closingRequests.some((c) => c.office === (store.workspace?.id ?? null)));
   const row = $derived(listing ? null : (list?.find((c) => c.thread === thread) ?? null));
   const titleOf = (c: ClosedRequest) => (c.title ? oneLine(c.title, 140) : 'A request with no message from you');
   /** Who wrote a message: you, Codly, or an agent by the name it had. */
@@ -85,7 +87,9 @@
     {#if error}
       <div class="pad"><LoadError what={listing ? 'the closed requests' : 'this closed request'} {error} {loading} onretry={load} /></div>
     {:else if listing}
-      {#if list && !list.length}
+      {#if list && !list.length && closing}
+        <EmptyState title="Closing your request…" body="It shows here in a few seconds, once the time for Undo is up." />
+      {:else if list && !list.length}
         <EmptyState title="No closed requests." body="When you close a request, what was said in it is kept here." />
       {:else if list}
         <ul class="rows">

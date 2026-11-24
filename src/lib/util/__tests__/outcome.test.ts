@@ -3,7 +3,8 @@ import type { Approval } from '../../gen/Approval';
 import { yourWords } from '../../state/answers';
 import { noteStop } from '../../state/stops';
 import { store } from '../../state/store.svelte';
-import { answerText, askedLine, endedByYourStop, firstQuestion, outcomeBy, outcomeWord, savedRuleWords, settledLine, settledParts, settledWord, wordsOf } from '../outcome';
+import approvalRulesRs from '../../../../crates/codly-core/src/orchestrator/approval_rules.rs?raw';
+import { answerText, askedLine, endedByYourStop, firstQuestion, outcomeBy, outcomeWord, savedRuleWords, settledLine, settledParts, settledWord, wordsOf, YOUR_RULE, yourRuleOf } from '../outcome';
 
 const command = { subject: { kind: 'command', command: 'pnpm install', cwd: null } } satisfies Pick<Approval, 'subject'>;
 const question = {
@@ -112,14 +113,13 @@ describe('what you said with an answer', () => {
     expect(settledLine('approved', 'user', held('ap1', plan), null, 'claude')).toBe('Plan accepted by you, with your changes');
     expect(settledLine('approved', 'user', held('ap2', plan), null, 'claude')).toBe('Plan accepted by you');
     // The closed card puts the same word before "by you".
-    expect(settledWord('approved', plan, 'claude', true)).toBe('Plan accepted with your changes');
-    expect(settledWord('approved', plan, 'claude', false)).toBe('Plan accepted');
-    expect(settledWord('denied', plan, 'claude', false)).toBe('Plan sent back');
+    expect(settledWord('approved', plan, 'claude')).toBe('Plan accepted');
+    expect(settledWord('denied', plan, 'claude')).toBe('Plan sent back');
     // Every other request, and a plan of another CLI, reads as before.
-    expect(settledWord('approved', plan, 'codex', true)).toBe('Approved');
-    expect(settledWord('denied', command, 'claude', false)).toBe('Denied');
-    expect(settledWord('approved', question, null, false)).toBe('Answered');
-    expect(settledWord('expired', null, null, false)).toBe('Closed');
+    expect(settledWord('approved', plan, 'codex')).toBe('Approved');
+    expect(settledWord('denied', command, 'claude')).toBe('Denied');
+    expect(settledWord('approved', question, null)).toBe('Answered');
+    expect(settledWord('expired', null, null)).toBe('Closed');
   });
 
   it('shows only on a row that reads "by you", and only for a request that is still known', () => {
@@ -186,10 +186,10 @@ describe('a request your stop ended', () => {
       delete store.live.ada;
       delete store.live.eli;
     });
-    /** `agent` ran a turn from 100 to 200; `stop`: you stopped it. */
-    const ran = (agent: string, stop: boolean) => {
+    /** `agent` ran a turn from 100 to 200; `stop`: you stopped it (`byKey`: with Esc Esc). */
+    const ran = (agent: string, stop: boolean, byKey = false) => {
       store.live[agent] = { ...store.liveFor(agent), turns: [{ start: 100, end: null, input: null }] };
-      if (stop) undo.push(noteStop(agent));
+      if (stop) undo.push(noteStop(agent, byKey));
       store.live[agent] = { ...store.liveFor(agent), turns: [{ start: 100, end: 200, input: null }] };
     };
     const asked = (agent: string, at = 150) => ({ id: `ap-${agent}`, agent_id: agent, created_at: at, ...command });
@@ -201,6 +201,12 @@ describe('a request your stop ended', () => {
       expect(settledParts('cancelled', 'provider', asked('ada'))).toEqual({ verdict: 'Stopped by you', rule: null });
       // Asked after that turn ended: its CLI stopped it.
       expect(settledLine('cancelled', 'provider', asked('ada', 250), null)).toBe('Stopped by its CLI');
+    });
+
+    it('a stop you made with Esc Esc is yours too', () => {
+      ran('ada', true, true);
+      expect(settledLine('cancelled', 'provider', asked('ada'), null)).toBe('Stopped by you');
+      expect(settledParts('cancelled', 'provider', asked('ada'))).toEqual({ verdict: 'Stopped by you', rule: null });
     });
 
     it('a CLI stop keeps "Stopped by its CLI"', () => {
@@ -249,3 +255,40 @@ describe('a rule saved with an approval', () => {
     expect(settledLine('denied', 'user', command, null, null, { kind: 'prefix', command: 'npm install' })).toBe('Denied by you');
   });
 });
+
+describe('a request a rule of yours answered', () => {
+  afterEach(() => {
+    store.decisions = [];
+  });
+  /** The core's record of an answer by a rule (orchestrator/ingest.rs): the request and the rule's words. */
+  const byRule = (approvalId: string, rule: string) => ({ type: 'approval_policy', detail: { approval_id: approvalId, mode: 'balanced', rule, read_only: false } });
+
+  it('names the rule as yours, from the core’s record of the answer', () => {
+    const decisions = [
+      byRule('ap1', 'your rule for this repo: commands that start with `npm install`'),
+      byRule('ap2', 'your rule for this repo: `pnpm test` (you trust it to work on its own)'),
+      byRule('ap3', 'a read-only command'),
+    ];
+    expect(yourRuleOf(decisions, 'ap1')).toEqual({ kind: 'prefix', command: 'npm install' });
+    expect(yourRuleOf(decisions, 'ap2')).toEqual({ kind: 'exact', command: 'pnpm test' });
+    // Codly's own rules, or no record: none of yours.
+    expect(yourRuleOf(decisions, 'ap3')).toBeNull();
+    expect(yourRuleOf(decisions, 'ap9')).toBeNull();
+  });
+
+  it('reads "Approved by your rule: …" on the card and in History, not "by Codly’s rules"', () => {
+    const rule = byRule('ap1', 'your rule for this repo: commands that start with `npm install`');
+    store.decisions = [{ ...rule, id: 'd1', method: 'rule', summary: '', ts: 1, agentId: null, taskId: null, eventId: 1 }];
+    const asked = { id: 'ap1', ...command };
+    expect(settledParts('approved', 'policy', asked)).toEqual({ verdict: 'Approved by your rule: commands that start with npm install', rule: null });
+    expect(settledLine('approved', 'policy', asked, null)).toBe('Approved by your rule: commands that start with npm install');
+    expect(settledLine('approved', 'policy', { id: 'ap2', ...command }, null)).toBe('Approved by Codly’s rules');
+  });
+
+  it('uses the core’s words for a rule of yours', () => {
+    expect(approvalRulesRs).toContain(`format!("${YOUR_RULE}{}", describe(rule))`);
+    expect(approvalRulesRs).toContain('ApprovalRuleKind::Exact => format!("`{}`", rule.command)');
+    expect(approvalRulesRs).toContain('ApprovalRuleKind::Prefix => format!("commands that start with `{}`", rule.command)');
+  });
+});
+

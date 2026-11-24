@@ -2,14 +2,17 @@
   The step after the work is done: a pull request for a plan's branch, or a solo agent's.
   Create pull request… drafts it and opens the confirm; nothing is sent before you say so there.
   Once one is open: its link, its checks as last read, and Refresh, which reads its state and
-  checks once. While it is open and the row is on screen, its state and checks are read again
-  every 30 seconds and when the window gets the focus. When it is merged or closed, Create pull
+  checks once. While it is open and the row is in view, its state and checks are read again
+  every 30 seconds and when the window gets the focus: one timer for the pull request however
+  many of its rows show, none for a row out of view, none after you merged its work here
+  (`readsByItself`, `readWhileShown`). When it is merged or closed, Create pull
   request… comes back for the next one. After you merged the plan here, the row says where the
   pull request stands, as last read. Codly never pushes on its own.
 -->
 <script lang="ts">
   import type { PrSource } from '../lib/gen/PrSource';
-  import { checksLine, checksState, loadPullRequest, preparePullRequest, PR_REFRESH_MS, prKey, prUi, refreshPullRequest } from '../lib/state/pullRequest.svelte';
+  import { untrack } from 'svelte';
+  import { checksLine, checksState, loadPullRequest, preparePullRequest, prKey, prUi, readsByItself, readWhileShown, refreshPullRequest } from '../lib/state/pullRequest.svelte';
   import { ui } from '../lib/state/ui.svelte';
   import { ago } from '../lib/util/format';
   import { openExternal } from '../lib/util/markdown';
@@ -37,21 +40,24 @@
     void loadPullRequest(source);
   });
 
-  // An open pull request's checks change on GitHub: read them again by themselves while the
-  // row is on screen (the page shows), and as soon as the window comes back.
-  const open = $derived(pr?.state === 'open');
+  // An open pull request's checks change on GitHub: read them again by themselves while this
+  // row is in view (the page shows), and as soon as the window comes back.
+  let el: HTMLDivElement | undefined = $state();
+  let inView = $state(false);
   $effect(() => {
-    if (!open) return;
-    const src = source;
-    const read = () => {
-      if (document.visibilityState === 'visible' && !busy) void refreshPullRequest(src, true);
-    };
-    const timer = setInterval(read, PR_REFRESH_MS);
-    window.addEventListener('focus', read);
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => (inView = e.isIntersecting));
+    io.observe(el);
     return () => {
-      clearInterval(timer);
-      window.removeEventListener('focus', read);
+      io.disconnect();
+      inView = false;
     };
+  });
+  const auto = $derived(readsByItself(pr, inView, !!mergedInto));
+  $effect(() => {
+    void key;
+    if (!auto) return;
+    return untrack(() => readWhileShown(source));
   });
 
   async function prepare() {
@@ -69,7 +75,7 @@
 
 {#if pr}
   {@const url = pr.url}
-  <div class="pr">
+  <div class="pr" bind:this={el}>
     <div class="row">
       <span class="what"><Icon name="merge" size={12} />Pull request into <code>{pr.base}</code>{pr.state === 'open' ? '' : ` (${pr.state})`}:</span>
       <button class="link truncate" onclick={() => openExternal(url)} data-tip="Open in your browser">{url.replace(/^https:\/\//, '')}</button>
