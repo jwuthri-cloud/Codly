@@ -104,7 +104,7 @@ struct FakeTurn {
     /// run ends in the middle of this turn.
     stopped: Arc<AtomicBool>,
     /// Commands that came while the turn held (`hold`): the run reads them after the turn,
-    /// as it would have read them from its channel.
+    /// as it would have read them from its channel, a stop before everything else.
     later: Arc<Mutex<VecDeque<AgentCmd>>>,
 }
 
@@ -152,6 +152,9 @@ impl FakeTurn {
 
     /// Ask for a shell command the way a CLI would, and wait for Codly's answer.
     async fn ask_approval(&self, command: &str) -> Option<ApprovalChoice> {
+        if self.stop_was_read() {
+            return None;
+        }
         let approval = Approval {
             id: codly_core::model::new_id(),
             agent_id: self.spec.agent_id.clone(),
@@ -186,6 +189,9 @@ impl FakeTurn {
     /// process started: the check commands of the tests that run beside it too, which then
     /// fail as "killed".
     async fn work_until_stopped(&self) {
+        if self.stop_was_read() {
+            return;
+        }
         let mut cmds = self.cmds.lock().await;
         while let Some(cmd) = cmds.recv().await {
             if matches!(cmd, AgentCmd::Shutdown) {
@@ -202,6 +208,9 @@ impl FakeTurn {
     /// `work_until_stopped`). True when the word came; false: the run ends in the middle of
     /// this turn, and the turn returns.
     async fn hold(&self, word: impl std::future::Future<Output = ()>) -> bool {
+        if self.stop_was_read() {
+            return false;
+        }
         let mut word = std::pin::pin!(word);
         let mut cmds = self.cmds.lock().await;
         let told = loop {
@@ -219,15 +228,30 @@ impl FakeTurn {
         if !came {
             self.stopped.store(true, Ordering::SeqCst);
         } else if told {
-            self.later.lock().unwrap().push_back(AgentCmd::Shutdown);
+            // First in line: the run exits before it starts a turn on a prompt that came
+            // earlier, and a later wait of this turn sees it (`stop_was_read`).
+            self.later.lock().unwrap().push_front(AgentCmd::Shutdown);
         }
         came
+    }
+
+    /// An earlier `hold` of this turn already read the stop: no new one comes on the channel,
+    /// so a wait must not start, and the run ends in the middle of this turn.
+    fn stop_was_read(&self) -> bool {
+        let read = matches!(self.later.lock().unwrap().front(), Some(AgentCmd::Shutdown));
+        if read {
+            self.stopped.store(true, Ordering::SeqCst);
+        }
+        read
     }
 
     /// The next prompt that reaches this turn within `secs` (a CLI that steers it into the
     /// running turn); None for anything else. A stop in its place ends the run in the middle
     /// of this turn.
     async fn steered_prompt(&self, secs: u64) -> Option<String> {
+        if self.stop_was_read() {
+            return None;
+        }
         let next = tokio::time::timeout(Duration::from_secs(secs), async { self.cmds.lock().await.recv().await }).await;
         match next {
             Ok(Some(AgentCmd::Prompt(text))) => Some(text),

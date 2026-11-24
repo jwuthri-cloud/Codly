@@ -162,7 +162,9 @@ async fn end_turn(
     }
     let ended = tokio::time::timeout(STOP_GRACE, turn).await.is_ok();
     if ended {
-        waiting.push_back(AgentCmd::Shutdown);
+        // First in line: the run exits before it starts a turn on a prompt that came earlier,
+        // whose wait would not see a stop that is already read.
+        waiting.push_front(AgentCmd::Shutdown);
     }
     ended
 }
