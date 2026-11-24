@@ -1022,9 +1022,10 @@ fn subcommands<'a>(prog: &str, args: &'a [String]) -> Vec<&'a str> {
 }
 
 /// Options of npm, pnpm, yarn and bun that stand before the subcommand and take a value in
-/// the next word (`pnpm --filter web add x`, `npm --prefix web install`). With `=` the value
-/// is in the option's own word.
-const PM_VALUED: &[&str] = &["--filter", "-F", "-C", "--dir", "--prefix", "-w", "--workspace", "--cwd"];
+/// the next word (`pnpm --filter web add x`, `npm --prefix web install`,
+/// `pnpm --reporter silent exec …`). With `=` the value is in the option's own word.
+/// `--reporter` and `--loglevel` are from pnpm's documentation.
+const PM_VALUED: &[&str] = &["--filter", "-F", "-C", "--dir", "--prefix", "-w", "--workspace", "--cwd", "--reporter", "--loglevel"];
 
 /// The words of an npm, pnpm, yarn or bun line that can be its subcommand, each with the
 /// words after it: the first word that is not an option, wherever it stands
@@ -1086,14 +1087,23 @@ const RUNNER_SWITCHES: &[&str] = &["-y", "--yes", "--no", "--no-install", "-q", 
 /// both ways: as the program, and as the option's value with the program behind it
 /// (`npm exec -w web npm publish`: `web`, then `npm publish`).
 ///
-/// With `shell_line`, what the runner starts is a line for a shell, not a program.
+/// The program stands at one place: the first word that is no option and no value of `-p`
+/// or `-c`. Only where a word may be an option's value instead is the next one tried too.
+/// Each of those two is tried as the program when it may name one (`may_name_a_program`): a
+/// bare name or a path of its own (`uv run --frozen ./bin/docker ps`). A word with any other
+/// `/` is the option's value (`uv run --directory sub/web pytest`), or an argument of the
+/// program tried before it (`uv run --frozen pytest tests/docker`).
+///
+/// With `shell_line`, what the runner starts is a line for a shell, not a program, and a `-c`
+/// only says so (pnpm's `--shell-mode`).
 ///
 /// Also says how many of the words can be the runner's own: its options and their values, up
 /// to the `--` or to the first word that can only be the program. The words behind that
 /// belong to the program (`pnpm exec eslint -c x.json`: `-c` is eslint's).
 fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> (Vec<Started<'a>>, usize) {
     let start = |command: &'a [String]| if shell_line { Started::ShellLine(command.join(" ")) } else { Started::Program(command) };
-    let (mut found, mut i, mut may_be_value) = (vec![], 0, false);
+    // `tried`: a word was tried as the program already.
+    let (mut found, mut i, mut may_be_value, mut tried) = (vec![], 0, false, false);
     let mut own = words.len();
     while let Some(word) = words.get(i).map(String::as_str) {
         i += 1;
@@ -1104,6 +1114,7 @@ fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> (Vec<Started<'a>>
                 break;
             }
             "-p" | "--package" => (i, may_be_value) = (i + 1, false),
+            "-c" if shell_line => may_be_value = false,
             "-c" | "--call" => {
                 found.extend(words.get(i).map(|line| Started::ShellLine(line.clone())));
                 (i, may_be_value) = (i + 1, false);
@@ -1114,7 +1125,10 @@ fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> (Vec<Started<'a>>
             }
             _ if word.starts_with('-') => may_be_value = !word.contains('=') && !RUNNER_SWITCHES.contains(&word),
             _ => {
-                found.push(start(&words[i - 1..]));
+                if !(may_be_value || tried) || may_name_a_program(word) {
+                    found.push(start(&words[i - 1..]));
+                    tried = true;
+                }
                 if !may_be_value {
                     own = i - 1;
                     break;
@@ -1126,16 +1140,29 @@ fn runner_starts<'a>(words: &'a [String], shell_line: bool) -> (Vec<Started<'a>>
     (found, own)
 }
 
+/// Can a word behind a runner's options name the program (`runner_starts`)? A bare name can,
+/// and so can a path of its own (`./bin/docker`, `../x`, `/usr/bin/docker`, `~/bin/x`).
+fn may_name_a_program(word: &str) -> bool {
+    !word.contains('/') || ["./", "../", "/", "~"].iter().any(|start| word.starts_with(start))
+}
+
 /// What a package runner starts: what follows `npx` or `bunx`, and what follows the `exec`
 /// (`x`, `dlx`) of npm, pnpm, yarn or bun (`runner_starts`). bun's `exec` takes a line for a
-/// shell, not a program and its arguments (`bun exec 'npm publish && ls'`).
+/// shell, not a program and its arguments (`bun exec 'npm publish && ls'`), and so does
+/// pnpm's with `--shell-mode` or `-c` among its own options: pnpm joins the program and its
+/// arguments into that line (`pnpm exec -c npm publish`). From pnpm's documentation of
+/// `exec`, not from a recording.
 fn runner_commands<'a>(prog: &str, args: &'a [String]) -> Vec<Started<'a>> {
+    let shell_mode = |own: &[String]| options(own).any(|option| option == "-c" || option == "--shell-mode");
     match prog {
         "npx" | "bunx" => runner_starts(args, false).0,
         "npm" | "pnpm" | "yarn" | "bun" => pm_subs(prog, args)
             .into_iter()
             .filter(|(sub, _)| matches!(*sub, "exec" | "x" | "dlx"))
-            .flat_map(|(sub, rest)| runner_starts(rest, prog == "bun" && sub == "exec").0)
+            .flat_map(|(sub, rest)| {
+                let shell_line = sub == "exec" && (prog == "bun" || (prog == "pnpm" && shell_mode(exec_options(prog, args, rest))));
+                runner_starts(rest, shell_line).0
+            })
             .collect(),
         _ => vec![],
     }
@@ -1176,10 +1203,11 @@ const ENV_RUNNERS: &[&str] = &["uv", "poetry", "pipenv", "pdm", "hatch", "rye", 
 /// The programs that are read by their name behind one of `ENV_RUNNERS`: the package
 /// managers and runners, the programs that publish, git, the command lines of GitHub and
 /// Docker, the shells (their `-c` line is read as a line inside the line), `rm`, the
-/// programs that fetch from the network, and `sudo`.
+/// programs that fetch from the network, `sudo`, and `env` (its `-S` line is read as a line
+/// inside the line, `split_line`).
 const READ_BY_NAME: &[&str] = &[
     "npm", "pnpm", "yarn", "bun", "npx", "cargo", "pip", "pip3", "uv", "poetry", "twine", "gem", "git", "gh", "docker", "sh", "bash", "zsh", "dash",
-    "rm", "curl", "wget", "sudo",
+    "rm", "curl", "wget", "sudo", "env",
 ];
 
 /// The commands that may stand behind one of `ENV_RUNNERS`: after its `run` or `exec` (for
@@ -1190,7 +1218,7 @@ const READ_BY_NAME: &[&str] = &[
 /// CLIs, not from a recording.
 ///
 /// A path counts by its last part only where a program may stand (`uv run ./bin/docker ps`):
-/// the first word after `run`, a word behind the runner's own options (`runner_starts`), the
+/// the first word after `run`, the place behind the runner's own options (`runner_starts`), the
 /// word right after a `--`, a wrapper or a `NAME=value`, and the program behind a wrapper at
 /// one of those places (`uv run timeout 60 ./bin/npm …`, `uv run env -u X ./bin/docker …`).
 /// Elsewhere a path is an argument of the program (`uv run pytest tests/docker`), and only a
@@ -1321,10 +1349,14 @@ fn changes_settings(prog: &str, args: &[String]) -> bool {
                 }
         }),
         // composer: a key with a value writes it, `--unset` removes it, `--editor` opens the
-        // file. `composer global <command>` runs the command on the setup of your account.
+        // file. `-f` / `--file` names the file to read or write, which is no key
+        // (`composer config -f other.json name` reads). `composer global <command>` runs the
+        // command on the setup of your account.
         "composer" => {
+            let files = |rest: &[String]| rest.windows(2).filter(|w| matches!(w[0].as_str(), "-f" | "--file") && !w[1].starts_with('-')).count();
+            let keys = |rest: &[String]| words(rest).len() - files(rest);
             first_non_flag(args) == Some("global")
-                || config_args(prog, args).any(|rest| has(rest, &["--unset", "--editor", "-e"]) || words(rest).len() >= 2)
+                || config_args(prog, args).any(|rest| has(rest, &["--unset", "--editor", "-e"]) || keys(rest) >= 2)
         }
         // `gem sources` lists them; `--add`, `--remove` and the like change the list.
         "gem" => first_non_flag(args) == Some("sources") && options(args).any(|option| !matches!(option, "-l" | "--list")),
@@ -1411,6 +1443,9 @@ type InnerLines = HashMap<(String, u8), Vec<String>>;
 struct LineReading {
     inner: InnerLines,
     started: usize,
+    /// How many lines inside the line were read, not taken from `inner`.
+    #[cfg(test)]
+    inner_read: usize,
 }
 
 /// `line_risks` of a line inside the line, read once for each depth it stands at.
@@ -1419,8 +1454,55 @@ fn inner_risks(line: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u
     if let Some(risks) = reading.inner.get(&key) {
         return risks.clone();
     }
+    #[cfg(test)]
+    {
+        reading.inner_read += 1;
+    }
     let risks = line_risks(line, cwd, worktree, depth, reading);
     reading.inner.insert(key, risks.clone());
+    risks
+}
+
+/// The line that `env -S` / `--split-string` makes the command it runs, with the words behind
+/// it: for the first `env` among `words` that has one (`env -S 'npm publish'`,
+/// `nice env --split-string='rm -rf src'`, `env -iS'npm publish'`, `env -u X -S 'x' y`).
+/// Past the options of env that take a value (`-u`, `-C`, `-P`). None when no `env` here
+/// has one.
+fn split_line(words: &[String]) -> Option<String> {
+    let split_by = |at: usize| {
+        let mut i = at + 1;
+        while let Some(option) = words.get(i).map(String::as_str).filter(|o| o.starts_with('-') && !matches!(*o, "-" | "--")) {
+            i += 1;
+            // The line glued to its option: after `--split-string=`, or after the `S` of a short
+            // option's cluster (empty when the line is the next word).
+            let short = || option.strip_prefix('-').filter(|o| !o.starts_with('-'))?.split_once('S').map(|(_, rest)| rest);
+            let (line, behind) = match option.strip_prefix("--split-string=").or_else(short) {
+                Some(line) if !line.is_empty() || option.starts_with("--") => (line, i),
+                Some(_) => (words.get(i)?.as_str(), i + 1),
+                None if option == "--split-string" => (words.get(i)?.as_str(), i + 1),
+                None => {
+                    i += usize::from(matches!(option, "-u" | "-C" | "-P" | "--unset" | "--chdir"));
+                    continue;
+                }
+            };
+            return Some(std::iter::once(line).chain(words[behind..].iter().map(String::as_str)).collect::<Vec<_>>().join(" "));
+        }
+        None
+    };
+    (0..words.len()).filter(|&at| basename(&words[at]) == "env").find_map(split_by)
+}
+
+/// What `env -S` runs (`split_line`): "runs dynamic code", and the risks of its line, read as a
+/// line inside the line (within the depth and `MAX_STARTED`). env's own escapes and `${…}` in
+/// that line are not the shell's, so the line keeps "runs dynamic code".
+fn split_line_risks(words: &[String], cwd: Option<&Path>, worktree: Option<&Path>, depth: u8, reading: &mut LineReading) -> Vec<String> {
+    let mut risks = vec!["runs dynamic code".to_string()];
+    if let Some(line) = split_line(words)
+        && depth < 3
+        && !one_more(&mut reading.started)
+    {
+        risks.extend(inner_risks(&line, cwd, worktree, depth + 1, reading));
+    }
     risks
 }
 
@@ -1469,7 +1551,10 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
             add("sudo");
         }
         let Some(start) = start else {
-            add("runs dynamic code"); // `env -S 'git push'`
+            // `env -S 'git push'`
+            for r in split_line_risks(&texts, cwd, worktree, depth, reading) {
+                add(&r);
+            }
             continue;
         };
         let Some(first) = seg.get(start) else {
@@ -1547,7 +1632,9 @@ fn line_risks(cmd: &str, cwd: Option<&Path>, worktree: Option<&Path>, depth: u8,
                 };
                 // Past a wrapper in front of it (`pnpm exec env CI=1 npm publish`).
                 let Some(at) = classify::command_start(words) else {
-                    add("runs dynamic code");
+                    for r in split_line_risks(words, cwd, worktree, depth, reading) {
+                        add(&r);
+                    }
                     continue;
                 };
                 if words[..at].iter().any(|w| matches!(basename(w), "sudo" | "doas")) {
@@ -2165,11 +2252,91 @@ fn test_runner(prog: &str, args: &[String]) -> bool {
         },
         "make" | "just" | "task" | "ninja" => only_check_targets(prog, args),
         "gradle" | "mvn" => java_test_run(prog, args),
-        "dotnet" | "swift" | "deno" | "mix" | "zig" | "bazel" | "bazelisk" | "xcodebuild" => {
-            words.iter().any(|w| ["test", "build", "check", "lint", "vet"].contains(w))
-        }
-        _ => false,
+        "xcodebuild" => xcodebuild_test_run(args),
+        _ => check_run(prog, args),
     }
+}
+
+/// The options of `dotnet test` and `dotnet build` that may stand beside the check: they say
+/// whether it restores and builds first and how it prints, not what it runs. From the
+/// documentation of the .NET CLI, not from a recording.
+const DOTNET_PLAIN_OPTIONS: &[&str] = &["--no-restore", "--no-build", "--nologo"];
+
+/// The same for `swift test` and `swift build`, from the documentation of the Swift Package
+/// Manager.
+const SWIFT_PLAIN_OPTIONS: &[&str] = &["-q", "--quiet", "-v", "--verbose", "--parallel", "--skip-build"];
+
+/// The same for `deno test`, `deno check` and `deno lint`, from Deno's documentation. None
+/// of them gives the code a permission (`-A`, `--allow-net`).
+const DENO_PLAIN_OPTIONS: &[&str] = &["-q", "--quiet", "--parallel"];
+
+/// The same for `mix test`, from the documentation of Mix.
+const MIX_PLAIN_OPTIONS: &[&str] = &["--trace", "--stale", "--failed", "--cover"];
+
+/// The same for `bazel test` and `bazel build` (and bazelisk, which runs bazel), from Bazel's
+/// documentation. Not `--run_under`, whose value is a command.
+const BAZEL_PLAIN_OPTIONS: &[&str] = &["-k", "--keep_going", "--test_output=errors"];
+
+/// Is a line of dotnet, swift, deno, mix, zig, bazel or bazelisk a check: its first word that
+/// is not one of the options above is a subcommand that checks, and every word after it is
+/// one of those options or an operand the subcommand takes? Each runs whatever its first word
+/// names (`dotnet run test`, `deno run -A build.ts test`), so any other word makes the line an
+/// unknown command. The subcommands and their operands, from the documentation of each CLI:
+/// - dotnet: `test`, `build`, with one project, solution or folder;
+/// - swift: `test`, `build`, with no operand;
+/// - deno: `test`, `check`, `lint` (never `run`, `task` or `eval`), with files and folders,
+///   not a URL or a package (`npm:x`, `jsr:@x/y`), which deno fetches;
+/// - mix: `test`, with test files and folders (`test/a_test.exs:12`);
+/// - zig: `build`, alone or with its step `test`;
+/// - bazel and bazelisk: `test`, `build`, with targets (`//...`, `//app:test`).
+fn check_run(prog: &str, args: &[String]) -> bool {
+    let (checks, plain): (&[&str], &[&str]) = match prog {
+        "dotnet" => (&["test", "build"][..], DOTNET_PLAIN_OPTIONS),
+        "swift" => (&["test", "build"][..], SWIFT_PLAIN_OPTIONS),
+        "deno" => (&["test", "check", "lint"][..], DENO_PLAIN_OPTIONS),
+        "mix" => (&["test"][..], MIX_PLAIN_OPTIONS),
+        "zig" => (&["build"][..], &[][..]),
+        "bazel" | "bazelisk" => (&["test", "build"][..], BAZEL_PLAIN_OPTIONS),
+        _ => return false,
+    };
+    let words: Vec<&str> = args.iter().map(String::as_str).filter(|word| !plain.contains(word)).collect();
+    let Some((sub, operands)) = words.split_first() else { return false };
+    checks.contains(sub)
+        && operands.iter().all(|word| !word.starts_with('-'))
+        && match prog {
+            "dotnet" => operands.len() <= 1,
+            "swift" => operands.is_empty(),
+            "deno" => operands.iter().all(|word| !word.contains(':')),
+            "zig" => matches!(operands, [] | ["test"]),
+            _ => true,
+        }
+}
+
+/// The options of xcodebuild that say what to build and where to run it, each with its value
+/// in the next word, and the one that only says how it prints. From xcodebuild's manual page,
+/// not from a recording.
+const XCODEBUILD_VALUED: &[&str] = &["-project", "-workspace", "-scheme", "-target", "-configuration", "-sdk", "-destination", "-testPlan"];
+const XCODEBUILD_PLAIN: &[&str] = &["-quiet"];
+
+/// Is an xcodebuild line a test run: every word that is neither one of the options above nor
+/// the value of one is the action `test` or `build`? Any other word, a build setting
+/// (`NAME=value`) or another action (`archive`) included, makes it an unknown command.
+fn xcodebuild_test_run(args: &[String]) -> bool {
+    let (mut actions, mut i) = (0, 0);
+    while let Some(word) = args.get(i).map(String::as_str) {
+        i += 1;
+        if XCODEBUILD_VALUED.contains(&word) {
+            if args.get(i).is_none() {
+                return false;
+            }
+            i += 1;
+        } else if matches!(word, "test" | "build") {
+            actions += 1;
+        } else if !XCODEBUILD_PLAIN.contains(&word) {
+            return false;
+        }
+    }
+    actions > 0
 }
 
 #[cfg(test)]
@@ -3800,5 +3967,122 @@ mod tests {
         assert!(!is_codly_tool("codly_board"));
         assert!(!is_codly_tool("codly_submit_report"));
         assert!(!is_codly_tool("mcp__evil__codly_board"));
+    }
+
+    /// dotnet, swift, deno, mix, zig, bazel and xcodebuild run what their first word names: a
+    /// line is a test run only when every word on it says that it checks.
+    #[test]
+    fn a_check_is_a_check_only_when_every_word_says_so() {
+        for (c, test_run) in [
+            ("dotnet test", true),
+            ("dotnet build --no-restore", true),
+            ("swift build", true),
+            ("swift test --parallel", true),
+            ("deno test", true),
+            ("deno lint", true),
+            ("deno check src/main.ts", true),
+            ("mix test", true),
+            ("mix test test/a_test.exs:12", true),
+            ("zig build", true),
+            ("zig build test", true),
+            ("bazel test //...", true),
+            ("bazelisk build //app:server", true),
+            ("xcodebuild -scheme App test", true),
+            ("deno run -A build.ts test", false),
+            ("deno test -A", false),
+            ("deno test https://example.com/x_test.ts", false),
+            ("dotnet run test", false),
+            ("dotnet test --settings x.runsettings", false),
+            ("mix run test.exs", false),
+            ("mix run test", false),
+            ("swift run build", false),
+            ("bazel run //x:test", false),
+            ("bazel run test", false),
+            ("bazel test --run_under=x //...", false),
+            ("zig run test.zig", false),
+            ("zig run x.zig test", false),
+            ("zig build install", false),
+            ("xcodebuild -scheme build archive", false),
+            ("xcodebuild test CC=x", false),
+        ] {
+            let kind = classify_command(c, &[]);
+            assert_eq!(kind == Some(TEST_RUNNER), test_run, "{c}: {kind:?}");
+        }
+    }
+
+    /// The line that `env -S` makes the command it runs is read as a line inside the line,
+    /// wherever env stands; it still runs dynamic code, so no rule is offered for it.
+    #[test]
+    fn the_line_env_splits_is_read() {
+        let wt = Path::new("/w/t1");
+        for (c, risk) in [
+            ("env -S \"npm publish\"", "publish"),
+            ("uv run env -S \"npm publish\"", "publish"),
+            ("nice env --split-string=\"rm -rf src\"", "deletes files"),
+            ("env -S npm publish", "publish"),
+            ("env -iS'git push'", "push"),
+            ("env -u X -S 'git push'", "push"),
+            ("pnpm exec env -S 'git push'", "push"),
+            ("find . -exec env -S 'git push' \\;", "push"),
+            ("sh -c \"env -S 'git push'\"", "push"),
+        ] {
+            let found = risks(c);
+            assert!(found.iter().any(|r| r == risk) && found.iter().any(|r| r == "runs dynamic code"), "{c}: {found:?}");
+        }
+        let ctx = PolicyCtx { mode: ApprovalMode::Balanced, worktree: Some(wt), verify: &[], read_only: false, edits: false, checkout: None, own_mcp: &[], provider: Some(Provider::Claude) };
+        for c in ["env -S 'npm install'", "uv run env -S 'npm install'"] {
+            assert!(rule_offer(&approval(command(c, wt)), &ctx).is_empty(), "{c}");
+        }
+        // A command env runs with no `-S` is read as before.
+        for c in ["env FOO=1 pytest", "env -u X cargo test"] {
+            assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
+        }
+    }
+
+    /// Behind a runner's option, a word with a `/` is the program only when it is a path of
+    /// its own; a later one is an argument of the program.
+    #[test]
+    fn a_path_behind_a_runners_option_is_an_argument() {
+        for c in ["uv run --frozen pytest tests/docker", "poetry run --quiet rspec spec/gh", "uv run --directory sub/docker pytest"] {
+            assert!(risks(c).is_empty(), "{c}: {:?}", risks(c));
+        }
+        for c in ["uv run --frozen ./bin/docker ps", "uv run --frozen docker ps", "uv run pytest -k docker", "uv run --frozen pytest ./bin/docker"] {
+            assert!(risks(c).iter().any(|r| r == "containers"), "{c}: {:?}", risks(c));
+        }
+    }
+
+    /// Four lines of package managers, read the way their documentation says.
+    #[test]
+    fn package_manager_lines_are_read_as_their_documentation_says() {
+        // composer's `-f` names a file: one key after it is a read.
+        assert!(!risks("composer config -f other.json name").iter().any(|r| r == OWN_SETUP));
+        assert!(risks("composer config -f other.json name value").iter().any(|r| r == OWN_SETUP));
+        // A script named like a subcommand, in each workspace, behind an option of `foreach`.
+        assert!(risks("yarn workspaces foreach -A run install").iter().any(|r| r == PACKAGE_INSTALL));
+        // pnpm's shell mode joins what follows into one line for a shell.
+        for c in ["pnpm exec --shell-mode 'npm publish'", "pnpm exec -c npm publish"] {
+            let found = risks(c);
+            assert!(found.iter().any(|r| r == "publish") && found.iter().any(|r| r == "runs dynamic code"), "{c}: {found:?}");
+        }
+        // pnpm's `--reporter` takes a value: the `exec` behind it is the subcommand.
+        let c = "pnpm --reporter exec exec -c x eslint";
+        assert!(risks(c).iter().any(|r| r == "runs dynamic code"), "{c}: {:?}", risks(c));
+    }
+
+    /// The same line inside the line is read once, however often it stands there; two
+    /// different lines are both read.
+    #[test]
+    fn a_line_inside_the_line_is_read_once() {
+        let read = |c: &str| {
+            let mut reading = LineReading::default();
+            let found = line_risks(c, None, None, 0, &mut reading);
+            (found, reading.started, reading.inner_read)
+        };
+        let (found, started, inner_read) = read("sh -c 'npm publish'; sh -c 'npm publish' && bash -c 'npm publish'");
+        assert!(found.iter().any(|r| r == "publish"), "{found:?}");
+        assert_eq!((started, inner_read), (3, 1));
+        let (found, started, inner_read) = read("sh -c 'npm publish'; sh -c 'git push'");
+        assert!(found.iter().any(|r| r == "publish") && found.iter().any(|r| r == "push"), "{found:?}");
+        assert_eq!((started, inner_read), (2, 2));
     }
 }
