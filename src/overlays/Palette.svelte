@@ -44,7 +44,7 @@
   import { MODES } from '../home/LeadControls.svelte';
   import { findInConversation } from '../home/FindBar.svelte';
   import {
-    ROOM_WORDS, SAID, SAID_FROM, SAID_MOST, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, offersAsk, okRow, press, rankRows, saidBy, saidWhere, snippet, wants, type SaidNames,
+    ROOM_WORDS, SAID, SAID_FROM, SAID_MOST, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, offersAsk, okRow, press, rankRows, saidBy, saidOpens, saidWhere, seedOf, snippet, wants, type SaidNames,
   } from './palette';
 
   type Scope = '>' | '@' | '#' | '/' | '+' | null;
@@ -90,11 +90,11 @@
   let armed = $state<string | null>(null);
 
   // Seed (⌘N → "+", ui.openPalette('>') …)
-  const seed = ui.paletteSeed;
-  if (seed && '>@#/+'.includes(seed[0])) {
-    scope = seed[0] as Scope;
-    query = seed.slice(1);
-  } else query = seed;
+  // A plain seed (the find bar's text) stays plain while it is in the field.
+  let plain = ui.paletteSeed.plain;
+  const seed = seedOf(ui.paletteSeed.text, plain);
+  scope = seed.scope as Scope;
+  query = seed.query;
 
   const RECENT_KEY = 'codly.palette.recents';
   let recents: string[] = [];
@@ -114,7 +114,7 @@
 
   function close() {
     ui.paletteOpen = false;
-    ui.paletteSeed = '';
+    ui.paletteSeed = { text: '', plain: false };
   }
   /** Go to the request's card and open its note field: the "no" is sent from there, with your note. */
   function openDenyNote(ap: Approval) {
@@ -260,7 +260,8 @@
   $effect(() => {
     const q = query.trim();
     saidError = null;
-    if (scope || q.length < SAID_FROM) {
+    // With no repository open there is nothing to search (⌘K works on the welcome screen too).
+    if (scope || q.length < SAID_FROM || !store.workspace) {
       ++saidSeq;
       said = [];
       return;
@@ -294,12 +295,13 @@
   const saidRows = $derived.by((): Scored[] => {
     const q = query.trim();
     return said
-      .map((m) => ({ m, s: snippet(m.text, q) }))
+      .map((m) => ({ m, s: snippet(m.text, q, SAID_WIDTH) }))
       .filter((x) => x.s.hits.length)
       .slice(0, SAID_MOST)
       .map(({ m, s }) => ({
-        id: `said:${m.id}`, section: SAID, title: s.line, hits: s.hits, sub: `${saidWhere(m.thread, names)} · ${saidBy(m.author, names)}`, icon: 'chat', hint: 'Open',
-        run: () => openSaid(m.thread, q),
+        // Who first: a long place name is the part that may be cut.
+        id: `said:${m.id}`, section: SAID, title: s.line, hits: s.hits, sub: `${saidBy(m.author, names)} · ${saidWhere(m.thread, names)}`, icon: 'chat',
+        ...(saidOpens(m.thread, names) ? { hint: 'Open', run: () => openSaid(m.thread, q) } : {}),
       }));
   });
 
@@ -410,9 +412,11 @@
   }
 
   function onInput() {
-    if (!scope && query.length >= 1 && '>@#/+'.includes(query[0])) {
-      scope = query[0] as Scope;
-      query = query.slice(1).trimStart();
+    if (!query) plain = false;
+    const typed = seedOf(query, plain);
+    if (!scope && typed.scope) {
+      scope = typed.scope as Scope;
+      query = typed.query.trimStart();
     } else if (!scope && query === '?') {
       close();
       ui.shortcutsOpen = true;

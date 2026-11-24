@@ -277,7 +277,7 @@
     <Icon name="search" size={14} />
     <input bind:this={input} bind:value={query} onkeydown={key} placeholder="Find in this conversation" aria-label="Find in this conversation" spellcheck="false" autocomplete="off" />
     <span class="count num" aria-live="polite">{#if query}{total ? `${current + 1} of ${total}${more ? '+' : ''}` : 'No matches'}{/if}</span>
-    {#if query.trim().length >= SAID_FROM && !total}<button class="btn ghost sm" onclick={() => ui.openPalette(query.trim())}>Search all conversations</button>{/if}
+    {#if query.trim().length >= SAID_FROM && !total}<button class="btn ghost sm" onclick={() => ui.openPalette(query.trim(), true)}>Search all conversations</button>{/if}
     <button class="icon-btn sm" disabled={!total} onclick={() => step(-1)} aria-label="Previous match" data-tip="Previous match" data-tip-kbd="⇧↵"><Icon name="chevron-up" size={14} /></button>
     <button class="icon-btn sm" disabled={!total} onclick={() => step(1)} aria-label="Next match" data-tip="Next match" data-tip-kbd="↵"><Icon name="chevron-down" size={14} /></button>
     <button class="icon-btn sm" onclick={close} aria-label="Close find" data-tip="Close" data-tip-kbd="Esc"><Icon name="x" size={14} /></button>

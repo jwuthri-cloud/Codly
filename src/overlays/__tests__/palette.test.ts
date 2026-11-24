@@ -3,7 +3,7 @@ import type { AgentDo, SlashContext } from '../../home/composerActions';
 import type { Agent } from '../../lib/gen/Agent';
 import { mkAgent } from '../../office/demo/script';
 import {
-  ROOM_WORDS, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, okRow, press, rankRows, saidBy, saidWhere, snippet, wants, type SaidNames,
+  ROOM_WORDS, SAID_WIDTH, agentGroup, askFirst, bySection, escStep, guard, inCliOrder, noRow, okRow, press, rankRows, saidBy, saidOpens, saidWhere, seedOf, snippet, wants, type SaidNames,
 } from '../palette';
 
 describe('palette sections', () => {
@@ -172,11 +172,23 @@ describe('the group "Said in conversations"', () => {
   it('says where it was said, for each kind of thread', () => {
     expect(saidWhere('lead:a', names)).toBe('Request: Fix the login page so that people who…');
     expect(saidWhere('agent:ada', names)).toBe('1:1 with Ada');
-    expect(saidWhere('agent:gone', names)).toBe('1:1 with an agent');
+    expect(saidWhere('agent:gone', names)).toBe('1:1 with an agent who left: not open to read');
     expect(saidWhere('closed:lead:b:900', names)).toBe('Closed request: Add a bye file');
     expect(saidWhere('closed:lead:c:500', names)).toBe('Closed request');
     // A request with no message from you is its Lead's conversation.
     expect(saidWhere('lead', names)).toBe('Lead');
+  });
+
+  it('opens a 1:1 chat only while its agent is in the office', () => {
+    expect(saidOpens('agent:ada', names)).toBe(true);
+    expect(saidOpens('agent:gone', names)).toBe(false);
+    expect([saidOpens('lead:a', names), saidOpens('closed:lead:c:500', names), saidOpens('lead', names)]).toEqual([true, true, true]);
+  });
+
+  it('keeps the line short enough to leave room for who and where', () => {
+    const s = snippet(`${'word '.repeat(30)}needle ${'word '.repeat(30)}`, 'needle', SAID_WIDTH);
+    expect(s.line.length).toBeLessThanOrEqual(SAID_WIDTH + 2);
+    expect(marked(s)).toBe('needle');
   });
 
   it('says who said it', () => {
@@ -269,5 +281,20 @@ describe('palette keys', () => {
     expect(guard({ askFirst: askFirst(3) }, true, false)).toBeUndefined();
     // A row that cannot be taken back asks however it was taken.
     expect(guard({ confirm: 'Merge?' }, false, false)).toBe('Merge?');
+  });
+});
+
+describe('the palette seed', () => {
+  it('a first > @ # / + picks a scope', () => {
+    expect(seedOf('>theme', false)).toEqual({ scope: '>', query: 'theme' });
+    expect(seedOf('+', false)).toEqual({ scope: '+', query: '' });
+    expect(seedOf('merge', false)).toEqual({ scope: null, query: 'merge' });
+    expect(seedOf('', false)).toEqual({ scope: null, query: '' });
+  });
+
+  it('text from the find bar is searched as it is', () => {
+    expect(seedOf('/api/login', true)).toEqual({ scope: null, query: '/api/login' });
+    expect(seedOf('@Ada', true)).toEqual({ scope: null, query: '@Ada' });
+    expect(seedOf('+page.svelte', true)).toEqual({ scope: null, query: '+page.svelte' });
   });
 });

@@ -194,7 +194,7 @@ export function saidWhere(thread: string, names: SaidNames): string {
     return title ? `Closed request: ${firstWords(title)}` : 'Closed request';
   }
   const agent = threadAgentId(thread);
-  if (agent) return `1:1 with ${names.agent(agent) ?? 'an agent'}`;
+  if (agent) return `1:1 with ${names.agent(agent) ?? 'an agent who left: not open to read'}`;
   const title = isRequestThread(thread) ? names.request(thread) : null;
   return title ? `Request: ${firstWords(title)}` : 'Lead';
 }
@@ -204,6 +204,25 @@ export function saidBy(author: string, names: SaidNames): string {
   if (author === 'user') return 'You';
   if (author === 'codly') return 'Codly';
   return names.agent(author) ?? 'An agent';
+}
+
+/** A 1:1 chat opens only while its agent is in the office: one who left has no conversation to show. */
+export function saidOpens(thread: string, names: SaidNames): boolean {
+  const agent = threadAgentId(thread);
+  return !agent || names.agent(agent) !== null;
+}
+
+/** How wide a found message's line is in its row: room stays for who said it and where. */
+export const SAID_WIDTH = 44;
+
+/**
+ * The palette's scope and text from what it was opened with, or from what you typed: a first
+ * `> @ # / +` picks a scope, unless the text is `plain` (searched as it is, like "/api/login"
+ * sent by the find bar).
+ */
+export function seedOf(text: string, plain: boolean): { scope: string | null; query: string } {
+  if (!plain && text && '>@#/+'.includes(text[0])) return { scope: text[0], query: text.slice(1) };
+  return { scope: null, query: text };
 }
 
 /** Lower case for ASCII letters only, as the core's search compares: the length never changes. */

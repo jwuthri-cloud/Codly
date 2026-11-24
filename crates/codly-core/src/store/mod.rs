@@ -994,7 +994,7 @@ impl Store {
             return Ok(vec![]);
         }
         let pattern = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-        let conn = self.conn();
+        let conn = self.read();
         let mut found = conn.prepare_cached(CHAT_SEARCH_SQL)?;
         let rows = found.query_map(params![workspace_id, pattern, limit as i64], |r| r.get::<_, String>(0))?;
         decode_all(rows)
@@ -1238,8 +1238,9 @@ const CLOSED_TITLE_SQL: &str = "SELECT substr(json_extract(json, '$.text'), 1, 3
 const CHAT_COUNT_SQL: &str = "SELECT COUNT(*) FROM chat WHERE workspace_id IS ?1 AND thread = ?2";
 
 /// The newest ?3 messages of a workspace whose text is LIKE ?2 (SQLite's LIKE ignores ASCII
-/// case; `\` escapes the query's own `%` and `_`). It reads every message of the workspace:
-/// there is no text index on the chat table.
+/// case; `\` escapes the query's own `%` and `_`). It reads every message of the workspace
+/// (there is no text index on the chat table), so it runs on the read connection: ingest and
+/// the other writes do not wait for it.
 const CHAT_SEARCH_SQL: &str = "SELECT json FROM chat
      WHERE workspace_id IS ?1 AND json_extract(json, '$.text') LIKE ?2 ESCAPE '\\' ORDER BY ts DESC, rowid DESC LIMIT ?3";
 
