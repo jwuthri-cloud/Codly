@@ -1,6 +1,8 @@
 // Send back from the Changes room to agents at work: a 1:1 agent's comments go to its 1:1 chat,
-// and a running plan's comments go to the workers of the tasks that wrote their files, with only
-// the rest in a new request. A refused call keeps its comments on the diff.
+// a running plan's comments go to the workers of the tasks that wrote their files, and the rest
+// wait on the diff until the plan is done. On a finished plan that is not merged, the comments
+// become one more task of the plan; on a merged one, a new request. A refused call keeps its
+// comments on the diff.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../api';
 import type { Agent } from '../gen/Agent';
@@ -89,7 +91,7 @@ describe('Send back on the diff of a plan that still runs', () => {
     review.comment(key, fileAnchor('c.md'), 'One more example.');
   };
 
-  it('gives each running task its comments, one call per task, and puts the done task’s in a new request', async () => {
+  it('gives each running task its comments, one call per task, and keeps the done task’s on the diff until the plan is done', async () => {
     setUp();
     const core = vi.spyOn(api, 'sendBackTask').mockImplementation(async (id) => ({ ...tasks.find((t) => t.id === id)!, status: 'changes_requested' }));
     expect(await sendBack(target, all)).toBe(true);
@@ -97,13 +99,10 @@ describe('Send back on the diff of a plan that still runs', () => {
       ['t1', ['`a.ts`', '`a.ts:3`']],
       ['t2', ['`b.ts`']],
     ]);
-    // The new request names only the comment no worker took.
-    expect(ui.draftRequests).toHaveLength(1);
-    expect(ui.composerSeed?.text).toContain('Review comments (1):');
-    expect(ui.composerSeed?.text).toContain('`c.md`');
-    expect(ui.composerSeed?.text).not.toContain('a.ts');
+    // The comment on Cy's finished work is not a new request on the plan's branch: it waits for the plan.
+    expect(ui.draftRequests).toEqual([]);
     expect(paths(key)).toEqual(['c.md']);
-    expect(shown()).toEqual([['success', 'Comments sent back', '2 comments to Ada (t1), 1 to Bo (t2); 1 is in a new request']]);
+    expect(shown()).toEqual([['success', 'Comments sent back', '2 comments to Ada (t1), 1 to Bo (t2); 1 stays here until the plan is done']]);
   });
 
   it('a refused call keeps its comments on the diff, and the toast says why', async () => {
@@ -116,7 +115,7 @@ describe('Send back on the diff of a plan that still runs', () => {
     expect(paths(key).sort()).toEqual(['a.ts', 'a.ts', 'c.md']);
     expect(shown()).toEqual([
       ['error', 'Couldn’t send your comments back to t1', 't1 is merging — your comments stay on the diff.'],
-      ['success', 'Comments sent back', '1 comment to Bo (t2); 1 is in a new request'],
+      ['success', 'Comments sent back', '1 comment to Bo (t2); 1 stays here until the plan is done'],
     ]);
   });
 
@@ -128,9 +127,11 @@ describe('Send back on the diff of a plan that still runs', () => {
       store.taskMarks = { t1: committed(['a.ts']), t3: committed(['a.ts', 'c.md']) };
       store.live = { w1: { files: { 'a.ts': { modified: true } } } } as unknown as typeof store.live;
       const core = vi.spyOn(api, 'sendBackTask');
-      expect(await sendBack(target, all)).toBe(true);
+      // a.ts is Cy's finished work: its comments wait for the plan with the others.
+      expect(await sendBack(target, all)).toBe(false);
       expect(core, order.join(',')).not.toHaveBeenCalled();
-      expect(ui.composerSeed?.text).toContain('`a.ts:3`');
+      expect(paths(key).sort()).toEqual(['a.ts', 'a.ts', 'b.ts', 'c.md']);
+      expect(ui.draftRequests).toEqual([]);
       review.clear(key);
       vi.restoreAllMocks();
     }
@@ -147,13 +148,100 @@ describe('Send back on the diff of a plan that still runs', () => {
     expect(paths(key).sort()).toEqual(['b.ts', 'c.md']);
   });
 
-  it('with no task at work, everything goes to the new request as before', async () => {
+  it('with no task at work, nothing goes yet: the comments wait for the plan, and no request opens', async () => {
     setUp();
     store.tasks = tasks.map((t) => ({ ...t, status: 'done' }));
     const core = vi.spyOn(api, 'sendBackTask');
+    const plan = vi.spyOn(api, 'sendBackPlan');
+    expect(await sendBack(target, all)).toBe(false);
+    expect(core).not.toHaveBeenCalled();
+    expect(plan).not.toHaveBeenCalled();
+    expect(ui.draftRequests).toEqual([]);
+    expect(paths(key)).toHaveLength(4);
+    expect(shown()).toEqual([['info', 'Your comments stay here for now', 'The plan is still running. When it is done, Send back makes them one more task of it.']]);
+  });
+
+  it('a comment on a done task’s diff of a running plan waits too', async () => {
+    setUp();
+    const done = { kind: 'task' as const, id: 't3' };
+    review.comment(reviewKey(done), fileAnchor('c.md'), 'One more example.');
+    const plan = vi.spyOn(api, 'sendBackPlan');
+    expect(await sendBack(done, ['c.md'])).toBe(false);
+    expect(plan).not.toHaveBeenCalled();
+    expect(ui.draftRequests).toEqual([]);
+    expect(review.comments(reviewKey(done))).toHaveLength(1);
+    review.clear(reviewKey(done));
+  });
+});
+
+describe('Send back on the diff of a finished plan', () => {
+  const target = { kind: 'plan' as const, id: 'p1' };
+  const key = reviewKey(target);
+  const plan = { id: 'p1', summary: 'Add search', status: 'done', thread: 'lead', integration_branch: 'codly/ab12/integration', merged_sha: null, kept: false } as Plan;
+  const tasks = [
+    { id: 't1', key: 't1', title: 'Index', plan_id: 'p1', status: 'done', assignee: 'w1' },
+    { id: 't2', key: 't2', title: 'Box', plan_id: 'p1', status: 'done', assignee: 'w2' },
+  ] as Task[];
+  const review3 = { id: 't9', key: 'review', title: 'Changes you asked for in review', plan_id: 'p1', status: 'pending', assignee: 'w2' } as Task;
+  const all = ['a.ts', 'b.ts'];
+
+  const setUp = (p: Partial<Plan> = {}) => {
+    store.plans = [{ ...plan, ...p }];
+    store.tasks = tasks;
+    store.agents = [{ id: 'w1', name: 'Ada' }, { id: 'w2', name: 'Bo' }] as Agent[];
+    review.comment(key, fileAnchor('b.ts'), 'Wider box.');
+    review.comment(key, { path: 'b.ts', line: 3, side: 'new', quote: '+const w = 1;' }, 'Why one?');
+  };
+
+  it('makes the comments one more task of the plan: one call with their files, and no new request', async () => {
+    setUp();
+    const core = vi.spyOn(api, 'sendBackPlan').mockResolvedValue(review3);
+    expect(await sendBack(target, all)).toBe(true);
+    expect(core).toHaveBeenCalledTimes(1);
+    const [planId, text, files] = core.mock.calls[0];
+    expect([planId, files]).toEqual(['p1', ['b.ts']]);
+    expect(text.startsWith('Review comments (2):')).toBe(true);
+    expect(ui.draftRequests).toEqual([]);
+    expect(paths(key)).toEqual([]);
+    expect(store.taskMap.get('t9')?.key).toBe('review');
+    expect(shown()).toEqual([['success', '2 comments sent back: task review for Bo, in this request', undefined]]);
+  });
+
+  it('a refusal keeps the comments on the diff, and the toast gives the core’s reason', async () => {
+    setUp();
+    vi.spyOn(api, 'sendBackPlan').mockRejectedValue(new Error('the plan is still running; send your comments again when it is done'));
+    expect(await sendBack(target, all)).toBe(false);
+    expect(paths(key)).toEqual(['b.ts', 'b.ts']);
+    expect(ui.draftRequests).toEqual([]);
+    expect(shown()).toEqual([['error', 'Couldn’t send your comments back', 'the plan is still running; send your comments again when it is done — your comments stay on the diff.']]);
+  });
+
+  it('when the core says they belong in a new request (an open pull request), the request opens with them', async () => {
+    setUp();
+    vi.spyOn(api, 'sendBackPlan').mockRejectedValue(new Error('this plan has an open pull request: ask for the changes in a new request'));
+    expect(await sendBack(target, all)).toBe(true);
+    expect(ui.draftRequests).toHaveLength(1);
+    expect(ui.composerSeed?.text.startsWith('I reviewed the plan “Add search”. Its work is on the branch codly/ab12/integration.')).toBe(true);
+    expect(paths(key)).toHaveLength(2);
+    expect(shown().filter(([kind]) => kind === 'error')).toEqual([]);
+  });
+
+  it('a merged plan opens the new request as before, and the core is not asked', async () => {
+    setUp({ merged_sha: 'abc' });
+    const core = vi.spyOn(api, 'sendBackPlan');
     expect(await sendBack(target, all)).toBe(true);
     expect(core).not.toHaveBeenCalled();
-    expect(ui.composerSeed?.text).toContain('Review comments (4):');
-    expect(paths(key)).toHaveLength(4);
+    expect(ui.composerSeed?.text.startsWith('I reviewed the plan “Add search”. Its work is merged.')).toBe(true);
+    expect(paths(key)).toHaveLength(2);
+  });
+
+  it('a done task’s diff sends its comments to the plan too', async () => {
+    setUp();
+    const done = { kind: 'task' as const, id: 't2' };
+    review.comment(reviewKey(done), fileAnchor('b.ts'), 'Wider box.');
+    const core = vi.spyOn(api, 'sendBackPlan').mockResolvedValue(review3);
+    expect(await sendBack(done, ['b.ts'])).toBe(true);
+    expect(core.mock.calls.map(([id, , files]) => [id, files])).toEqual([['p1', ['b.ts']]]);
+    expect(review.comments(reviewKey(done))).toEqual([]);
   });
 });

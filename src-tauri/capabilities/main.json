@@ -69,6 +69,7 @@
     "allow-task-diff",
     "allow-plan-diff",
     "allow-send-back-task",
+    "allow-send-back-plan",
     "allow-merge-plan",
     "allow-merge-plan-warning",
     "allow-undo-merge",

@@ -401,7 +401,7 @@ enum Owner {
 }
 
 impl Inner {
-    fn pull_request(&self, source: &PrSource) -> Result<Option<PullRequest>> {
+    pub(super) fn pull_request(&self, source: &PrSource) -> Result<Option<PullRequest>> {
         Ok(self.store.kv_get(&source.key())?.map(|v| serde_json::from_str(&v)).transpose()?)
     }
 

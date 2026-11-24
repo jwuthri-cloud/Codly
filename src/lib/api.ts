@@ -410,6 +410,7 @@ export const api = {
   /** Send back: the review comments on a task's diff, as one message, go to the agent that did the work.
    *  Refused for a done task (its work is merged: the changes are a new request). */
   sendBackTask: (taskId: string, comments: string) => call<Task>('send_back_task', { taskId, comments }),
+  sendBackPlan: (planId: string, comments: string, files: string[]) => call<Task>('send_back_plan', { planId, comments, files }),
   /** Merge a plan into your checked-out branch. `into`: the branch you confirmed after `mergePlanWarning`.
    *  When your branch has commits the plan was never checked with, the plan's checks run on the merge
    *  result first and a failure stops the merge; `unchecked`: you merge without them. */

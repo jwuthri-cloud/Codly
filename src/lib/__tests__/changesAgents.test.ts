@@ -105,8 +105,12 @@ describe('Send back on a plan that still runs', () => {
       { n: 2, who: 'Ada', key: 't1' },
       { n: 1, who: 'Bo', key: 't2' },
     ];
-    expect(splitWords(parts, 1, true)).toBe('2 comments to Ada (t1), 1 to Bo (t2); 1 is in a new request');
-    expect(splitWords(parts, 2, false)).toBe('2 comments to Ada (t1), 1 to Bo (t2); 2 go to a new request');
-    expect(splitWords([{ n: 1, who: 'Bo', key: 't2' }], 0, true)).toBe('1 comment to Bo (t2)');
+    // On a plan that still runs, the rest wait for it to finish.
+    expect(splitWords(parts, 1, true, 'wait')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 1 stays here until the plan is done');
+    expect(splitWords(parts, 2, false, 'wait')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 2 wait until the plan is done');
+    expect(splitWords([{ n: 1, who: 'Bo', key: 't2' }], 0, true, 'wait')).toBe('1 comment to Bo (t2)');
+    // Elsewhere: they go where the finished work goes.
+    expect(splitWords(parts, 1, true, 'request')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 1 is in a new request');
+    expect(splitWords(parts, 2, false, 'plan')).toBe('2 comments to Ada (t1), 1 to Bo (t2); 2 go to one more task of this plan');
   });
 });

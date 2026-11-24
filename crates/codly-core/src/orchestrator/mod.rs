@@ -85,6 +85,7 @@ pub mod trust;
 mod background;
 mod outside;
 pub mod resume;
+mod review_back;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -1034,9 +1035,20 @@ impl Core {
     /// and line, the quoted line, the comment) go to the agent that did the work. A worker
     /// still on the task reads them after its current turn and the gate checks its work again;
     /// a blocked or failed task starts again with them. Refused for a done task: its work is
-    /// merged, so the changes are a new request.
+    /// merged into its plan, so the comments go on the plan (`send_back_plan`), or, once the
+    /// plan is in your branch, into a new request.
     pub async fn send_back_task(&self, task_id: &str, comments: &str) -> anyhow::Result<Task> {
         self.inner.send_back_task(task_id, comments).await
+    }
+
+    /// Send back, from a finished plan's diff: your review comments (`comments`, the one
+    /// message Send back builds; `files`, the files they are on) become one more task of the
+    /// plan, for the agent that wrote most of those files. It works on the plan's own branch,
+    /// in the plan's worktree, and the plan finishes again with its checks; if it does not
+    /// finish, the plan is as it was. Refused for a plan that is merged, still running, or has
+    /// an open pull request: those comments are a new request, and the refusal says so.
+    pub async fn send_back_plan(&self, plan_id: &str, comments: &str, files: &[String]) -> anyhow::Result<Task> {
+        self.inner.send_back_plan(plan_id, comments, files).await
     }
 
     /// Merge the plan's integration branch into the user's current branch (refuses if the

@@ -217,9 +217,12 @@ pub(super) fn in_place(task: &Task, plan: &Plan) -> Option<(String, PathBuf)> {
 /// the plan's checks pass on the merge with it.
 const RESOLVE: &str = "resolve";
 const FIX_CHECKS: &str = "fix-checks";
+/// The key of a task that makes the changes the user asked for in a review of the finished
+/// plan (`review_back.rs`): no merge is made for it.
+pub(super) const REVIEW: &str = "review";
 
 /// "resolve", then "resolve-2"…: a plan can need this more than once.
-fn next_key(tasks: &[Task], stem: &str) -> String {
+pub(super) fn next_key(tasks: &[Task], stem: &str) -> String {
     let mut n = 1;
     loop {
         let key = if n == 1 { stem.to_string() } else { format!("{stem}-{n}") };
@@ -234,6 +237,11 @@ fn next_key(tasks: &[Task], stem: &str) -> String {
 /// Else, of the tasks that work on their plan's own branch, it resolves a conflict.
 fn fixes_checks(task: &Task) -> bool {
     task.key.starts_with(FIX_CHECKS)
+}
+
+/// Does this task make the changes the user asked for in review (`review_back.rs`)?
+fn answers_review(task: &Task) -> bool {
+    task.key.starts_with(REVIEW)
 }
 
 /// What the reviewer of a task that worked on its plan's own branch reads after the brief: the
@@ -251,9 +259,20 @@ const FIX_REVIEW_NOTE: &str = "\n\nAbout the diff: this task worked on the plan'
      What the merge brought in is the user's own work: it is not in the diff and not for review. Check that the change \
      makes the plan's checks pass and keeps what both sides changed.";
 
+/// For a task that made the changes the user asked for in review: no merge was made, so the
+/// diff is the task's own commits.
+const ASKED_REVIEW_NOTE: &str = "\n\nAbout the diff: this task worked on the plan's finished branch; the diff is what it changed there, \
+     not the plan's whole work.";
+
 /// The note for the reviewer of `task`, which worked on its plan's own branch.
 pub(super) fn review_note(task: &Task) -> &'static str {
-    if fixes_checks(task) { FIX_REVIEW_NOTE } else { RESOLVE_REVIEW_NOTE }
+    if answers_review(task) {
+        ASKED_REVIEW_NOTE
+    } else if fixes_checks(task) {
+        FIX_REVIEW_NOTE
+    } else {
+        RESOLVE_REVIEW_NOTE
+    }
 }
 
 /// Why no agent takes the work that is left on a cancelled plan. `fix_checks`: that work is a
@@ -264,7 +283,7 @@ fn cancelled_refusal(fix_checks: bool) -> String {
 }
 
 /// What both briefs say about the new files that were in the plan's worktree before the task.
-const NOT_COMMITTED: &str = "Files that were in this worktree before you started and are on no branch are not committed.";
+pub(super) const NOT_COMMITTED: &str = "Files that were in this worktree before you started and are on no branch are not committed.";
 
 fn resolve_goal(target: &str, files: &[String]) -> String {
     format!(
@@ -604,6 +623,12 @@ impl Inner {
                     ),
                 )
             }
+            // The task made the changes you asked for in review: no merge was made for it.
+            (None, _) if task.as_ref().is_some_and(answers_review) => (
+                format!("the changes you asked for in review did not finish: {branch} is back where it was before them"),
+                "The changes you asked for in review were not finished. Codly took them back: the plan's branch is as its tasks left it."
+                    .to_string(),
+            ),
             // The task resolved a conflict, or it made the checks pass on a merge without one.
             (None, false) => (
                 format!("the conflict resolution did not finish: {branch} is back where it was before it"),
@@ -694,7 +719,7 @@ impl Inner {
     /// One more task of a finished plan starts on the plan's own branch, in the plan's
     /// worktree. If it does not finish, the plan goes back to where it is now
     /// (`settle_resolution`): its branch at `before`, and no new file but those in `untracked`.
-    fn add_in_place(&self, ws_id: Option<&str>, plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Result<()> {
+    pub(super) fn add_in_place(&self, ws_id: Option<&str>, plan: &Plan, task: &Task, before: &str, untracked: Vec<String>) -> Result<()> {
         let undo = Resolution {
             task: task.id.clone(),
             tip: before.into(),
@@ -1162,7 +1187,7 @@ impl Inner {
 
     /// The plan's verify commands: those of every finished task that passed when the task was
     /// checked, then the plan's integration checks. Each once.
-    fn plan_verify_commands(&self, plan: &Plan) -> Result<Vec<String>> {
+    pub(super) fn plan_verify_commands(&self, plan: &Plan) -> Result<Vec<String>> {
         let mut checks: Vec<String> = vec![];
         for t in self.store.plan_tasks(&plan.id)?.iter().filter(|t| t.status == TaskStatus::Done && in_place(t, plan).is_none()) {
             let runs = self.store.task_events(&t.id, "verified")?;

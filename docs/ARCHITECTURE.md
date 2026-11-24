@@ -700,6 +700,7 @@ crates/codly-core/src/    the engine: no Tauri dependency
                       workspace.rs agent_git.rs ide.rs    open a repo, snapshot, merge, commit, push; Git tab; IDE facade
                       pull_request.rs                     the pull-request step: push a Codly branch, `gh pr create`, checks
                       merge_conflict.rs                   a merge that cannot go straight in: conflict files, an agent resolves it, checks on the merge result
+                      review_back.rs                      review comments on a finished plan: one more task of it, for the agent that wrote the files
                       intake.rs                           a request from a GitHub issue or pull request, read with `gh`
                       preview.rs                          try work before a merge: your command in a plan's or an agent's worktree
                       checkpoints.rs                      an agent's files before each turn (private refs); restore

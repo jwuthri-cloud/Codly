@@ -12,13 +12,16 @@
   const picked = $derived(ui.diffTarget && (ui.diffTarget.kind === 'plan' ? ui.diffTarget.id : store.taskMap.get(ui.diffTarget.id)?.plan_id));
   const plan = $derived(ui.diffTarget ? ((picked && store.planMap.get(picked)) || null) : (store.planOf(ui.request) ?? store.activePlan));
   const stat = $derived(plan ? (diffstats.plan[plan.id] ?? null) : null);
+  // A 1:1 agent's diff: the room is named after the agent.
+  const agent = $derived(ui.diffTarget?.kind === 'agent' ? (store.agentMap.get(ui.diffTarget.id) ?? null) : null);
+  const inFolder = $derived(!!agent?.worktree && agent.worktree === store.workspace?.repo_path);
 </script>
 
 <div class="changes">
-  <RoomHead eyebrow="Changes" title={ui.changesLens === 'artifacts' ? 'What the agents made' : (plan?.summary ?? 'What changed')}>
+  <RoomHead eyebrow="Changes" title={ui.changesLens === 'artifacts' ? 'What the agents made' : (agent?.name ?? plan?.summary ?? 'What changed')}>
     {#snippet sub()}
       {#if ui.changesLens === 'diffs'}
-        <span class="num">{stat ? `${statLine(stat)} on the integration branch` : 'Diffs from each task’s worktree and the plan’s integration branch'}</span>
+        <span class="num">{agent ? (inFolder ? 'Every uncommitted change in your project folder, your own edits included' : `What ${agent.name} changed in its own worktree`) : stat ? `${statLine(stat)} on the integration branch` : 'Diffs from each task’s worktree and the plan’s integration branch'}</span>
       {:else}
         <span>{store.artifacts.length} {store.artifacts.length === 1 ? 'artifact' : 'artifacts'} · opened safely: scripts stay off unless you allow them</span>
       {/if}

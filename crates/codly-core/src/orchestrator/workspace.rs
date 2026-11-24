@@ -527,8 +527,9 @@ impl Inner {
     ///   Changes requested, and the gate checks the work again when that turn ends. A review
     ///   that is under way stops: it reads the work as it was before.
     /// - The task is stopped (blocked, failed) or waits to start: its next run starts with them.
-    /// New work you asked for gets new fix rounds. A done task takes none: its work is merged,
-    /// so the changes are a new request.
+    /// New work you asked for gets new fix rounds. A done task takes none: its work is merged
+    /// into its plan, so the comments go on the plan (`send_back_plan`), or, once the plan is
+    /// in your branch, into a new request.
     pub(super) async fn send_back_task(&self, task_id: &str, comments: &str) -> anyhow::Result<Task> {
         use TaskStatus::*;
         let comments = comments.trim();
@@ -543,7 +544,16 @@ impl Inner {
         let open = |s: TaskStatus| matches!(s, Running | ChangesRequested | Verifying | Reviewing);
         let worker = t.assignee.clone().filter(|a| lock(&self.live).get(a).is_some_and(|l| l.task_id.as_deref() == Some(task_id) && !l.stopping));
         let (sent, how) = match (t.status, worker) {
-            (Done, _) => bail!("{} is done and its work is merged; ask for the changes in a new request", t.key),
+            (Done, _) => {
+                let plan = t.plan_id.as_deref().map(|p| self.plan(p)).transpose()?.filter(|p| p.merged_sha.is_none() && !p.kept);
+                match plan.map(|p| p.status) {
+                    Some(PlanStatus::Done) => bail!("{} is done; send your comments on the plan and they become one more task of it", t.key),
+                    Some(PlanStatus::Running | PlanStatus::Integrating) => {
+                        bail!("{} is done; send your comments on the plan when it is finished, and they become one more task of it", t.key)
+                    }
+                    _ => bail!("{} is done and its work is merged; ask for the changes in a new request", t.key),
+                }
+            }
             (Cancelled, _) => bail!("{} is cancelled; reopen it first", t.key),
             (Pending, _) => bail!("{} has not started yet", t.key),
             (s, Some(worker)) if open(s) => {

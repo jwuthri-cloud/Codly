@@ -254,6 +254,13 @@ pub async fn send_back_task(state: State<'_, AppState>, task_id: String, comment
     state.core().await?.send_back_task(&task_id, &comments).await.map_err(err)
 }
 
+/// Send back, from a finished plan's diff: the review comments (on `files`) become one more
+/// task of the plan, for the agent that wrote those files.
+#[tauri::command]
+pub async fn send_back_plan(state: State<'_, AppState>, plan_id: String, comments: String, files: Vec<String>) -> R<Task> {
+    state.core().await?.send_back_plan(&plan_id, &comments, &files).await.map_err(err)
+}
+
 /// `into`: the branch the user confirmed after `merge_plan_warning`. `unchecked`: the user
 /// merges without the plan's checks on the merge result (they failed, and the user goes on).
 #[tauri::command]

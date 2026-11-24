@@ -12,8 +12,8 @@ import { toasts } from '../state/toasts.svelte';
 import { ui } from '../state/ui.svelte';
 import { parseDiff, type DiffFile } from '../util/diff';
 import {
-  discardWords, editorPlace, fileAnchor, fileMark, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
-  inTurn, linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewBarWords, reviewMessage, turnReadKey, withComment, type ReviewComment,
+  discardWords, editorPlace, fileAnchor, fileMark, finishedWorkGoes, firstLines, followUpRequest, heavy, inOrder, LARGE_FILE, lineAnchor, lineCount, linePlace,
+  inTurn, linesToDraw, offDiff, parseDiffKeeping, placeComments, placeId, reviewBarWords, reviewMessage, sendBackBarWords, turnReadKey, withComment, type ReviewComment,
 } from '../util/review';
 
 const A = `diff --git a/src/a.ts b/src/a.ts
@@ -165,6 +165,24 @@ describe('what the review bar says', () => {
     expect(reviewBarWords(3, null, null)).toBe('This work is finished: Send back opens a new request with your comments, ready to send.');
     expect(reviewBarWords(1, null, 1)).toBe('It is in a new request, ready to send, and stays here until you send its message. Send back opens that request.');
     expect(reviewBarWords(2, null, 2)).toBe('They are in a new request, ready to send, and stay here until you send its message. Send back opens that request.');
+  });
+
+  it('says where Send back takes them: a task at work, a running plan, a finished plan, a merged plan', () => {
+    const plan = { status: 'done', merged_sha: null, kept: false } as Plan;
+    const running = finishedWorkGoes({ ...plan, status: 'running' });
+    const finished = finishedWorkGoes(plan);
+    const merged = finishedWorkGoes({ ...plan, merged_sha: 'abc' });
+    expect([running, finished, merged, finishedWorkGoes({ ...plan, kept: true }), finishedWorkGoes({ ...plan, status: 'failed' }), finishedWorkGoes(null)]).toEqual(['wait', 'plan', 'request', 'request', 'request', 'request']);
+    // A task at work: its worker gets them, whatever the plan.
+    expect(sendBackBarWords(2, 'Ana', running, null)).toBe('Send back gives them to Ana; Codly checks the work again after the changes.');
+    expect(sendBackBarWords(2, null, running, null)).toBe('This plan is still running: when it is done, Send back makes them one more task of it, for the agent that wrote these files.');
+    expect(sendBackBarWords(1, null, finished, null)).toBe('Send back makes it one more task of this plan, for the agent that wrote these files.');
+    expect(sendBackBarWords(3, null, finished, null)).toBe('Send back makes them one more task of this plan, for the agent that wrote these files.');
+    // Merged: the words of a new request, as before.
+    expect(sendBackBarWords(1, null, merged, null)).toBe(reviewBarWords(1, null, null));
+    expect(sendBackBarWords(2, null, merged, 2)).toBe(reviewBarWords(2, null, 2));
+    // A finished plan whose comments the core put in a request (it has a pull request): that request.
+    expect(sendBackBarWords(2, null, finished, 1)).toBe(reviewBarWords(2, null, 1));
   });
 
   it('after Send back, a comment written or changed since is counted apart: it is not in the request yet', () => {
